@@ -8,6 +8,43 @@ DALI is a native macOS app for playing Mac audio through multiple AirPlay speake
 
 > **Developer preview.** Source and extension packages are available. A signed, notarized Mac download and Chrome Web Store distribution are not available yet. Apple Silicon is the current engine target. Physical speaker timing and live platform compatibility need broader testing.
 
+## See the app
+
+Room playback, speaker levels, and the current audio source in one compact window.
+
+<p align="center">
+  <a href="docs/images/dali-main-window.png"><img src="docs/images/dali-main-window.png" width="340" alt="DALI playing room audio, with front and back speaker levels and a Spotify now-playing row"></a>
+</p>
+
+### Guided setup
+
+A short setup flow in the same style as the app. Click any screen to see it at full size.
+
+<table>
+  <tr>
+    <td align="center"><strong>Welcome</strong></td>
+    <td align="center"><strong>Allow Mac audio</strong></td>
+    <td align="center"><strong>Choose speakers</strong></td>
+  </tr>
+  <tr>
+    <td><a href="docs/images/onboarding-1-welcome.png"><img src="docs/images/onboarding-1-welcome.png" width="240" alt="Welcome to DALI with a Set up DALI button"></a></td>
+    <td><a href="docs/images/onboarding-2-system-audio.png"><img src="docs/images/onboarding-2-system-audio.png" width="240" alt="Audio permission step with a draggable DALI app card and Open System Settings button"></a></td>
+    <td><a href="docs/images/onboarding-3-your-speakers.png"><img src="docs/images/onboarding-3-your-speakers.png" width="240" alt="Select multiple AirPlay speakers for room audio"></a></td>
+  </tr>
+</table>
+<table>
+  <tr>
+    <td align="center"><strong>Optional video sync</strong></td>
+    <td align="center"><strong>Ready to play</strong></td>
+  </tr>
+  <tr>
+    <td><a href="docs/images/onboarding-4-video-sync.png"><img src="docs/images/onboarding-4-video-sync.png" width="280" alt="Optional Chrome companion setup with two installation steps"></a></td>
+    <td><a href="docs/images/onboarding-5-ready.png"><img src="docs/images/onboarding-5-ready.png" width="280" alt="Setup completion with selected speaker count and Open DALI button"></a></td>
+  </tr>
+</table>
+
+[View the full UI gallery, including settings →](docs/ui-tour.md)
+
 ## What it does
 
 - Sends system audio, or audio from a selected app, to your AirPlay speakers.
@@ -15,11 +52,6 @@ DALI is a native macOS app for playing Mac audio through multiple AirPlay speake
 - Keeps the existing compact dark interface, with guided setup for new users.
 - Gives supported HTML video players a matching picture delay, with recovery when the app reconnects or a feed changes clips.
 - Keeps audio and playback status local. No DALI account or subscription.
-
-<p align="center">
-  <img src="docs/images/onboarding-1-welcome.png" width="280" alt="DALI macOS welcome screen with a compact dark typographic layout">
-  <img src="docs/images/onboarding-3-your-speakers.png" width="280" alt="Choose multiple AirPlay speakers during DALI setup">
-</p>
 
 ## Video compatibility
 
