@@ -6,6 +6,8 @@ DALI is an open-source macOS app for **multi-room AirPlay audio**. Send your Mac
 
 For watching videos, the optional **DALI Video Sync** Chrome extension delays supported web video to match the room’s audio.
 
+*Vibe-coded slop, but it works.*
+
 [Preview release](https://github.com/fortun8te/dali/releases/tag/v1.2.0-preview.1) · [Setup](docs/getting-started.md) · [Build from source](docs/building.md) · [Privacy](PRIVACY.md) · [Report an issue](https://github.com/fortun8te/dali/issues)
 
 > **Developer preview.** Source and extension packages are available. A signed, notarized Mac download and Chrome Web Store distribution are not available yet. Apple Silicon is the current engine target. Physical speaker timing and live platform compatibility need broader testing.
