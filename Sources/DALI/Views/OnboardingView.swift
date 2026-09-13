@@ -23,6 +23,8 @@ struct OnboardingView: View {
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var actionError: String?
+    @State private var audioSettingsOpened = false
+    @State private var browserSetupOpened = false
     @State private var helper = AudioPermissionHelper()
 
     private var selectedCount: Int { speakers.filter { $0.selected && $0.available }.count }
@@ -30,7 +32,7 @@ struct OnboardingView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             header
-            progress.padding(.top, 18).padding(.bottom, 27)
+            progress.padding(.top, 16).padding(.bottom, 24)
             ScrollView {
                 VStack(alignment: .leading, spacing: 19) {
                     page
@@ -51,7 +53,7 @@ struct OnboardingView: View {
         .padding(.horizontal, 28)
         .padding(.top, 32)
         .padding(.bottom, 26)
-        .frame(width: 420, height: state.step == .welcome || state.step == .ready ? 470 : 660)
+        .frame(width: 420, height: state.step == .welcome || state.step == .ready ? 390 : 540)
         .background(background.ignoresSafeArea())
         .preferredColorScheme(.dark)
         .onChange(of: state.step) { _, step in
@@ -67,7 +69,7 @@ struct OnboardingView: View {
         HStack(alignment: .firstTextBaseline) {
             Text("DALI").font(.serifSection).foregroundStyle(Color.paper)
             Spacer()
-            Text(state.step.label).font(.bodySmall).foregroundStyle(Color.paper60)
+            Text("\(state.step.rawValue + 1) / \(OnboardingState.Step.allCases.count)").font(.bodySmall).foregroundStyle(Color.paper60)
         }
     }
 
@@ -94,10 +96,10 @@ struct OnboardingView: View {
 
     private var welcome: some View {
         VStack(alignment: .leading, spacing: 24) {
-            title("Your sound.\nEverywhere.", body: "Play your Mac through the AirPlay speakers you already own. Choose one speaker, or fill the room.")
+            title("Your sound.\nEverywhere.", body: "Play your Mac on one speaker or across your room.")
             HStack(spacing: 9) {
                 Image(systemName: "wifi").foregroundStyle(Color.paper60)
-                Text("Keep your Mac and speakers on the same network.")
+                Text("Mac and speakers on the same Wi-Fi.")
                     .font(.bodySmall).foregroundStyle(Color.paper60)
             }
         }
@@ -105,30 +107,23 @@ struct OnboardingView: View {
 
     private var audio: some View {
         VStack(alignment: .leading, spacing: 19) {
-            title("Let your Mac\nshare its audio.", body: "DALI needs system audio access to send sound to your speakers. Your microphone is not used.")
-            VStack(alignment: .leading, spacing: 13) {
-                instruction("1", "Open System Settings", detail: "Privacy & Security → Screen & System Audio Recording.")
-                instruction("2", "Add DALI and turn it on", detail: "Drag the app below into the list. If macOS does not accept the drop, use + and choose DALI.")
-            }
+            title("Allow Mac audio.", body: "One permission to play sound on your speakers. No microphone access needed.")
             AudioPermissionCard(preview: preview, icon: previewIcon)
-            smallAction("Open System Settings", symbol: "arrow.up.forward") {
-                guard !preview else { return }
-                let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_AudioCapture")!
-                if NSWorkspace.shared.open(url) {
-                    helper.show()
-                } else {
-                    actionError = "Open System Settings, then Privacy & Security → Screen & System Audio Recording."
-                }
-            }
-            Text("macOS may ask for permission when you first start audio. If it asks you to reopen DALI, setup will resume here.")
+            Text("In System Settings, add DALI to Screen & System Audio Recording and turn it on.")
                 .font(.bodySmall).foregroundStyle(Color.paper60)
                 .fixedSize(horizontal: false, vertical: true)
+            Text("Drag the app into the list, or use + to choose it.")
+                .font(.bodySmall).foregroundStyle(Color.paper60)
+            if audioSettingsOpened {
+                smallAction("Open settings again", symbol: "arrow.up.forward") { openAudioSettings() }
+            }
+
         }
     }
 
     private var speakerSelection: some View {
         VStack(alignment: .leading, spacing: 19) {
-            title("Make it your room.", body: "Choose the speakers you want to play together. You can change this whenever you like.")
+            title("Choose your speakers.", body: "Select one or more. You can change this later.")
             if let discoveryError {
                 VStack(alignment: .leading, spacing: 8) {
                     Text("Speakers are not available yet.").font(.bodyMedium).foregroundStyle(Color.paper)
@@ -141,7 +136,7 @@ struct OnboardingView: View {
                 VStack(spacing: 13) {
                     SpeakerIcon(kind: .pair).scaleEffect(1.15)
                     Text("Looking for AirPlay speakers…").font(.bodyMedium).foregroundStyle(Color.paper)
-                    Text("Switch your speakers on and check they are on the same Wi-Fi. Allow local network access if macOS asks.")
+                    Text("Turn them on and connect to the same Wi-Fi. Allow local network access if asked.")
                         .font(.bodySmall).foregroundStyle(Color.paper60)
                         .multilineTextAlignment(.center)
                         .fixedSize(horizontal: false, vertical: true)
@@ -183,31 +178,33 @@ struct OnboardingView: View {
 
     private var browser: some View {
         VStack(alignment: .leading, spacing: 19) {
-            title("Keep the picture\nwith the sound.", body: "Add DALI Video Sync to Chrome for YouTube, TikTok, Instagram and other video sites.")
+            title("Watch in sync.", body: "Optional. Add the Chrome extension to match video with your room audio.")
             VStack(alignment: .leading, spacing: 16) {
-                instruction("1", "Open Chrome extensions", detail: "Turn on Developer mode in the top-right corner.")
-                instruction("2", "Choose Load unpacked", detail: "Select the ChromeExtension folder opened below.")
-                instruction("3", "Play a video", detail: "Sync follows DALI when room audio is playing. Some protected videos cannot be delayed.")
+                instruction("1", "Turn on Developer mode", detail: "At the top of Chrome’s extensions page.")
+                instruction("2", "Click Load unpacked", detail: "Choose the ChromeExtension folder we open for you.")
             }
-            .padding(17).background(CardBackground())
-            HStack(spacing: 19) {
-                smallAction("Open Chrome", symbol: "arrow.up.forward") { openChrome() }
-                smallAction("Show extension", symbol: "folder") { revealExtension() }
+            if browserSetupOpened {
+                HStack(spacing: 20) {
+                    smallAction("Open Chrome again", symbol: "arrow.up.forward") { openChrome() }
+                    smallAction("Show folder", symbol: "folder") { revealExtension() }
+                }
             }
-            Text("The extension stays in one folder when DALI updates. Chrome may require Reload after its files change.")
+            Text("YouTube, TikTok, Instagram and other video sites. Some protected videos cannot be synced.")
                 .font(.bodySmall).foregroundStyle(Color.paper60)
                 .fixedSize(horizontal: false, vertical: true)
+
         }
     }
 
     private var ready: some View {
         VStack(alignment: .leading, spacing: 24) {
-            title("A little more room\nfor your music.", body: selectedCount > 0
-                  ? "\(selectedCount == 1 ? "Your speaker is" : "Your \(selectedCount) speakers are") selected. Open DALI and press Play when you are ready."
-                  : "Open DALI to choose your speakers and start room audio. Setup stays available in Settings.")
-            Text("Use your Mac's volume keys as usual. Speaker choices and your volume limit are saved for next time.")
+            title("Ready when you are.", body: selectedCount > 0
+                  ? "\(selectedCount == 1 ? "1 speaker selected" : "\(selectedCount) speakers selected"). Press Play in DALI when you’re ready."
+                  : "Choose your speakers in DALI, then press Play.")
+            Text("Your Mac’s volume keys work as usual. Setup is always available in Settings.")
                 .font(.bodySmall).foregroundStyle(Color.paper60)
                 .fixedSize(horizontal: false, vertical: true)
+
         }
     }
 
@@ -241,16 +238,47 @@ struct OnboardingView: View {
         .buttonStyle(.plain)
     }
 
+    private var primaryLabel: String {
+        switch state.step {
+        case .welcome: "Set up DALI"
+        case .audio: audioSettingsOpened ? "Continue" : "Open System Settings"
+        case .browser: browserSetupOpened ? "Continue" : "Set up Chrome"
+        case .ready: "Open DALI"
+        case .speakers: "Continue"
+        }
+    }
+
+    private func openAudioSettings() {
+        guard !preview else { return }
+        let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_AudioCapture")!
+        if NSWorkspace.shared.open(url) {
+            audioSettingsOpened = true
+            helper.show()
+        } else {
+            actionError = "Open System Settings → Privacy & Security → Screen & System Audio Recording."
+        }
+    }
+
     private var footer: some View {
         VStack(spacing: 12) {
             Button {
                 guard !preview else { return }
+                if state.step == .audio && !audioSettingsOpened { openAudioSettings(); return }
+                if state.step == .browser && !browserSetupOpened {
+                    do {
+                        let folder = try ExtensionInstaller.install()
+                        NSWorkspace.shared.activateFileViewerSelecting([folder])
+                        openChrome()
+                        browserSetupOpened = true
+                    } catch { actionError = error.localizedDescription }
+                    return
+                }
                 if state.step == .ready { finish() }
                 else { withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.2)) { state.advance() } }
             } label: {
                 HStack {
                     Spacer()
-                    Text(state.step == .ready ? "Open DALI" : state.step == .welcome ? "Get started" : "Continue")
+                    Text(primaryLabel)
                     Image(systemName: "arrow.right").font(.system(size: 11, weight: .medium))
                     Spacer()
                 }
@@ -269,9 +297,9 @@ struct OnboardingView: View {
                 }
                 Spacer()
                 if state.step == .welcome {
-                    Text("A few simple steps").foregroundStyle(Color.paper35)
+                    Text("No account needed").foregroundStyle(Color.paper35)
                 } else if state.step != .ready {
-                    Button("Set up later") { if !preview { state.advance() } }
+                    Button("Skip for now") { if !preview { state.advance() } }
                 }
             }
             .font(.bodySmall).foregroundStyle(Color.paper60).buttonStyle(.plain)

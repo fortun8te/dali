@@ -25,7 +25,7 @@ struct OnboardingSnapshot {
             let state = OnboardingState(preview: step)
             let root = OnboardingView(state: state, speakers: speakers, preview: true, previewIcon: icon)
             let view = NSHostingView(rootView: root)
-            let bounds = NSRect(x: 0, y: 0, width: 420, height: step == .welcome || step == .ready ? 470 : 660)
+            let bounds = NSRect(x: 0, y: 0, width: 420, height: step == .welcome || step == .ready ? 390 : 540)
             let window = NSWindow(contentRect: bounds, styleMask: .borderless, backing: .buffered, defer: false)
             window.appearance = NSAppearance(named: .darkAqua)
             window.contentView = view
