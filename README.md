@@ -1,12 +1,16 @@
-# DALI
+# DALI — Multi-speaker AirPlay for Mac
 
-### Your Mac's audio. Every speaker in the room.
+### Play your Mac’s audio on multiple AirPlay speakers.
 
-DALI is a native macOS app for playing Mac audio through multiple AirPlay speakers. Its companion Chrome extension delays supported web video to match the room's audio, including video feeds that move from clip to clip.
+DALI is an open-source macOS app for **multi-room AirPlay audio**. Send your Mac’s system audio or a selected app to multiple AirPlay speakers, choose which speakers play, and control their volume from one window.
+
+For watching videos, the optional **DALI Video Sync** Chrome extension delays supported web video to match the room’s audio.
 
 [Preview release](https://github.com/fortun8te/dali/releases/tag/v1.2.0-preview.1) · [Setup](docs/getting-started.md) · [Build from source](docs/building.md) · [Privacy](PRIVACY.md) · [Report an issue](https://github.com/fortun8te/dali/issues)
 
 > **Developer preview.** Source and extension packages are available. A signed, notarized Mac download and Chrome Web Store distribution are not available yet. Apple Silicon is the current engine target. Physical speaker timing and live platform compatibility need broader testing.
+
+Looking for a way to **play audio on multiple speakers from a Mac**? Start with the [multi-speaker AirPlay guide](docs/multi-speaker-airplay-mac.md), or [help test the preview](#help-test-multi-speaker-airplay).
 
 ## See the app
 
@@ -70,6 +74,16 @@ The extension matches the delay reported by DALI. It cannot measure the sound at
 You need macOS 15 or later, Apple Silicon for the current engine build, Chrome, and AirPlay speakers reachable on the same local network. See the [setup guide](docs/getting-started.md). Existing DALI users keep their saved room settings and skip first-run onboarding.
 
 For contributors, start with [building](docs/building.md), [compatibility tests](docs/compatibility.md), and [release requirements](docs/releasing.md).
+
+## Help test multi-speaker AirPlay
+
+Have two or more AirPlay speakers and an Apple Silicon Mac? We’re looking for early testers to help check real speaker combinations, room timing, and video playback.
+
+[Get the developer preview](https://github.com/fortun8te/dali/releases/tag/v1.2.0-preview.1) · [Share a compatibility report](https://github.com/fortun8te/dali/issues/new?template=speaker-compatibility.md) · [See all seven UI screens](docs/ui-tour.md)
+
+Please include your macOS version, speaker models, number of speakers, and whether audio or video drifted. Leave private device names and network addresses out of reports. A signed, ready-to-install Mac release is still pending, so testing currently requires a source build.
+
+If DALI solves a problem you care about, star the repository to make it easier to find again, or share it with someone building a multi-room Mac audio setup.
 
 ## Built on OwnTone
 
