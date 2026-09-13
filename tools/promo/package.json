@@ -1,0 +1,15 @@
+{
+  "name": "dali-remotion-demo",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "render": "remotion render index.tsx DaliAirPlay ../../build/DALI-AirPlay-demo.mp4 --codec=h264 --crf=20",
+    "preview": "remotion studio index.tsx"
+  },
+  "dependencies": {
+    "@remotion/cli": "4.0.518",
+    "remotion": "4.0.518",
+    "react": "19.2.3",
+    "react-dom": "19.2.3"
+  }
+}

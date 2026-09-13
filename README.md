@@ -14,6 +14,11 @@ Looking for a way to **play audio on multiple speakers from a Mac**? Start with 
 
 ## See the app
 
+[![20-second DALI multi-speaker AirPlay UI walkthrough](docs/images/DALI-AirPlay-preview.gif)](https://github.com/fortun8te/dali/releases/download/v1.2.0-preview.1/DALI-AirPlay-demo.mp4)
+
+[Watch or download the 20-second video](https://github.com/fortun8te/dali/releases/download/v1.2.0-preview.1/DALI-AirPlay-demo.mp4). A walkthrough of the real UI, not a physical speaker-sync test. [Remotion source](tools/promo).
+
+
 Room playback, speaker levels, and the current audio source in one compact window.
 
 <p align="center">
