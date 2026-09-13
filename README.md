@@ -79,7 +79,7 @@ For contributors, start with [building](docs/building.md), [compatibility tests]
 
 Have two or more AirPlay speakers and an Apple Silicon Mac? We’re looking for early testers to help check real speaker combinations, room timing, and video playback.
 
-[Get the developer preview](https://github.com/fortun8te/dali/releases/tag/v1.2.0-preview.1) · [Share a compatibility report](https://github.com/fortun8te/dali/issues/new?template=speaker-compatibility.md) · [See all seven UI screens](docs/ui-tour.md)
+[Join the early-tester discussion](https://github.com/fortun8te/dali/discussions/1) · [Get the developer preview](https://github.com/fortun8te/dali/releases/tag/v1.2.0-preview.1) · [Share a compatibility report](https://github.com/fortun8te/dali/issues/new?template=speaker-compatibility.md) · [See all seven UI screens](docs/ui-tour.md)
 
 Please include your macOS version, speaker models, number of speakers, and whether audio or video drifted. Leave private device names and network addresses out of reports. A signed, ready-to-install Mac release is still pending, so testing currently requires a source build.
 
