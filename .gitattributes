@@ -1,0 +1,7 @@
+third_party/** linguist-vendored=true
+engine/patches/** linguist-vendored=true
+docs/images/** binary
+*.swift text eol=lf
+*.js text eol=lf
+*.mjs text eol=lf
+*.sh text eol=lf

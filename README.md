@@ -4,7 +4,7 @@
 
 DALI is a native macOS app for playing Mac audio through multiple AirPlay speakers. Its companion Chrome extension delays supported web video to match the room's audio, including video feeds that move from clip to clip.
 
-[Setup](docs/getting-started.md) · [Build from source](docs/building.md) · [Privacy](PRIVACY.md) · [Report an issue](https://github.com/fortun8te/dali/issues)
+[Preview release](https://github.com/fortun8te/dali/releases/tag/v1.2.0-preview.1) · [Setup](docs/getting-started.md) · [Build from source](docs/building.md) · [Privacy](PRIVACY.md) · [Report an issue](https://github.com/fortun8te/dali/issues)
 
 > **Developer preview.** Source and extension packages are available. A signed, notarized Mac download and Chrome Web Store distribution are not available yet. Apple Silicon is the current engine target. Physical speaker timing and live platform compatibility need broader testing.
 
@@ -17,7 +17,7 @@ DALI is a native macOS app for playing Mac audio through multiple AirPlay speake
 - Keeps audio and playback status local. No DALI account or subscription.
 
 <p align="center">
-  <img src="docs/images/onboarding-1-welcome.png" width="280" alt="DALI dark macOS onboarding with simple speaker icons">
+  <img src="docs/images/onboarding-1-welcome.png" width="280" alt="DALI macOS welcome screen with a compact dark typographic layout">
   <img src="docs/images/onboarding-3-your-speakers.png" width="280" alt="Choose multiple AirPlay speakers during DALI setup">
 </p>
 
