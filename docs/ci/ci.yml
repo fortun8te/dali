@@ -1,0 +1,33 @@
+name: Build and compatibility checks
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  browser:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Extension regression tests
+        run: node --test --test-reporter=spec chrome-extension/tools/harness/regressions.mjs
+      - name: Validate distributable extension
+        run: python3 scripts/package-extension.py build/DALI-Video-Sync.zip
+  macos:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: App and engine regression tests
+        run: swift test
+      - name: Onboarding and managed update tests
+        run: bash scripts/tests/onboarding.sh
+      - name: Install project generator
+        run: brew install xcodegen
+      - name: Compile macOS app
+        run: |
+          xcodegen generate
+          xcodebuild -project DALI.xcodeproj -scheme DALI -configuration Release -destination 'platform=macOS' CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO build

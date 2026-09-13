@@ -1,0 +1,127 @@
+# @configure_input@
+# -*- Mode:rpm-spec -*-
+%global username @OWNTONE_USER@
+%global groupname @OWNTONE_GROUP@
+
+%bcond_without alsa
+%bcond_without pulseaudio
+%bcond_with chromecast
+
+%global _hardened_build 1
+
+Summary: iTunes-compatible DAAP server with MPD and RSP support
+Name: owntone
+Version: @PACKAGE_VERSION@
+Release: 1%{?dist}
+License: GPLv2+
+Group: Applications/Multimedia
+Url: https://github.com/owntone/owntone-server
+Source0: https://github.com/owntone/%{name}/archive/%{version}/%{name}-%{version}.tar.xz
+%{?systemd_ordering}
+BuildRequires: gcc, make, bison, flex, systemd, pkgconfig, libunistring-devel
+BuildRequires: pkgconfig(zlib), pkgconfig(libconfuse), pkgconfig(libxml-2.0)
+BuildRequires: pkgconfig(sqlite3) >= 3.5.0, pkgconfig(libevent) >= 2.0.0
+BuildRequires: pkgconfig(json-c), libgcrypt-devel >= 1.2.0
+BuildRequires: libgpg-error-devel >= 1.6
+BuildRequires: pkgconfig(libavformat), pkgconfig(libavcodec)
+BuildRequires: pkgconfig(libswscale), pkgconfig(libavutil)
+BuildRequires: pkgconfig(libavfilter), pkgconfig(libcurl)
+BuildRequires: pkgconfig(openssl), pkgconfig(libwebsockets) > 2.0.2
+BuildRequires: pkgconfig(libsodium), pkgconfig(avahi-client) >= 0.6.24
+BuildRequires: pkgconfig(libprotobuf-c)
+# pkgconfig(libplist) not used universally, so require libplist-devel instead
+BuildRequires: libplist-devel >= 0.16
+Requires(pre): shadow-utils
+%if %{with alsa}
+BuildRequires: pkgconfig(alsa)
+%endif
+%if %{with pulseaudio}
+BuildRequires: pkgconfig(libpulse)
+%endif
+%if %{with chromecast}
+BuildRequires: pkgconfig(gnutls)
+%endif
+Requires: avahi
+
+%global homedir %{_localstatedir}/lib/%{name}
+%{!?_pkgdocdir: %global _pkgdocdir %{_docdir}/%{name}-%{version}}
+
+%description
+OwnTone is a DAAP/DACP (iTunes), MPD (Music Player Daemon) and RSP (Roku) media
+server.
+
+It has support for AirPlay devices/speakers, Apple Remote (and compatibles),
+MPD clients, Chromecast, network streaming, internet radio, Spotify and LastFM.
+
+It does not support streaming video by AirPlay nor Chromecast.
+
+DAAP stands for Digital Audio Access Protocol, and is the protocol used
+by iTunes and friends to share/stream media libraries over the network.
+
+%prep
+%setup -q
+
+%build
+%configure \
+  --with%{!?with_alsa:out}-alsa --with%{!?with_pulseaudio:out}-pulseaudio \
+  --with-libwebsockets --with-avahi %{?with_chromecast:--enable-chromecast} \
+  --with-user=%{username} --with-group=%{groupname} \
+  --with-systemddir=%{_unitdir}
+%make_build
+
+%install
+make install DESTDIR=%{buildroot} docdir=%{_pkgdocdir}
+rm -f %{buildroot}%{_pkgdocdir}/INSTALL
+mkdir -p %{buildroot}%{homedir}
+mkdir -p %{buildroot}%{_localstatedir}/log
+touch %{buildroot}%{_localstatedir}/log/%{name}.log
+rm -f %{buildroot}%{_libdir}/%{name}/*.la
+
+%pre
+getent group %{groupname} >/dev/null || groupadd -r %{groupname}
+getent passwd %{username} >/dev/null || \
+    useradd -r -g %{groupname} -d %{homedir} -s /sbin/nologin \
+    -c '%{name} User' %{username}
+exit 0
+
+%post
+%systemd_post %{name}.service
+
+%preun
+%systemd_preun %{name}.service
+
+%postun
+%systemd_postun_with_restart %{name}.service
+
+%files
+%{!?_licensedir:%global license %%doc}
+%license COPYING
+%{_pkgdocdir}
+%config(noreplace) %{_sysconfdir}/owntone.conf
+%{_sbindir}/owntone
+%{_libdir}/%{name}/
+%{_datarootdir}/%{name}/
+%{_unitdir}/%{name}.service
+%{_unitdir}/%{name}@.service
+%attr(0750,%{username},%{groupname}) %{_localstatedir}/cache/%{name}
+%attr(0750,%{username},%{groupname}) %{homedir}
+%ghost %{_localstatedir}/log/%{name}.log
+%{_mandir}/man?/*
+
+%changelog
+* Mon Jan 17 2022 Espen Jürgensen <espen.jurgensen@gmail.com> - 28.3-1
+   - Remove antlr dependency
+   - Add bison/flex dependency
+
+* Mon Nov 22 2021 Derek Atkins <derek@ihtfp.com> - 28.2-1
+   - Release tarball is a XZ not GZ file
+   - Configure always needs protobuf-c, not just for chromecast
+   - Exclude build-system-installed service file and use system location
+
+* Sat Mar 17 2018 Scott Shambarger <devel@shambarger.net> - 26.0-1
+   - 26.0 release.
+   - Update spec file to handle new feature defaults.
+   - Added new files/directories.
+
+* Tue Dec 20 2016 Scott Shambarger <devel@shambarger.net> - 24.2-1
+   - Initial RPM release candidate.

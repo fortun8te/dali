@@ -1,0 +1,60 @@
+.\"  -*- nroff -*-
+.TH OWNTONE "8" "2018-01-14" "owntone" "DAAP, MPD, Chromecast & RSP media server"
+.SH NAME
+OwnTone \- iTunes\-compatible DAAP server with MPD, Chromecast and RSP support
+.SH SYNOPSIS
+.B OwnTone
+[\fIoptions\fR]
+.SH DESCRIPTION
+\fBOwnTone\fP is a Linux/FreeBSD DAAP (iTunes) media server with support
+for AirPlay devices, Apple Remote (and compatibles), MPD, Spotify, Chromecast,
+mp3 streaming and internet radio. It allows you to share your music collection
+over the local network.
+.SH OPTIONS
+.TP
+\fB\-d, \-\-debug=\fR\fIlevel\fP
+Log level (0\-5).
+.TP
+\fB\-D, \-\-logdomains=\fR\fIdom,..,dom\fP
+Debug domains; available domains are: \fIconfig\fP, \fIdaap\fP,
+\fIdb\fP, \fIhttpd\fP, \fImain\fP, \fImdns\fP, \fImisc\fP,
+\fIrsp\fP, \fIscan\fP, \fIxcode\fP, \fIevent\fP, \fIhttp\fP, \fIremote\fP,
+\fIdacp\fP, \fIffmpeg\fP, \fIartwork\fP, \fIplayer\fP, \fIraop\fP,
+\fIlaudio\fP, \fIdmap\fP, \fIfdbperf\fP, \fIspotify\fP, \fIscrobble\fP,
+\fIcache\fP, \fImpd\fP, \fIstream\fP, \fIcast\fP, \fIfifo\fP, \fIlib\fP,
+\fIweb\fP, \fIairplay\fP.
+.TP
+\fB\-c, \-\-config=\fR\fIfile\fP
+Use \fIfile\fP as the configuration file.
+.TP
+\fB\-P, \-\-pidfile=\fR\fIfile\fP
+Write PID to \fIfile\fP.
+.TP
+\fB\-f, \-\-foreground\fR
+Run in the foreground.
+.TP
+\fB\-b, \-\-ffid=\fR\fIffid\fP
+\fIffid\fP to be broadcast in mDNS records.
+.TP
+\fB\-v, \-\-version\fR
+Display version information.
+.TP
+\fB\-\-mdns-no-rsp\fR
+Don't announce RSP service via mDNS.
+.TP
+\fB\-\-mdns-no-daap\fR
+Don't announce DAAP service via mDNS.
+.TP
+\fB\-\-mdns-no-cname\fR
+Don't register owntone.local as CNAME via mDNS.
+.TP
+\fB\-\-mdns-no-web\fR
+Don't announce web interface via mDNS.
+.SH FILES
+.nf
+ \fI/etc/owntone.conf\fR
+ \fI/var/cache/owntone\fR
+.fi
+.SH SEE ALSO
+See \fIhttp://owntone.github.io/owntone-server/\fR for more in-depth information
+about using \fBOwnTone\fP.

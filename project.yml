@@ -1,0 +1,60 @@
+name: DALI
+options:
+  bundleIdPrefix: com.fortun8te
+  deploymentTarget:
+    macOS: "15.0"
+  createIntermediateGroups: true
+
+targets:
+  DALI:
+    type: application
+    platform: macOS
+    sources:
+      - path: Sources/DALI
+      - path: Sources/BeamCapture
+      - path: Sources/BeamEngine
+      - path: chrome-extension
+        type: folder
+        buildPhase: resources
+      - path: Assets/AppIcon.icns
+        buildPhase: resources
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.fortun8te.dali
+        PRODUCT_NAME: DALI
+        MARKETING_VERSION: "1.2.0"
+        CURRENT_PROJECT_VERSION: "28"
+        SWIFT_VERSION: "6.0"
+        ENABLE_HARDENED_RUNTIME: YES
+        CODE_SIGN_STYLE: Manual
+        CODE_SIGN_IDENTITY: ""
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_LSUIElement: NO
+        INFOPLIST_KEY_CFBundleIconFile: AppIcon
+        INFOPLIST_KEY_NSHumanReadableCopyright: ""
+        INFOPLIST_KEY_NSAudioCaptureUsageDescription: "DALI captures your Mac's audio so it can play on your AirPlay speakers."
+        SWIFT_STRICT_CONCURRENCY: minimal
+
+  DALITests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - path: Tests/BeamCaptureTests
+      - path: Tests/BeamEngineTests
+    dependencies:
+      - target: DALI
+    settings:
+      base:
+        TEST_HOST: "$(BUILT_PRODUCTS_DIR)/DALI.app/Contents/MacOS/DALI"
+        BUNDLE_LOADER: "$(TEST_HOST)"
+        SWIFT_VERSION: "6.0"
+        CODE_SIGN_IDENTITY: ""
+
+schemes:
+  DALI:
+    build:
+      targets:
+        DALI: all
+    test:
+      targets:
+        - DALITests

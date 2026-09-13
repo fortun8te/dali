@@ -1,0 +1,758 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>DALI auto-sync harness</title>
+<style>
+  body { font: 13px/1.4 -apple-system, sans-serif; margin: 10px; background:#111; color:#eee; }
+  #stage { position: relative; width: 640px; }
+  video { width: 640px; height: 360px; background: #000; display: block; }
+  pre { font-family: ui-monospace, monospace; background:#000; padding:8px; margin:6px 0; font-size: 12px; }
+  button { margin: 2px; font-size: 12px; }
+  #run { font-size: 16px; padding: 6px 14px; background:#2f6fed; color:#fff; border:0; }
+</style>
+</head>
+<body>
+<div id="stage">
+  <video id="v" src="test_a.mp4" playsinline></video>
+</div>
+<div>
+  <button id="run">RUN TEST SUITE</button>
+  <button onclick="document.getElementById('v').play()">play</button>
+  <button onclick="document.getElementById('v').pause()">pause</button>
+  <button onclick="__setBeacon({running:true,streaming:true,delayMs:1000})">stream 1.0s</button>
+  <button onclick="__setBeacon({running:true,streaming:false,delayMs:0})">stop stream</button>
+  <button onclick="__setBeacon({running:false,streaming:false,delayMs:0})">app gone</button>
+  <button onclick="__setVisible(false)">tab away</button>
+  <button onclick="__setVisible(true)">tab back</button>
+  <button onclick="__killWorker()">kill worker</button>
+  <button onclick="__reviveWorker()">revive worker</button>
+</div>
+<pre id="hud">booting…</pre>
+<pre id="out">(idle)</pre>
+
+<script src="shim.js"></script>
+<script src="beacon.js"></script>
+<script src="content.js"></script>
+<script>
+const FPS = 30;
+const $v = () => document.getElementById('v');
+const $c = () => document.querySelector('canvas.dali-sync-overlay');
+const $cs = () => document.querySelectorAll('canvas.dali-sync-overlay');
+// rAF-based sleep: setTimeout is heavily throttled in this hidden tab, but the
+// shimmed rAF is worker-driven and runs at full rate.
+const wait = (ms) => new Promise((r) => {
+  const t0 = performance.now();
+  const step = () => (performance.now() - t0 >= ms) ? r() : requestAnimationFrame(step);
+  requestAnimationFrame(step);
+});
+// Poll a predicate on the same rAF clock. Resolves true as soon as it holds,
+// false on timeout.
+const waitFor = (fn, ms) => new Promise((r) => {
+  const t0 = performance.now();
+  const step = () => {
+    let v = false;
+    try { v = fn(); } catch (e) { v = false; }
+    if (v) return r(true);
+    if (performance.now() - t0 >= ms) return r(false);
+    requestAnimationFrame(step);
+  };
+  requestAnimationFrame(step);
+});
+const read = document.createElement('canvas').getContext('2d', { willReadFrequently: true });
+read.canvas.width = 1; read.canvas.height = 1;
+
+function decode(r, g) {
+  const ri = Math.max(0, Math.min(15, Math.round((r - 8) / 16)));
+  const gi = Math.max(0, Math.min(15, Math.round((g - 8) / 16)));
+  return gi * 16 + ri;
+}
+
+// One instantaneous sample of {videoFrame, canvasFrame, delayMs}.
+function sample() {
+  const v = $v(), c = $c();
+  if (!v || !c || !c.width || !c.height) return null;
+  let d;
+  try {
+    read.clearRect(0, 0, 1, 1);
+    read.drawImage(c, Math.round(c.width / 2), Math.round(c.height * 0.2), 1, 1, 0, 0, 1, 1);
+    d = read.getImageData(0, 0, 1, 1).data;
+  } catch (e) { return { err: e.name }; }
+  if (d[3] < 200) return { blank: true };
+  const vFrame = Math.round(v.currentTime * FPS);
+  let f = decode(d[0], d[1]);
+  while (f + 256 <= vFrame + 8) f += 256;
+  return { vFrame, cFrame: f, delayMs: (vFrame - f) / FPS * 1000, rgba: [d[0], d[1], d[2], d[3]] };
+}
+
+// True when the extension is presenting: canvas exists, is displayed, and the
+// real video has been handed over to it.
+function presenting() {
+  const c = $c(), v = $v();
+  return !!(c && c.style.display !== 'none' && getComputedStyle(v).visibility === 'hidden');
+}
+// True when the page has been given back exactly as it was.
+function pageRestored() {
+  const v = $v();
+  return getComputedStyle(v).visibility === 'visible' && !v.hasAttribute('data-dali-sync-hidden');
+}
+
+function stats(arr) {
+  if (!arr.length) return null;
+  const s = arr.slice().sort((a, b) => a - b);
+  const mean = s.reduce((a, b) => a + b, 0) / s.length;
+  return { n: s.length, min: Math.round(s[0]), p50: Math.round(s[Math.floor(s.length / 2)]),
+           max: Math.round(s[s.length - 1]), mean: Math.round(mean) };
+}
+
+// Collect delay samples for `ms`, driven by rAF.
+function collect(ms) {
+  return new Promise((resolve) => {
+    const out = [], anomalies = [];
+    const t0 = performance.now();
+    const step = () => {
+      const s = sample();
+      if (s && typeof s.delayMs === 'number') out.push(s.delayMs);
+      else if (s) anomalies.push(JSON.stringify(s));
+      if (performance.now() - t0 < ms) requestAnimationFrame(step);
+      else resolve({ stats: stats(out), anomalies: anomalies.slice(0, 5) });
+    };
+    requestAnimationFrame(step);
+  });
+}
+
+// A richer trace: everything needed to judge a TRANSITION rather than a steady
+// state — when presentation started, whether the picture ever froze, whether
+// the delay grew smoothly, whether anything blank was ever shown.
+function watch(ms, opts) {
+  const o = opts || {};
+  return new Promise((resolve) => {
+    const t0 = performance.now();
+    const trace = [];
+    let blanks = 0, engagedAt = 0, restoredAt = 0, wasPresenting = false;
+    let lastFrame = null, lastChangeAt = 0, maxFreeze = 0, everPresented = false;
+    // Freezes in the first 800ms of presentation are the HANDOVER settling —
+    // the <video> is hidden and the element takes a moment to start producing
+    // fresh frames again. Reported separately from freezes during the ease-in
+    // proper, which is the thing that has to be smooth.
+    const SETTLE_MS = 800;
+    let settleFreeze = 0;
+    const step = () => {
+      const now = performance.now();
+      const p = presenting();
+      if (p && !wasPresenting) { if (!engagedAt) engagedAt = now - t0; lastChangeAt = now; }
+      if (!p && wasPresenting && !restoredAt) restoredAt = now - t0;
+      wasPresenting = p;
+      if (p) {
+        const s = sample();
+        if (!s || s.blank || s.err) {
+          blanks++;
+        } else {
+          everPresented = true;
+          trace.push({ t: now - t0, f: s.cFrame, d: s.delayMs });
+          if (s.cFrame !== lastFrame) {
+            lastFrame = s.cFrame;
+            lastChangeAt = now;
+          } else if (lastChangeAt) {
+            const held = now - lastChangeAt;
+            if ((now - t0) < engagedAt + SETTLE_MS) settleFreeze = Math.max(settleFreeze, held);
+            else maxFreeze = Math.max(maxFreeze, held);
+          }
+        }
+      }
+      if (o.until && o.until({ now: now - t0, presenting: p })) return finish();
+      if (now - t0 < ms) requestAnimationFrame(step); else finish();
+    };
+    function finish() {
+      const d = trace.map((x) => x.d);
+      // Biggest backwards step in the presented delay (the ramp must only ever
+      // grow; a jump backwards means the picture skipped forward).
+      let backstep = 0;
+      for (let i = 1; i < d.length; i++) backstep = Math.max(backstep, d[i - 1] - d[i]);
+      const tail = trace.filter((x) => x.t > (trace.length ? trace[trace.length - 1].t - 600 : 0));
+      resolve({
+        n: trace.length, blanks, engagedAt: Math.round(engagedAt), restoredAt: Math.round(restoredAt),
+        everPresented, maxFreeze: Math.round(maxFreeze), settleFreeze: Math.round(settleFreeze),
+        backstep: Math.round(backstep),
+        firstDelay: d.length ? Math.round(Math.min(...d.slice(0, 6))) : null,
+        maxDelay: d.length ? Math.round(Math.max(...d)) : null,
+        finalDelay: tail.length ? Math.round(stats(tail.map((x) => x.d)).p50) : null,
+        trace
+      });
+    }
+    requestAnimationFrame(step);
+  });
+}
+
+// Watch a cut-out. Sampling starts on the current tick, so the caller can kick
+// off the seek immediately after calling it and nothing is missed: a cut-out
+// that is followed by an instant re-arm (a local file seeks in milliseconds) is
+// still observed. Reports when the real <video> was first handed back, and the
+// worst delay presented in the window — which is what proves the buffer was
+// dropped rather than drained.
+function watchSeek(ms) {
+  return new Promise((resolve) => {
+    const t0 = performance.now();
+    let handedBackAt = null, worstDelay = null;
+    const step = () => {
+      const now = performance.now() - t0;
+      if (handedBackAt === null && pageRestored()) handedBackAt = Math.round(now);
+      if (presenting()) {
+        const s = sample();
+        if (s && typeof s.delayMs === 'number') {
+          if (worstDelay === null || Math.abs(s.delayMs) > Math.abs(worstDelay)) worstDelay = s.delayMs;
+        }
+      }
+      if (now < ms) requestAnimationFrame(step);
+      else resolve({ handedBackAt, worstDelay: worstDelay === null ? null : Math.round(worstDelay) });
+    };
+    requestAnimationFrame(step);
+  });
+}
+
+// Wait until the measured delay has settled within `tol` of `target`.
+async function settleAt(target, tol, ms) {
+  const ok = await waitFor(() => {
+    const s = sample();
+    return !!(s && typeof s.delayMs === 'number' && Math.abs(s.delayMs - target) <= tol);
+  }, ms);
+  if (!ok) return false;
+  const r = await collect(400);
+  return !!(r.stats && Math.abs(r.stats.p50 - target) <= tol);
+}
+
+// --- live HUD -------------------------------------------------------------
+function tick() {
+  const v = $v(), c = $c();
+  const s = sample();
+  const b = window.__beacon;
+  document.getElementById('hud').textContent =
+    'beacon streaming=' + b.streaming + ' delayMs=' + b.delayMs + ' running=' + b.running +
+    (window.__useRealBeacon ? ' (REAL 3697)' : '') + (window.__workerDead ? ' (WORKER DEAD)' : '') +
+    '   measured=' + (s && s.delayMs != null ? Math.round(s.delayMs) + 'ms' : '—') + '\n' +
+    'canvas ' + (c ? c.width + 'x' + c.height + ' display=' + (c.style.display || 'shown') : 'ABSENT') +
+    '   video vis=' + (v ? getComputedStyle(v).visibility : '-') +
+    '   presenting=' + presenting() + '\n' +
+    'reason=' + (window.__daliSync ? window.__daliSync.S.reason : '?') +
+    ' active delay=' + (window.__daliSync ? window.__daliSync.activeDelayMs() : '?') + 'ms' +
+    ' eff=' + (window.__daliSync ? Math.round(window.__daliSync.effDelayMs()) : '?') + 'ms' +
+    ' beaconCalls=' + window.__beaconCalls;
+  requestAnimationFrame(tick);
+}
+tick();
+
+// --- test suite -----------------------------------------------------------
+const L = [];
+function log(s) { L.push(s); document.getElementById('out').textContent = L.join('\n'); }
+function ok(cond, name, extra) { log((cond ? 'PASS  ' : 'FAIL  ') + name + (extra ? '   ' + extra : '')); }
+
+// Push a beacon reading and give content.js time to poll it (it ticks ~1/s).
+async function beacon(o, settleMs) {
+  window.__setBeacon(o);
+  await wait(settleMs === undefined ? 1600 : settleMs);
+}
+
+function geomOk() {
+  const v = $v(), c = $c();
+  if (!v || !c) return { ok: false, why: 'no canvas' };
+  const vr = v.getBoundingClientRect(), cr = c.getBoundingClientRect();
+  const d = ['left', 'top', 'width', 'height'].map((k) => Math.abs(vr[k] - cr[k]));
+  return { ok: Math.max(...d) < 1.5, why: 'dl/dt/dw/dh=' + d.map((x) => x.toFixed(1)).join('/') };
+}
+
+// Tests that deliberately break capture leave a video marked bad; clear that so
+// the groups stay independent of each other.
+function clearVideoFlags() {
+  const S = window.__daliSync && window.__daliSync.S;
+  if (!S) return;
+  try { S.videoIssues.delete($v()); } catch (e) { /* ignore */ }
+  try { S.rebuilds.delete($v()); } catch (e) { /* ignore */ }
+}
+
+// Re-run content.js exactly the way the service worker re-injects it into an
+// already-open tab after the extension is installed or reloaded.
+let injectN = 0;
+function inject() {
+  return new Promise((resolve, reject) => {
+    const s = document.createElement('script');
+    s.src = 'content.js?inject=' + (++injectN);
+    s.onload = () => resolve();
+    s.onerror = () => reject(new Error('inject failed'));
+    document.head.appendChild(s);
+  });
+}
+
+async function runSuite() {
+  L.length = 0;
+  const v = $v();
+  log('=== DALI auto-sync test suite ===');
+  log('UA ' + navigator.userAgent.split(') ').pop());
+  log('rVFC: ' + (typeof v.requestVideoFrameCallback === 'function') +
+      '   extension v' + window.__daliSync.version + ' build ' + window.__daliSync.build);
+
+  // ---- A. beacon client unit checks (no video involved) -------------------
+  const N = window.DALIBeacon.normalize;
+  ok(N({ app: 'DALI', streaming: true, delayMs: 890 }).delayMs === 890, 'A1 parses a live beacon');
+  ok(N({ app: 'DALI', streaming: true, delayMs: 890 }).running === true, 'A1b running when DALI answers');
+  ok(N({ app: 'DALI', streaming: false, delayMs: 890 }).delayMs === 0,
+     'A2 delayMs forced to 0 when not streaming');
+  ok(N({ app: 'somethingelse', streaming: true, delayMs: 900 }).running === false,
+     'A3 a stranger on port 3697 is not treated as DALI');
+  ok(N(null).running === false && N(null).streaming === false, 'A4 no answer = not running');
+  ok(N({ app: 'DALI', streaming: true, delayMs: -5 }).delayMs === 0, 'A5 negative delay clamped');
+  ok(N({ app: 'DALI', streaming: true, delayMs: 99999 }).delayMs === 4000, 'A6 absurd delay clamped');
+
+  // ---- B. engages ONLY when streaming is true -----------------------------
+  // Start from "app not running": the page must be completely untouched.
+  await beacon({ running: false, streaming: false, delayMs: 0 }, 300);
+  v.currentTime = 0.2; await v.play().catch(() => {});
+  await wait(2500);
+  ok(!$c(), 'B1 no canvas while DALI is not running');
+  ok(pageRestored(), 'B1b video untouched while DALI is not running');
+
+  // App running but idle — still untouched.
+  await beacon({ running: true, streaming: false, delayMs: 0 });
+  await wait(800);
+  ok(!$c(), 'B2 no canvas while DALI is running but not streaming');
+  ok(pageRestored(), 'B2b video untouched while DALI is idle');
+
+  // ---- B2. THE ROOM STARTS AFTER THE VIDEO IS ALREADY PLAYING -------------
+  // The founder's own bug. The video has been playing for seconds; its audio is
+  // already halfway to the speakers, so there is no correct picture to show and
+  // the buffer is empty. The delay has to be EASED IN — no freeze, no jump, no
+  // black — and it has to land exactly on the beacon value.
+  window.__setBeacon({ running: true, streaming: true, delayMs: 1200 });
+  let w = await watch(8000, { until: (x) => x.now > 2500 && !x.presenting });
+  ok(w.everPresented, 'B3 engages by itself when the room goes live under a playing video');
+  ok(w.blanks === 0, 'B3b never shows a blank or black frame while easing in', 'blanks=' + w.blanks);
+  ok(w.firstDelay !== null && w.firstDelay < 450,
+     'B3c starts at ~zero delay and eases in (does not jump straight to 1200ms)',
+     'first=' + w.firstDelay + 'ms');
+  ok(w.maxFreeze < 450, 'B3d the picture never freezes during the ease-in',
+     'longest still frame ' + w.maxFreeze + 'ms');
+  ok(w.settleFreeze < 700, 'B3d2 the handover itself settles quickly',
+     'worst hold in the first 800ms: ' + w.settleFreeze + 'ms');
+  ok(w.backstep < 250, 'B3e the picture never jumps backwards while easing in',
+     'worst backstep ' + w.backstep + 'ms');
+  ok(w.finalDelay !== null && Math.abs(w.finalDelay - 1200) < 150,
+     'B3f lands on the beacon value', 'final=' + w.finalDelay + 'ms');
+  ok(presenting(), 'B3g still presenting after the ease-in');
+
+  await beacon({ delayMs: 2000 });
+  ok(await settleAt(2000, 130, 6000), 'B4 delay matches the beacon (2000ms)');
+  ok(geomOk().ok, 'B5 canvas aligned with video', geomOk().why);
+
+  // ---- C. the delay tracks the beacon value live --------------------------
+  await beacon({ delayMs: 500 });
+  ok(await settleAt(500, 130, 5000), 'C1 follows beacon down to 500ms');
+  await beacon({ delayMs: 1500 });
+  ok(await settleAt(1500, 160, 8000), 'C2 follows beacon up to 1500ms');
+
+  // ---- D. IMMEDIATE CUT-OUT on a seek while PLAYING -----------------------
+  // Previously the buffer was allowed to drain through a seek. The founder
+  // overrode that: skipping ahead must stop the delayed picture instantly.
+  const seekTo = v.currentTime + 5;
+  const dw = watchSeek(400);          // starts sampling on this very tick
+  v.currentTime = seekTo;
+  const d = await dw;
+  ok(d.handedBackAt !== null && d.handedBackAt < 150,
+     'D1 hands the real video back within a frame or two of a seek while playing',
+     'after ' + d.handedBackAt + 'ms');
+  // If the buffer had drained we would keep seeing a full 1500ms of delay for
+  // another 1.5 s of pre-seek picture.
+  ok(d.worstDelay === null || Math.abs(d.worstDelay) < 550,
+     'D2 the pre-seek picture never plays out after the seek (buffer was dropped)',
+     'worst |delay| ' + d.worstDelay + 'ms');
+  ok(await settleAt(1500, 200, 6000), 'D3 re-syncs by itself after the seek');
+
+  // ---- E. IMMEDIATE CUT-OUT on pause -------------------------------------
+  v.pause();
+  await wait(120);
+  ok(pageRestored(), 'E1 real video restored immediately on pause (< 120ms)',
+     'vis=' + getComputedStyle(v).visibility);
+  const cAtPause = $c();
+  ok(!cAtPause || cAtPause.style.display === 'none', 'E1b overlay hidden immediately on pause',
+     cAtPause ? 'display=' + cAtPause.style.display : 'canvas gone');
+  const s1 = sample();
+  ok(!s1 || s1.blank || s1.cFrame === undefined, 'E1c nothing is being presented after pause',
+     JSON.stringify(s1));
+  // ...and it does NOT keep playing out buffered frames.
+  await wait(1800);          // longer than the whole 1500ms delay
+  const s2 = sample();
+  ok(!s2 || s2.blank || s2.cFrame === undefined, 'E2 buffer did not drain after pause',
+     JSON.stringify(s2));
+  ok(pageRestored(), 'E2b page still restored a full delay-period later');
+  ok(window.__bmp().live <= 2, 'E2c buffered frames released on cut-out',
+     JSON.stringify(window.__bmp()));
+
+  // Resume re-engages on its own, and a fresh start takes the delay in full
+  // (holding the first frame until its audio lands is the correct picture).
+  await v.play().catch(() => {});
+  ok(await waitFor(presenting, 3000), 'E3 re-engages automatically on play');
+  ok(await settleAt(1500, 220, 4000), 'E3b delay restored after resume');
+
+  // ---- F. immediate cut-out on navigate ----------------------------------
+  window.dispatchEvent(new Event('yt-navigate-start'));
+  ok(pageRestored(), 'F1 cut out synchronously on SPA navigation (same tick, no drain)');
+  await v.play().catch(() => {});
+  ok(await waitFor(presenting, 4000), 'F1b re-engages after the navigation settles');
+  await settleAt(1500, 250, 5000);
+
+  // ---- G. geometry follows the player ------------------------------------
+  v.style.width = '320px'; v.style.height = '180px';
+  await wait(400);
+  ok(geomOk().ok, 'G1 geometry follows shrink', geomOk().why);
+  v.style.width = '960px'; v.style.height = '540px';
+  await wait(400);
+  ok(geomOk().ok, 'G2 geometry follows grow', geomOk().why);
+  let r = await collect(1500);
+  ok(r.stats && Math.abs(r.stats.p50 - 1500) < 260, 'G3 delay survives resize', JSON.stringify(r.stats));
+  v.style.width = '640px'; v.style.height = '360px';
+  await wait(300);
+
+  // ---- H. disengages when streaming goes false ---------------------------
+  await beacon({ streaming: false, delayMs: 0 });
+  await wait(900);
+  ok(!$c(), 'H1 overlay removed when streaming goes false');
+  ok(pageRestored(), 'H1b video visible again', 'vis=' + getComputedStyle($v()).visibility);
+  ok(!$v().hasAttribute('data-dali-sync-hidden'), 'H1c marker attribute removed');
+  // ...and comes back by itself.
+  await beacon({ streaming: true, delayMs: 1000 });
+  ok(await waitFor(presenting, 4000), 'H2 re-engages when streaming goes true again');
+
+  // App disappears entirely (beacon unreachable).
+  await beacon({ running: false, streaming: false, delayMs: 0 });
+  await wait(900);
+  ok(!$c() && pageRestored(), 'H3 page untouched when the beacon stops answering');
+
+  // Streaming but no usable delay figure yet.
+  await beacon({ running: true, streaming: true, delayMs: 0 });
+  await wait(900);
+  ok(!$c(), 'H4 does not engage when the app reports a 0ms delay');
+
+  // ---- I. per-site trim rides on top of the automatic value --------------
+  await beacon({ running: true, streaming: true, delayMs: 1500 });
+  await waitFor(presenting, 4000);
+  await settleAt(1500, 200, 6000);
+  await window.__setTrim(location.hostname, -400);
+  ok(await settleAt(1100, 200, 6000), 'I1 trim applied on top of the beacon value');
+  await window.__setTrim(location.hostname, null);
+  ok(await settleAt(1500, 200, 6000), 'I2 back to the pure automatic value');
+
+  // ---- J. <video> element swap (SPA) -------------------------------------
+  const t = v.currentTime;
+  const n = document.createElement('video');
+  n.id = 'v'; n.src = 'test_a.mp4'; n.volume = 0; n.playsInline = true;
+  n.style.width = '640px'; n.style.height = '360px';
+  v.replaceWith(n);
+  n.currentTime = t; await n.play().catch(() => {});
+  ok(await waitFor(() => !!$c() && presenting(), 5000), 'J1 re-attaches after a <video> swap');
+  ok($cs().length === 1, 'J1b exactly one overlay', 'found ' + $cs().length);
+  ok(await settleAt(1500, 260, 6000), 'J2 delay works on the swapped element');
+
+  // ---- K. memory stays inside the budget ---------------------------------
+  await beacon({ delayMs: 2000 });
+  await wait(4000);
+  window.__bmpReset();
+  await wait(10000);
+  const m = window.__bmp();
+  ok(m.peakLive <= 75, 'K1 buffered frames stay bounded at a 2s delay', JSON.stringify(m));
+  ok(m.peakMB < 260, 'K1b decoded-frame bytes stay under the budget', m.peakMB + ' MB peak');
+  await beacon({ streaming: false, delayMs: 0 });
+  await wait(1200);
+  const m2 = window.__bmp();
+  ok(m2.live === 0, 'K2 every ImageBitmap released on teardown', JSON.stringify(m2));
+
+  // ---- O. TAB SWITCH cuts out instantly ----------------------------------
+  await beacon({ running: true, streaming: true, delayMs: 1000 });
+  await $v().play().catch(() => {});
+  ok(await waitFor(presenting, 5000), 'O0 engaged before the tab-switch test');
+  window.__setVisible(false);
+  ok(pageRestored(), 'O1 cut out in the same tick as the tab going away',
+     'vis=' + getComputedStyle($v()).visibility);
+  await wait(1500);
+  ok(pageRestored() && !presenting(), 'O2 does not take the picture over in a hidden tab');
+  window.__setVisible(true);
+  ok(await waitFor(presenting, 5000), 'O3 re-engages when the tab comes back');
+  ok(await settleAt(1000, 200, 6000), 'O3b delay correct again after the tab comes back');
+
+  // ---- P. MV3 service worker dies and is revived -------------------------
+  // The worker is killed aggressively. A failed ask means "asleep, ask again",
+  // not "DALI is gone" — the picture must not flap on every recycle.
+  window.__killWorker('reject');
+  await wait(2500);                       // inside the grace window
+  ok(presenting(), 'P1 keeps presenting through a short worker outage');
+  r = await collect(800);
+  ok(r.stats && Math.abs(r.stats.p50 - 1000) < 220, 'P1b delay unchanged during the outage',
+     JSON.stringify(r.stats));
+  window.__reviveWorker();
+  await wait(1500);
+  ok(presenting(), 'P2 still presenting once the worker is back');
+  const callsBefore = window.__beaconCalls;
+  await wait(1500);
+  ok(window.__beaconCalls > callsBefore, 'P2b polling resumed against the revived worker',
+     (window.__beaconCalls - callsBefore) + ' calls');
+
+  // A long outage really is "DALI is gone": stand down rather than hold the
+  // picture back on a guess.
+  window.__killWorker('reject');
+  ok(await waitFor(pageRestored, 8000), 'P3 stands down after a long worker outage');
+  window.__reviveWorker();
+  ok(await waitFor(presenting, 6000), 'P4 re-engages by itself when the worker returns');
+
+  // A worker that dies mid-message resolves with undefined instead of throwing.
+  window.__killWorker('silent');
+  ok(await waitFor(pageRestored, 8000), 'P5 an undefined answer is treated the same as no answer');
+  window.__reviveWorker();
+  ok(await waitFor(presenting, 6000), 'P5b recovers from that too');
+  await settleAt(1000, 220, 6000);
+
+  // ---- Q. LIVE STREAM (duration = Infinity) ------------------------------
+  // YouTube Live / HLS. Nothing may depend on duration, and the live player's
+  // own nudges toward the live edge must not tear the delay down.
+  const live = $v();
+  Object.defineProperty(live, 'duration', { configurable: true, get: () => Infinity });
+  ok(!isFinite(live.duration), 'Q0 test video now reports duration = Infinity');
+  ok(await waitFor(presenting, 5000), 'Q1 engages on a live stream');
+  ok(await settleAt(1000, 220, 6000), 'Q1b delay correct on a live stream');
+  // A live player nudging the playhead a few frames must NOT cut out.
+  let heldThrough = true;
+  live.currentTime = live.currentTime + 0.12;
+  for (let i = 0; i < 20; i++) { if (!presenting()) heldThrough = false; await wait(20); }
+  ok(heldThrough, 'Q2 a live-edge nudge does not tear the delay down');
+  ok(presenting(), 'Q2b still presenting after the nudge');
+  // ...but a real jump to the live edge is a genuine discontinuity.
+  const qw = watchSeek(400);
+  live.currentTime = live.currentTime + 5;
+  const q = await qw;
+  ok(q.handedBackAt !== null && q.handedBackAt < 150,
+     'Q3 a real jump on a live stream still cuts out instantly',
+     'after ' + q.handedBackAt + 'ms');
+  ok(q.worstDelay === null || Math.abs(q.worstDelay) < 550,
+     'Q3b and drops the buffer rather than draining it', 'worst |delay| ' + q.worstDelay + 'ms');
+  ok(await waitFor(presenting, 5000), 'Q4 recovers after the jump');
+  ok(await settleAt(1000, 250, 6000), 'Q4b delay correct again on the live stream');
+  delete live.duration;
+  ok(isFinite(live.duration), 'Q5 duration override removed for the remaining tests');
+
+  // ---- R. SELF-HEAL: engaged, but nothing is reaching the screen ---------
+  // Break the capture path silently (createImageBitmap never resolves — no
+  // error to react to). It must notice, tear down and re-arm rather than sit on
+  // a frozen canvas over a hidden video.
+  clearVideoFlags();
+  await settleAt(1000, 250, 6000);
+  ok(presenting(), 'R0 engaged before the self-heal test');
+  const realCIB2 = window.createImageBitmap;
+  window.createImageBitmap = () => new Promise(() => {});   // never settles
+  const healedAt = performance.now();
+  const gaveBack = await waitFor(pageRestored, 7000);
+  const healMs = Math.round(performance.now() - healedAt);
+  ok(gaveBack, 'R1 hands the picture back instead of sitting on a frozen canvas',
+     'after ' + healMs + 'ms');
+  ok(healMs < 6000, 'R1b noticed quickly', healMs + 'ms');
+  const rebuilds = (() => {
+    try { return window.__daliSync.S.rebuilds.get($v()) || 0; } catch (e) { return 0; }
+  })();
+  ok(rebuilds >= 1, 'R1c it rebuilt the pipeline rather than giving up', 'rebuilds=' + rebuilds);
+  window.createImageBitmap = realCIB2;
+  ok(await waitFor(presenting, 12000), 'R2 presenting again once capture recovers');
+  ok(await settleAt(1000, 250, 6000), 'R2b delay correct after the self-heal');
+  clearVideoFlags();
+
+  // ---- S. EXTENSION RELOADED MID-PLAYBACK --------------------------------
+  // The service worker re-injects content.js into open tabs after an install or
+  // reload. Injecting into a frame that already has a live instance must be a
+  // no-op; injecting after the old instance was orphaned must take over.
+  const hookBefore = window.__daliSync;
+  await inject();
+  await wait(400);
+  ok(window.__daliSync === hookBefore, 'S1 a second injection stands down while a live one is running');
+  ok($cs().length === 1, 'S1b still exactly one overlay', 'found ' + $cs().length);
+  ok(presenting(), 'S1c still presenting after the duplicate injection');
+
+  // Now the real thing: the extension is reloaded. Our chrome.* APIs die and
+  // the port drops — the only chance this world gets to hand the page back.
+  window.chrome.runtime.id = undefined;
+  window.__killWorker('reject');
+  await wait(150);
+  ok(pageRestored(), 'S2 an orphaned instance hands the picture back in the same tick',
+     'vis=' + getComputedStyle($v()).visibility);
+  ok($cs().length === 0, 'S2b and removes its overlay', 'found ' + $cs().length);
+
+  // The reloaded extension injects a fresh copy, which takes over.
+  window.chrome.runtime.id = 'harness';
+  window.__reviveWorker();
+  await inject();
+  await wait(300);
+  ok(window.__daliSync !== hookBefore, 'S3 the fresh injection takes over from the orphan');
+  ok(await waitFor(presenting, 6000), 'S3b delaying again after the reload, with no page reload');
+  ok($cs().length === 1, 'S3c exactly one overlay after the takeover', 'found ' + $cs().length);
+  ok(await settleAt(1000, 250, 6000), 'S3d delay correct after the reload');
+
+  // ---- L. DRM / unreadable frames never leave a black canvas -------------
+  // (Last, because it marks this video element as unusable for good.)
+  const realCIB = window.createImageBitmap;
+  window.createImageBitmap = () => Promise.reject(Object.assign(new Error('x'), { name: 'SecurityError' }));
+  await beacon({ running: true, streaming: true, delayMs: 1000 });
+  await $v().play().catch(() => {});
+  await wait(3000);
+  ok(getComputedStyle($v()).visibility === 'visible', 'L1 protected video stays visible (no black canvas)',
+     'vis=' + getComputedStyle($v()).visibility);
+  ok(!$v().hasAttribute('data-dali-sync-hidden'), 'L1b video never got hidden');
+  ok(window.__daliSync.S.reason === 'protected', 'L1c reported as protected',
+     window.__daliSync.S.reason);
+  window.createImageBitmap = realCIB;
+  await beacon({ running: false, streaming: false, delayMs: 0 });
+  $v().pause();
+  await wait(600);
+  clearVideoFlags();
+
+  // ---- M. the REAL beacon on 127.0.0.1:3697 ------------------------------
+  let liveBeacon = null;
+  try { liveBeacon = await window.DALIBeacon.fetchStatus(); } catch (e) { liveBeacon = null; }
+  if (liveBeacon && liveBeacon.running) {
+    log('      live beacon: ' + JSON.stringify(liveBeacon));
+    ok(typeof liveBeacon.delayMs === 'number' && isFinite(liveBeacon.delayMs),
+       'M1 real beacon returns a numeric delayMs', String(liveBeacon.delayMs));
+    ok(liveBeacon.delayMs >= 0 && liveBeacon.delayMs <= 4000, 'M1b real delayMs is in range',
+       String(liveBeacon.delayMs));
+    ok(typeof liveBeacon.streaming === 'boolean', 'M1c real beacon reports streaming');
+    if (liveBeacon.streaming && liveBeacon.delayMs >= 60) {
+      // Drive the whole pipeline off the genuine app: no stub anywhere.
+      window.__useRealBeacon = true;
+      await $v().play().catch(() => {});
+      ok(await waitFor(presenting, Math.max(6000, liveBeacon.delayMs + 4000)),
+         'M2 engages off the real DALI beacon');
+      ok(await settleAt(liveBeacon.delayMs, 220, 6000),
+         'M2b delay matches the app’s own measured delayMs (' + liveBeacon.delayMs + 'ms)');
+      window.__useRealBeacon = false;
+      $v().pause();
+      await wait(600);
+    } else {
+      log('SKIP  M2 real end-to-end (app is not streaming right now)');
+    }
+  } else {
+    log('SKIP  M1/M2 real beacon (DALI app not running on 3697)');
+  }
+
+  // T and U run after the real-beacon group, which may leave the app not
+  // streaming. Take the stub back and put a known room on the line — otherwise
+  // "no cut was sent" passes for the wrong reason.
+  window.__useRealBeacon = false;
+  await beacon({ running: true, streaming: true, delayMs: 1500 });
+  clearVideoFlags();
+
+  // ---- T. SHADOW DOM: a player inside a web component ---------------------
+  // document.querySelectorAll('video') does not pierce shadow roots, so before
+  // allVideos() a site built on web components looked like a page with no video
+  // at all. Nothing about the rest of the pipeline changes — this only asserts
+  // the element can be FOUND.
+  {
+    const host = document.createElement('div');
+    document.body.appendChild(host);
+    const root = host.attachShadow({ mode: 'open' });
+    const sv = document.createElement('video');
+    sv.src = $v().src; sv.muted = true; sv.loop = true;
+    sv.style.cssText = 'width:640px;height:360px';
+    root.appendChild(sv);
+    await new Promise((r) => { sv.onloadeddata = r; setTimeout(r, 3000); });
+
+    const found = window.__daliSync.allVideos();
+    ok(found.includes(sv), 'T1 a <video> inside an open shadow root is discovered',
+       'found ' + found.length + ' video(s)');
+    ok(found.includes($v()), 'T1b the light-DOM video is still discovered');
+    host.remove();
+    await wait(300);
+    ok(!window.__daliSync.allVideos().includes(sv), 'T1c and it disappears when removed');
+  }
+
+  // ---- U. FEED SWIPE: stop-then-start must not thrash the speakers --------
+  // TikTok / Reels / Shorts stop one video and start another a fraction of a
+  // second later. Cutting on every stop would send two volume round-trips per
+  // swipe. The grace window must swallow that entirely, while a REAL stop still
+  // cuts.
+  {
+    const v = $v();
+    if (!presenting()) { await v.play().catch(() => {}); await waitFor(presenting, 4000); }
+    await settleAt(1500, 250, 5000);
+
+    window.__clearCuts();
+    v.pause();
+    await wait(40);
+    await v.play().catch(() => {});      // "swipe": resumed well inside the 120ms grace
+    await wait(500);
+    ok(window.__cuts() === 0, 'U1 a fast stop/start sends NO cut and NO resume',
+       JSON.stringify(window.__cutLog));
+
+    // Three swipes in a row, same story.
+    window.__clearCuts();
+    for (let i = 0; i < 3; i++) {
+      v.pause(); await wait(35); await v.play().catch(() => {}); await wait(120);
+    }
+    await wait(400);
+    ok(window.__cuts() === 0, 'U1b three swipes in a row still send nothing',
+       JSON.stringify(window.__cutLog));
+
+    // A real pause DOES cut, and promptly.
+    await waitFor(presenting, 4000);
+    window.__clearCuts();
+    const pausedAt = performance.now();
+    v.pause();
+    const gotCut = await waitFor(() => window.__cuts('cut') > 0, 1500);
+    const lag = Math.round(window.__cutLog[0] ? window.__cutLog[0].at - pausedAt : -1);
+    ok(gotCut, 'U2 a real pause cuts the audio', 'after ' + lag + 'ms');
+    ok(gotCut && lag < 400, 'U2b and it is prompt (grace is 120ms, not a second)',
+       lag + 'ms');
+
+    // Resuming releases it.
+    window.__clearCuts();
+    await v.play().catch(() => {});
+    ok(await waitFor(() => window.__cuts('resume') > 0, 3000),
+       'U3 play releases the audio again');
+    await waitFor(presenting, 4000);
+    await settleAt(1500, 250, 5000);
+
+    // THE HEARTBEAT. This is the regression test for the room going silent in
+    // the middle of a video that never stopped.
+    //
+    // "A video is playing here" is not a fact a frame can state once. The
+    // worker ages a frame out of its union after 6 s of silence and reads the
+    // empty union as "nothing is playing anywhere", so a steadily playing
+    // video with no pause, seek or loadeddata to force a report has to keep
+    // checking in on a timer. It didn't: reportPlaystate returned early
+    // whenever the value matched the last one sent, so it reported once and
+    // went quiet, and six seconds later the room went dead on a video that was
+    // still running. Play, touch nothing for two staleness windows, and assert
+    // the room is never cut.
+    window.__clearCuts();
+    await wait(13000);
+    ok(window.__cuts('cut') === 0,
+       'U4 a video that just keeps playing is never cut (heartbeat alive)',
+       JSON.stringify(window.__cutLog));
+    ok(!v.paused, 'U4b and it really was still playing throughout');
+  }
+
+  // ---- N. final state: page handed back exactly -------------------------
+  await beacon({ running: false, streaming: false, delayMs: 0 }, 1200);
+  ok(!$c(), 'N1 no overlay left behind');
+  ok(pageRestored(), 'N1b page fully restored at the end');
+  ok(window.__bmp().live === 0, 'N1c no ImageBitmap left alive', JSON.stringify(window.__bmp()));
+
+  const pass = L.filter((x) => x.startsWith('PASS')).length;
+  const fail = L.filter((x) => x.startsWith('FAIL')).length;
+  log('=== done: ' + pass + ' pass, ' + fail + ' fail ===');
+  window.__suiteDone = L.join('\n');
+  window.__suiteResult = { pass, fail };
+}
+
+window.__runSuite = () => runSuite().catch((e) => {
+  log('THREW ' + (e && e.stack || e));
+  const pass = L.filter((x) => x.startsWith('PASS')).length;
+  window.__suiteDone = L.join('\n');
+  window.__suiteResult = { pass, fail: 999 };
+});
+window.__out = () => document.getElementById('out').textContent;
+document.getElementById('run').addEventListener('click', window.__runSuite);
+</script>
+</body>
+</html>

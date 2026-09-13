@@ -1,0 +1,70 @@
+<template>
+  <tabs-music />
+  <content-with-heading>
+    <template #heading>
+      <pane-title :content="{ title: $t('page.music.recently-added.title') }" />
+    </template>
+    <template #content>
+      <list-albums :items="albums" />
+    </template>
+    <template #footer>
+      <router-link
+        class="button is-small is-rounded"
+        :to="{ name: 'music-recently-added' }"
+      >
+        {{ $t('actions.show-more') }}
+      </router-link>
+    </template>
+  </content-with-heading>
+  <content-with-heading>
+    <template #heading>
+      <pane-title
+        :content="{ title: $t('page.music.recently-played.title') }"
+      />
+    </template>
+    <template #content>
+      <list-tracks :items="tracks" />
+    </template>
+    <template #footer>
+      <router-link
+        class="button is-small is-rounded"
+        :to="{ name: 'music-recently-played' }"
+      >
+        {{ $t('actions.show-more') }}
+      </router-link>
+    </template>
+  </content-with-heading>
+</template>
+
+<script setup>
+import { onMounted, ref } from 'vue'
+import ContentWithHeading from '@/templates/ContentWithHeading.vue'
+import { GroupedList } from '@/lib/GroupedList'
+import ListAlbums from '@/components/ListAlbums.vue'
+import ListTracks from '@/components/ListTracks.vue'
+import PaneTitle from '@/components/PaneTitle.vue'
+import TabsMusic from '@/components/TabsMusic.vue'
+import library from '@/api/library'
+
+const albums = ref([])
+const tracks = ref(null)
+
+onMounted(async () => {
+  const [{ albums: albumList }, { tracks: trackList }] = await Promise.all([
+    library.search({
+      expression:
+        'time_added after 8 weeks ago and media_kind is music having track_count > 3 order by time_added desc',
+      limit: 3,
+      type: 'album'
+    }),
+    library.search({
+      expression:
+        'time_played after 8 weeks ago and media_kind is music order by time_played desc',
+      limit: 3,
+      type: 'track'
+    })
+  ])
+  albums.value = new GroupedList(albumList)
+  tracks.value = new GroupedList(trackList)
+})
+</script>

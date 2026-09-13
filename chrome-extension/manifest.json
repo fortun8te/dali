@@ -1,0 +1,37 @@
+{
+  "manifest_version": 3,
+  "name": "DALI Video Sync",
+  "version": "1.1.0",
+  "description": "Silently delays in-page video to match audio streamed to AirPlay speakers by DALI. No settings.",
+  "minimum_chrome_version": "110",
+  "permissions": [
+    "storage",
+    "scripting"
+  ],
+  "host_permissions": [
+    "http://127.0.0.1:3697/*",
+    "http://*/*",
+    "https://*/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "<all_urls>"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "run_at": "document_idle",
+      "match_about_blank": true,
+      "all_frames": true
+    }
+  ],
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  }
+}

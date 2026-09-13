@@ -1,0 +1,2113 @@
+diff --git a/build-aux/config.rpath b/build-aux/config.rpath
+old mode 100644
+new mode 100755
+index e69de29..58870bd
+--- a/build-aux/config.rpath
++++ b/build-aux/config.rpath
+@@ -0,0 +1,751 @@
++#! /bin/sh
++# Output a system dependent set of variables, describing how to set the
++# run time search path of shared libraries in a binary (executable or
++# shared library).
++#
++#   Copyright 1996-2024 Free Software Foundation, Inc.
++#   Taken from GNU libtool, 2001
++#   Originally by Gordon Matzigkeit <gord@gnu.ai.mit.edu>, 1996
++#
++#   This file is free software; the Free Software Foundation gives
++#   unlimited permission to copy and/or distribute it, with or without
++#   modifications, as long as this notice is preserved.
++
++# Known limitations:
++# - On IRIX 6.5 with CC="cc", the run time search patch must not be longer
++#   than 256 bytes, otherwise the compiler driver will dump core. The only
++#   known workaround is to choose shorter directory names for the build
++#   directory and/or the installation directory.
++
++# func_usage
++# outputs to stdout the --help usage message.
++func_usage ()
++{
++  echo "\
++Usage: config.rpath [OPTION] HOST
++
++Prints shell variable assignments that describe how to hardcode a directory
++for the lookup of shared libraries into a binary (executable or shared library).
++
++The first argument passed to this file is the canonical host specification,
++   CPU_TYPE-MANUFACTURER-OPERATING_SYSTEM
++or
++   CPU_TYPE-MANUFACTURER-KERNEL-OPERATING_SYSTEM
++
++The environment variables CC, GCC, LDFLAGS, LD, with_gnu_ld
++should be set by the caller.
++
++The set of defined variables is at the end of this script.
++
++Options:
++      --help           print this help and exit
++      --version        print version information and exit
++
++Send patches and bug reports to <bug-gnulib@gnu.org>."
++}
++
++# func_version
++# outputs to stdout the --version message.
++func_version ()
++{
++  echo "config.rpath (GNU gnulib, module havelib)"
++  echo "Copyright (C) 2024 Free Software Foundation, Inc.
++License: All-Permissive.
++This is free software: you are free to change and redistribute it.
++There is NO WARRANTY, to the extent permitted by law."
++  echo
++  printf 'Written by %s.\n' "Bruno Haible"
++}
++
++# func_fatal_error message
++# outputs to stderr a fatal error message, and terminates the program.
++func_fatal_error ()
++{
++  echo "config.rpath: *** $1" 1>&2
++  echo "config.rpath: *** Stop." 1>&2
++  exit 1
++}
++
++# Command-line option processing.
++while test $# -gt 0; do
++  case "$1" in
++    --help | --hel | --he | --h )
++      func_usage
++      exit 0 ;;
++   --version | --versio | --versi | --vers | --ver | --ve | --v )
++      func_version
++      exit 0 ;;
++    -- )      # Stop option processing
++      shift; break ;;
++    -* )
++      func_fatal_error "unrecognized option: $1"
++      ;;
++    * )
++      break ;;
++  esac
++done
++
++if test $# -gt 1; then
++  func_fatal_error "too many arguments"
++fi
++if test $# -lt 1; then
++  func_fatal_error "too few arguments"
++fi
++
++# All known linkers require a '.a' archive for static linking (except MSVC,
++# which needs '.lib').
++libext=a
++shrext=.so
++
++host="$1"
++host_cpu=`echo "$host" | sed 's/^\([^-]*\)-\([^-]*\)-\(.*\)$/\1/'`
++host_vendor=`echo "$host" | sed 's/^\([^-]*\)-\([^-]*\)-\(.*\)$/\2/'`
++host_os=`echo "$host" | sed 's/^\([^-]*\)-\([^-]*\)-\(.*\)$/\3/'`
++
++# Code taken from libtool.m4's _LT_CC_BASENAME.
++
++for cc_temp in $CC""; do
++  case $cc_temp in
++    compile | *[\\/]compile | ccache | *[\\/]ccache ) ;;
++    distcc | *[\\/]distcc | purify | *[\\/]purify ) ;;
++    \-*) ;;
++    *) break;;
++  esac
++done
++cc_basename=`echo "$cc_temp" | sed -e 's%^.*/%%'`
++
++# Code taken from libtool.m4's _LT_COMPILER_PIC.
++
++wl=
++if test "$GCC" = yes; then
++  wl='-Wl,'
++else
++  case "$host_os" in
++    aix*)
++      wl='-Wl,'
++      ;;
++    mingw* | cygwin* | pw32* | os2* | cegcc*)
++      ;;
++    hpux9* | hpux10* | hpux11*)
++      wl='-Wl,'
++      ;;
++    irix5* | irix6* | nonstopux*)
++      wl='-Wl,'
++      ;;
++    linux* | k*bsd*-gnu | kopensolaris*-gnu)
++      case $cc_basename in
++        ecc*)
++          wl='-Wl,'
++          ;;
++        icc* | ifort*)
++          wl='-Wl,'
++          ;;
++        lf95*)
++          wl='-Wl,'
++          ;;
++        nagfor*)
++          wl='-Wl,-Wl,,'
++          ;;
++        pgcc* | pgf77* | pgf90* | pgf95* | pgfortran*)
++          wl='-Wl,'
++          ;;
++        ccc*)
++          wl='-Wl,'
++          ;;
++        xl* | bgxl* | bgf* | mpixl*)
++          wl='-Wl,'
++          ;;
++        como)
++          wl='-lopt='
++          ;;
++        *)
++          case `$CC -V 2>&1 | sed 5q` in
++            *Sun\ F* | *Sun*Fortran*)
++              wl=
++              ;;
++            *Sun\ C*)
++              wl='-Wl,'
++              ;;
++          esac
++          ;;
++      esac
++      ;;
++    newsos6)
++      ;;
++    *nto* | *qnx*)
++      ;;
++    osf3* | osf4* | osf5*)
++      wl='-Wl,'
++      ;;
++    rdos*)
++      ;;
++    solaris*)
++      case $cc_basename in
++        f77* | f90* | f95* | sunf77* | sunf90* | sunf95*)
++          wl='-Qoption ld '
++          ;;
++        *)
++          wl='-Wl,'
++          ;;
++      esac
++      ;;
++    sunos4*)
++      wl='-Qoption ld '
++      ;;
++    sysv4 | sysv4.2uw2* | sysv4.3*)
++      wl='-Wl,'
++      ;;
++    sysv4*MP*)
++      ;;
++    sysv5* | unixware* | sco3.2v5* | sco5v6* | OpenUNIX*)
++      wl='-Wl,'
++      ;;
++    unicos*)
++      wl='-Wl,'
++      ;;
++    uts4*)
++      ;;
++  esac
++fi
++
++# Code taken from libtool.m4's _LT_LINKER_SHLIBS.
++
++hardcode_libdir_flag_spec=
++hardcode_libdir_separator=
++hardcode_direct=no
++hardcode_minus_L=no
++
++case "$host_os" in
++  cygwin* | mingw* | pw32* | cegcc*)
++    # FIXME: the MSVC++ port hasn't been tested in a loooong time
++    # When not using gcc, we currently assume that we are using
++    # Microsoft Visual C++.
++    if test "$GCC" != yes; then
++      with_gnu_ld=no
++    fi
++    ;;
++  interix*)
++    # we just hope/assume this is gcc and not c89 (= MSVC++)
++    with_gnu_ld=yes
++    ;;
++  openbsd*)
++    with_gnu_ld=no
++    ;;
++esac
++
++ld_shlibs=yes
++if test "$with_gnu_ld" = yes; then
++  # Set some defaults for GNU ld with shared library support. These
++  # are reset later if shared libraries are not supported. Putting them
++  # here allows them to be overridden if necessary.
++  # Unlike libtool, we use -rpath here, not --rpath, since the documented
++  # option of GNU ld is called -rpath, not --rpath.
++  hardcode_libdir_flag_spec='${wl}-rpath ${wl}$libdir'
++  case "$host_os" in
++    aix[3-9]*)
++      # On AIX/PPC, the GNU linker is very broken
++      if test "$host_cpu" != ia64; then
++        ld_shlibs=no
++      fi
++      ;;
++    amigaos*)
++      case "$host_cpu" in
++        powerpc)
++          ;;
++        m68k)
++          hardcode_libdir_flag_spec='-L$libdir'
++          hardcode_minus_L=yes
++          ;;
++      esac
++      ;;
++    beos*)
++      if $LD --help 2>&1 | grep ': supported targets:.* elf' > /dev/null; then
++        :
++      else
++        ld_shlibs=no
++      fi
++      ;;
++    cygwin* | mingw* | pw32* | cegcc*)
++      # hardcode_libdir_flag_spec is actually meaningless, as there is
++      # no search path for DLLs.
++      hardcode_libdir_flag_spec='-L$libdir'
++      if $LD --help 2>&1 | grep 'auto-import' > /dev/null; then
++        :
++      else
++        ld_shlibs=no
++      fi
++      ;;
++    haiku*)
++      ;;
++    interix[3-9]*)
++      hardcode_direct=no
++      hardcode_libdir_flag_spec='${wl}-rpath,$libdir'
++      ;;
++    gnu* | linux* | tpf* | k*bsd*-gnu | kopensolaris*-gnu)
++      if $LD --help 2>&1 | grep ': supported targets:.* elf' > /dev/null; then
++        :
++      else
++        ld_shlibs=no
++      fi
++      ;;
++    netbsd*)
++      ;;
++    solaris*)
++      if $LD -v 2>&1 | grep 'BFD 2\.8' > /dev/null; then
++        ld_shlibs=no
++      elif $LD --help 2>&1 | grep ': supported targets:.* elf' > /dev/null; then
++        :
++      else
++        ld_shlibs=no
++      fi
++      ;;
++    sysv5* | sco3.2v5* | sco5v6* | unixware* | OpenUNIX*)
++      case `$LD -v 2>&1` in
++        *\ [01].* | *\ 2.[0-9].* | *\ 2.1[0-5].*)
++          ld_shlibs=no
++          ;;
++        *)
++          if $LD --help 2>&1 | grep ': supported targets:.* elf' > /dev/null; then
++            hardcode_libdir_flag_spec='`test -z "$SCOABSPATH" && echo ${wl}-rpath,$libdir`'
++          else
++            ld_shlibs=no
++          fi
++          ;;
++      esac
++      ;;
++    sunos4*)
++      hardcode_direct=yes
++      ;;
++    *)
++      if $LD --help 2>&1 | grep ': supported targets:.* elf' > /dev/null; then
++        :
++      else
++        ld_shlibs=no
++      fi
++      ;;
++  esac
++  if test "$ld_shlibs" = no; then
++    hardcode_libdir_flag_spec=
++  fi
++else
++  case "$host_os" in
++    aix3*)
++      # Note: this linker hardcodes the directories in LIBPATH if there
++      # are no directories specified by -L.
++      hardcode_minus_L=yes
++      if test "$GCC" = yes; then
++        # Neither direct hardcoding nor static linking is supported with a
++        # broken collect2.
++        hardcode_direct=unsupported
++      fi
++      ;;
++    aix[4-9]*)
++      if test "$host_cpu" = ia64; then
++        # On IA64, the linker does run time linking by default, so we don't
++        # have to do anything special.
++        aix_use_runtimelinking=no
++      else
++        aix_use_runtimelinking=no
++        # Test if we are trying to use run time linking or normal
++        # AIX style linking. If -brtl is somewhere in LDFLAGS, we
++        # need to do runtime linking.
++        case $host_os in aix4.[23]|aix4.[23].*|aix[5-9]*)
++          for ld_flag in $LDFLAGS; do
++            if (test $ld_flag = "-brtl" || test $ld_flag = "-Wl,-brtl"); then
++              aix_use_runtimelinking=yes
++              break
++            fi
++          done
++          ;;
++        esac
++      fi
++      hardcode_direct=yes
++      hardcode_libdir_separator=':'
++      if test "$GCC" = yes; then
++        case $host_os in aix4.[012]|aix4.[012].*)
++          collect2name=`${CC} -print-prog-name=collect2`
++          if test -f "$collect2name" && \
++            strings "$collect2name" | grep resolve_lib_name >/dev/null
++          then
++            # We have reworked collect2
++            :
++          else
++            # We have old collect2
++            hardcode_direct=unsupported
++            hardcode_minus_L=yes
++            hardcode_libdir_flag_spec='-L$libdir'
++            hardcode_libdir_separator=
++          fi
++          ;;
++        esac
++      fi
++      # Begin _LT_AC_SYS_LIBPATH_AIX.
++      echo 'int main () { return 0; }' > conftest.c
++      ${CC} ${LDFLAGS} conftest.c -o conftest
++      aix_libpath=`dump -H conftest 2>/dev/null | sed -n -e '/Import File Strings/,/^$/ { /^0/ { s/^0  *\(.*\)$/\1/; p; }
++}'`
++      if test -z "$aix_libpath"; then
++        aix_libpath=`dump -HX64 conftest 2>/dev/null | sed -n -e '/Import File Strings/,/^$/ { /^0/ { s/^0  *\(.*\)$/\1/; p; }
++}'`
++      fi
++      if test -z "$aix_libpath"; then
++        aix_libpath="/usr/lib:/lib"
++      fi
++      rm -f conftest.c conftest
++      # End _LT_AC_SYS_LIBPATH_AIX.
++      if test "$aix_use_runtimelinking" = yes; then
++        hardcode_libdir_flag_spec='${wl}-blibpath:$libdir:'"$aix_libpath"
++      else
++        if test "$host_cpu" = ia64; then
++          hardcode_libdir_flag_spec='${wl}-R $libdir:/usr/lib:/lib'
++        else
++          hardcode_libdir_flag_spec='${wl}-blibpath:$libdir:'"$aix_libpath"
++        fi
++      fi
++      ;;
++    amigaos*)
++      case "$host_cpu" in
++        powerpc)
++          ;;
++        m68k)
++          hardcode_libdir_flag_spec='-L$libdir'
++          hardcode_minus_L=yes
++          ;;
++      esac
++      ;;
++    bsdi[45]*)
++      ;;
++    cygwin* | mingw* | pw32* | cegcc*)
++      # When not using gcc, we currently assume that we are using
++      # Microsoft Visual C++.
++      # hardcode_libdir_flag_spec is actually meaningless, as there is
++      # no search path for DLLs.
++      hardcode_libdir_flag_spec=' '
++      libext=lib
++      ;;
++    darwin* | rhapsody*)
++      hardcode_direct=no
++      if { case $cc_basename in ifort*) true;; *) test "$GCC" = yes;; esac; }; then
++        :
++      else
++        ld_shlibs=no
++      fi
++      ;;
++    dgux*)
++      hardcode_libdir_flag_spec='-L$libdir'
++      ;;
++    freebsd2.[01]*)
++      hardcode_direct=yes
++      hardcode_minus_L=yes
++      ;;
++    freebsd* | dragonfly* | midnightbsd*)
++      hardcode_libdir_flag_spec='-R$libdir'
++      hardcode_direct=yes
++      ;;
++    hpux9*)
++      hardcode_libdir_flag_spec='${wl}+b ${wl}$libdir'
++      hardcode_libdir_separator=:
++      hardcode_direct=yes
++      # hardcode_minus_L: Not really in the search PATH,
++      # but as the default location of the library.
++      hardcode_minus_L=yes
++      ;;
++    hpux10*)
++      if test "$with_gnu_ld" = no; then
++        hardcode_libdir_flag_spec='${wl}+b ${wl}$libdir'
++        hardcode_libdir_separator=:
++        hardcode_direct=yes
++        # hardcode_minus_L: Not really in the search PATH,
++        # but as the default location of the library.
++        hardcode_minus_L=yes
++      fi
++      ;;
++    hpux11*)
++      if test "$with_gnu_ld" = no; then
++        hardcode_libdir_flag_spec='${wl}+b ${wl}$libdir'
++        hardcode_libdir_separator=:
++        case $host_cpu in
++          hppa*64*|ia64*)
++            hardcode_direct=no
++            ;;
++          *)
++            hardcode_direct=yes
++            # hardcode_minus_L: Not really in the search PATH,
++            # but as the default location of the library.
++            hardcode_minus_L=yes
++            ;;
++        esac
++      fi
++      ;;
++    irix5* | irix6* | nonstopux*)
++      hardcode_libdir_flag_spec='${wl}-rpath ${wl}$libdir'
++      hardcode_libdir_separator=:
++      ;;
++    netbsd*)
++      hardcode_libdir_flag_spec='-R$libdir'
++      hardcode_direct=yes
++      ;;
++    newsos6)
++      hardcode_direct=yes
++      hardcode_libdir_flag_spec='${wl}-rpath ${wl}$libdir'
++      hardcode_libdir_separator=:
++      ;;
++    *nto* | *qnx*)
++      ;;
++    openbsd*)
++      if test -f /usr/libexec/ld.so; then
++        hardcode_direct=yes
++        if test -z "`echo __ELF__ | $CC -E - | grep __ELF__`" || test "$host_os-$host_cpu" = "openbsd2.8-powerpc"; then
++          hardcode_libdir_flag_spec='${wl}-rpath,$libdir'
++        else
++          case "$host_os" in
++            openbsd[01].* | openbsd2.[0-7] | openbsd2.[0-7].*)
++              hardcode_libdir_flag_spec='-R$libdir'
++              ;;
++            *)
++              hardcode_libdir_flag_spec='${wl}-rpath,$libdir'
++              ;;
++          esac
++        fi
++      else
++        ld_shlibs=no
++      fi
++      ;;
++    os2*)
++      hardcode_libdir_flag_spec='-L$libdir'
++      hardcode_minus_L=yes
++      ;;
++    osf3*)
++      hardcode_libdir_flag_spec='${wl}-rpath ${wl}$libdir'
++      hardcode_libdir_separator=:
++      ;;
++    osf4* | osf5*)
++      if test "$GCC" = yes; then
++        hardcode_libdir_flag_spec='${wl}-rpath ${wl}$libdir'
++      else
++        # Both cc and cxx compiler support -rpath directly
++        hardcode_libdir_flag_spec='-rpath $libdir'
++      fi
++      hardcode_libdir_separator=:
++      ;;
++    solaris*)
++      hardcode_libdir_flag_spec='-R$libdir'
++      ;;
++    sunos4*)
++      hardcode_libdir_flag_spec='-L$libdir'
++      hardcode_direct=yes
++      hardcode_minus_L=yes
++      ;;
++    sysv4)
++      case $host_vendor in
++        sni)
++          hardcode_direct=yes # is this really true???
++          ;;
++        siemens)
++          hardcode_direct=no
++          ;;
++        motorola)
++          hardcode_direct=no #Motorola manual says yes, but my tests say they lie
++          ;;
++      esac
++      ;;
++    sysv4.3*)
++      ;;
++    sysv4*MP*)
++      if test -d /usr/nec; then
++        ld_shlibs=yes
++      fi
++      ;;
++    sysv4*uw2* | sysv5OpenUNIX* | sysv5UnixWare7.[01].[10]* | unixware7* | sco3.2v5.0.[024]*)
++      ;;
++    sysv5* | sco3.2v5* | sco5v6*)
++      hardcode_libdir_flag_spec='`test -z "$SCOABSPATH" && echo ${wl}-R,$libdir`'
++      hardcode_libdir_separator=':'
++      ;;
++    uts4*)
++      hardcode_libdir_flag_spec='-L$libdir'
++      ;;
++    *)
++      ld_shlibs=no
++      ;;
++  esac
++fi
++
++# Check dynamic linker characteristics
++# Code taken from libtool.m4's _LT_SYS_DYNAMIC_LINKER.
++# Unlike libtool.m4, here we don't care about _all_ names of the library, but
++# only about the one the linker finds when passed -lNAME. This is the last
++# element of library_names_spec in libtool.m4, or possibly two of them if the
++# linker has special search rules.
++library_names_spec=      # the last element of library_names_spec in libtool.m4
++libname_spec='lib$name'
++case "$host_os" in
++  aix3*)
++    library_names_spec='$libname.a'
++    ;;
++  aix[4-9]*)
++    library_names_spec='$libname$shrext'
++    ;;
++  amigaos*)
++    case "$host_cpu" in
++      powerpc*)
++        library_names_spec='$libname$shrext' ;;
++      m68k)
++        library_names_spec='$libname.a' ;;
++    esac
++    ;;
++  beos*)
++    library_names_spec='$libname$shrext'
++    ;;
++  bsdi[45]*)
++    library_names_spec='$libname$shrext'
++    ;;
++  cygwin* | mingw* | pw32* | cegcc*)
++    shrext=.dll
++    library_names_spec='$libname.dll.a $libname.lib'
++    ;;
++  darwin* | rhapsody*)
++    shrext=.dylib
++    library_names_spec='$libname$shrext'
++    ;;
++  dgux*)
++    library_names_spec='$libname$shrext'
++    ;;
++  freebsd[23].*)
++    library_names_spec='$libname$shrext$versuffix'
++    ;;
++  freebsd* | dragonfly* | midnightbsd*)
++    library_names_spec='$libname$shrext'
++    ;;
++  gnu*)
++    library_names_spec='$libname$shrext'
++    ;;
++  haiku*)
++    library_names_spec='$libname$shrext'
++    ;;
++  hpux9* | hpux10* | hpux11*)
++    case $host_cpu in
++      ia64*)
++        shrext=.so
++        ;;
++      hppa*64*)
++        shrext=.sl
++        ;;
++      *)
++        shrext=.sl
++        ;;
++    esac
++    library_names_spec='$libname$shrext'
++    ;;
++  interix[3-9]*)
++    library_names_spec='$libname$shrext'
++    ;;
++  irix5* | irix6* | nonstopux*)
++    library_names_spec='$libname$shrext'
++    case "$host_os" in
++      irix5* | nonstopux*)
++        libsuff= shlibsuff=
++        ;;
++      *)
++        case $LD in
++          *-32|*"-32 "|*-melf32bsmip|*"-melf32bsmip ") libsuff= shlibsuff= ;;
++          *-n32|*"-n32 "|*-melf32bmipn32|*"-melf32bmipn32 ") libsuff=32 shlibsuff=N32 ;;
++          *-64|*"-64 "|*-melf64bmip|*"-melf64bmip ") libsuff=64 shlibsuff=64 ;;
++          *) libsuff= shlibsuff= ;;
++        esac
++        ;;
++    esac
++    ;;
++  linux*oldld* | linux*aout* | linux*coff*)
++    ;;
++  linux* | k*bsd*-gnu | kopensolaris*-gnu)
++    library_names_spec='$libname$shrext'
++    ;;
++  knetbsd*-gnu)
++    library_names_spec='$libname$shrext'
++    ;;
++  netbsd*)
++    library_names_spec='$libname$shrext'
++    ;;
++  newsos6)
++    library_names_spec='$libname$shrext'
++    ;;
++  *nto* | *qnx*)
++    library_names_spec='$libname$shrext'
++    ;;
++  openbsd*)
++    library_names_spec='$libname$shrext$versuffix'
++    ;;
++  os2*)
++    libname_spec='$name'
++    shrext=.dll
++    library_names_spec='$libname.a'
++    ;;
++  osf3* | osf4* | osf5*)
++    library_names_spec='$libname$shrext'
++    ;;
++  rdos*)
++    ;;
++  solaris*)
++    library_names_spec='$libname$shrext'
++    ;;
++  sunos4*)
++    library_names_spec='$libname$shrext$versuffix'
++    ;;
++  sysv4 | sysv4.3*)
++    library_names_spec='$libname$shrext'
++    ;;
++  sysv4*MP*)
++    library_names_spec='$libname$shrext'
++    ;;
++  sysv5* | sco3.2v5* | sco5v6* | unixware* | OpenUNIX* | sysv4*uw2*)
++    library_names_spec='$libname$shrext'
++    ;;
++  tpf*)
++    library_names_spec='$libname$shrext'
++    ;;
++  uts4*)
++    library_names_spec='$libname$shrext'
++    ;;
++esac
++
++sed_quote_subst='s/\(["`$\\]\)/\\\1/g'
++escaped_wl=`echo "X$wl" | sed -e 's/^X//' -e "$sed_quote_subst"`
++shlibext=`echo "$shrext" | sed -e 's,^\.,,'`
++escaped_libname_spec=`echo "X$libname_spec" | sed -e 's/^X//' -e "$sed_quote_subst"`
++escaped_library_names_spec=`echo "X$library_names_spec" | sed -e 's/^X//' -e "$sed_quote_subst"`
++escaped_hardcode_libdir_flag_spec=`echo "X$hardcode_libdir_flag_spec" | sed -e 's/^X//' -e "$sed_quote_subst"`
++
++LC_ALL=C sed -e 's/^\([a-zA-Z0-9_]*\)=/acl_cv_\1=/' <<EOF
++
++# How to pass a linker flag through the compiler.
++wl="$escaped_wl"
++
++# Static library suffix (normally "a").
++libext="$libext"
++
++# Shared library suffix (normally "so").
++shlibext="$shlibext"
++
++# Format of library name prefix.
++libname_spec="$escaped_libname_spec"
++
++# Library names that the linker finds when passed -lNAME.
++library_names_spec="$escaped_library_names_spec"
++
++# Flag to hardcode \$libdir into a binary during linking.
++# This must work even if \$libdir does not exist.
++hardcode_libdir_flag_spec="$escaped_hardcode_libdir_flag_spec"
++
++# Whether we need a single -rpath flag with a separated argument.
++hardcode_libdir_separator="$hardcode_libdir_separator"
++
++# Set to yes if using DIR/libNAME.so during linking hardcodes DIR into the
++# resulting binary.
++hardcode_direct="$hardcode_direct"
++
++# Set to yes if using the -LDIR flag during linking hardcodes DIR into the
++# resulting binary.
++hardcode_minus_L="$hardcode_minus_L"
++
++EOF
+diff --git a/src/evrtsp/evrtsp.h b/src/evrtsp/evrtsp.h
+index 2d5d091..6b77af4 100644
+--- a/src/evrtsp/evrtsp.h
++++ b/src/evrtsp/evrtsp.h
+@@ -153,6 +153,10 @@ void evrtsp_connection_set_ciphercb(struct evrtsp_connection *evcon,
+ void evrtsp_connection_set_base(struct evrtsp_connection *evcon,
+     struct event_base *base);
+ 
++/** Set the timeout used by subsequent requests on this connection. */
++void evrtsp_connection_set_timeout(struct evrtsp_connection *evcon,
++    int timeout_in_secs);
++
+ /** Get the remote address and port associated with this connection. */
+ void evrtsp_connection_get_peer(struct evrtsp_connection *evcon,
+     char **address, u_short *port);
+diff --git a/src/httpd_jsonapi.c b/src/httpd_jsonapi.c
+index 619dfee..c3b4c8c 100644
+--- a/src/httpd_jsonapi.c
++++ b/src/httpd_jsonapi.c
+@@ -1629,6 +1629,8 @@ speaker_to_json(struct player_speaker_info *spk)
+   json_object_object_add(output, "name", json_object_new_string(spk->name));
+   json_object_object_add(output, "type", json_object_new_string(spk->output_type));
+   json_object_object_add(output, "selected", json_object_new_boolean(spk->selected));
++  json_object_object_add(output, "connected", json_object_new_boolean(spk->connected));
++  json_object_object_add(output, "streaming", json_object_new_boolean(spk->streaming));
+   json_object_object_add(output, "has_password", json_object_new_boolean(spk->has_password));
+   json_object_object_add(output, "requires_auth", json_object_new_boolean(spk->requires_auth));
+   json_object_object_add(output, "needs_auth_key", json_object_new_boolean(spk->needs_auth_key));
+diff --git a/src/inputs/pipe.c b/src/inputs/pipe.c
+index 83a0300..eb01c50 100644
+--- a/src/inputs/pipe.c
++++ b/src/inputs/pipe.c
+@@ -44,6 +44,7 @@
+ #include <string.h>
+ #include <errno.h>
+ #include <limits.h>
++#include <time.h> // DALI patch: clock_gettime() for ts_get()
+ #include <pthread.h>
+ #include <sys/types.h>
+ #include <sys/stat.h>
+@@ -74,6 +75,11 @@
+ // Where we store pictures for the artwork module to read
+ #define PIPE_TMPFILE_TEMPLATE "/tmp/" PACKAGE_NAME ".XXXXXX.ext"
+ #define PIPE_TMPFILE_TEMPLATE_EXTLEN 4
++// DALI patch: how much audio (in ms) we write between re-anchoring the player's
++// presentation timestamp to the wall clock, see ts_get()/play() below. Once a
++// second is often enough to stop pts drifting away from real time, and rare
++// enough that the extra marker in the input buffer costs nothing.
++#define PIPE_SYNC_INTERVAL_MS 1000
+ 
+ enum pipetype
+ {
+@@ -155,6 +161,10 @@ static struct pipe *pipe_watch_list;
+ // Pipe + extra fields that we start watching for metadata after playback starts
+ static struct pipe_metadata pipe_metadata;
+ 
++// DALI patch: bytes of audio written since we last asked the player to re-anchor
++// its presentation timestamp (INPUT_FLAG_SYNC). Only touched by the input thread.
++static size_t pipe_sync_bytes;
++
+ /* -------------------------------- HELPERS --------------------------------- */
+ 
+ // These might be more at home in dmap_common.c
+@@ -1050,6 +1060,9 @@ setup(struct input_source *source)
+   source->quality.bits_per_sample = pipe_bits_per_sample;
+   source->quality.channels = 2;
+ 
++  // DALI patch: fresh session, so start counting towards the first re-anchor
++  pipe_sync_bytes = 0;
++
+   return 0;
+ }
+ 
+@@ -1089,7 +1102,9 @@ static int
+ play(struct input_source *source)
+ {
+   struct pipe *pipe = source->input_ctx;
++  size_t sync_interval_bytes;
+   short flags;
++  int write_ret;
+   int ret;
+ 
+   ret = evbuffer_read(source->evbuf, pipe->fd, PIPE_READ_MAX);
+@@ -1115,7 +1130,53 @@ play(struct input_source *source)
+   flags = (pipe_metadata.is_new ? INPUT_FLAG_METADATA : 0);
+   pipe_metadata.is_new = 0;
+ 
+-  input_write(source->evbuf, &source->quality, flags);
++  // DALI patch: ask the player to re-anchor its presentation timestamp to the
++  // wall clock roughly once per second of audio. pb_session.pts is otherwise
++  // anchored to CLOCK_MONOTONIC only once, at the first read, and afterwards
++  // only advances by the amount of audio actually read. A live pipe inevitably
++  // delivers less than real time now and then (short reads, gaps), and every
++  // one of those permanently retards pts against real time. pts is what goes
++  // into the AirPlay RTCP sync packets as the wall clock anchor, so after a
++  // couple of minutes the drift has eaten the ~2000 ms AirPlay lead and the
++  // receivers glitch. INPUT_FLAG_SYNC + ts_get() is existing (previously
++  // unused) OwnTone plumbing for exactly this. Doing it periodically rather
++  // than on every read keeps the marker list and the player's pts stable.
++  pipe_sync_bytes += ret;
++  sync_interval_bytes = STOB(((size_t)source->quality.sample_rate * PIPE_SYNC_INTERVAL_MS) / 1000,
++                             source->quality.bits_per_sample, source->quality.channels);
++  if (sync_interval_bytes > 0 && pipe_sync_bytes >= sync_interval_bytes)
++    flags |= INPUT_FLAG_SYNC;
++
++  write_ret = input_write(source->evbuf, &source->quality, flags);
++
++  // Only clear the counter if the write actually happened - on EAGAIN (input
++  // buffer full) input_write() returns before setting any markers, so the sync
++  // request was dropped and we should retry on the next iteration
++  if ((flags & INPUT_FLAG_SYNC) && write_ret == 0)
++    pipe_sync_bytes = 0;
++
++  return 0;
++}
++
++// DALI patch: implements struct input_definition.ts_get for the pipe input. The
++// input thread calls this (via ts_get()/markers_set() in input.c) when we set
++// INPUT_FLAG_SYNC, and the timestamp is attached to the input buffer as a byte
++// position marker. When the player's read reaches that position it calls
++// event_read_ts() -> session_update_read_ts(), which re-anchors pb_session.pts.
++// CLOCK_MONOTONIC is the same clock pb_session.start_ts is taken from in
++// player.c session_update_read(), and the same one airplay.c compares against,
++// so the two are directly comparable.
++static int
++ts_get(struct timespec *ts, struct input_source *source)
++{
++  int ret;
++
++  ret = clock_gettime(CLOCK_MONOTONIC, ts);
++  if (ret < 0)
++    {
++      DPRINTF(E_LOG, L_PLAYER, "Error getting clock for pipe sync: %s\n", strerror(errno));
++      return -1;
++    }
+ 
+   return 0;
+ }
+@@ -1188,6 +1249,7 @@ struct input_definition input_pipe =
+   .play = play,
+   .stop = stop,
+   .metadata_get = metadata_get,
++  .ts_get = ts_get, // DALI patch: enables the INPUT_FLAG_SYNC re-anchor, see play()
+   .init = init,
+   .deinit = deinit,
+ };
+diff --git a/src/outputs/airplay.c b/src/outputs/airplay.c
+index 4290b75..a4fdafc 100644
+--- a/src/outputs/airplay.c
++++ b/src/outputs/airplay.c
+@@ -97,8 +97,37 @@
+ // audio payload encryption. For normal pairing the key is 32 bytes.
+ #define AIRPLAY_AUDIO_KEY_LEN 32
+ 
+-// How many RTP packets to buffer for retransmission
+-#define AIRPLAY_PACKET_BUFFER_SIZE    1000
++// How many RTP packets to buffer for retransmission.
++// DALI: 1000 ≈ 8 s at 352/44100. Bluesound PowerNodes keep asking for aged
++// seqnums during WiFi blips; a deeper ring avoids delivery_unrecoverable
++// misses that used to cascade into session thrash. Memory cost is small.
++#define AIRPLAY_PACKET_BUFFER_SIZE    2000
++
++// DALI: scheduling lead uses start_buffer_ms minus this, NOT minus the full
++// AIRPLAY_AUDIO_LATENCY_MS (250). latencyMin in SETUP stays 250 ms (app A/V
++// contract). At start_buffer_ms=700 the stock (700-250)=450 ms lead left only
++// ~200 ms of WiFi margin after latencyMin — PowerNodes answered with
++// resend_req=50..130 per 30 s. Subtracting 50 ms yields ~650 ms lead / ~400 ms
++// margin without touching the advertised latencyMin.
++#define AIRPLAY_SCHED_LATENCY_MS      50
++
++// A receiver that ignores an ordinary in-session control request must not hold
++// OwnTone's single player-command lane for the stock 15 second RTSP timeout.
++// DALI used to send a startup volume fade through that lane; one lost reply
++// blocked every local status request, backed the input pipe up for eight seconds
++// and forced an audible discard. Keep the generous timeout for pairing/setup,
++// then fail fast once audio is already streaming. Healthy LAN replies are tens
++// of milliseconds; three seconds still leaves ample transient headroom.
++#define AIRPLAY_STREAM_CONTROL_TIMEOUT_SEC 3
++
++// Retransmit storm breaker. Live evidence: Kitchen/D request 2–4 unique
++// packets/s on ordinary WiFi; unbounded honouring of duplicate/aged requests
++// then crowds the same UDP path as live audio and amplifies loss.
++#define AIRPLAY_RESEND_MAX_LEN        8
++#define AIRPLAY_RESEND_RATE_PER_SEC   8
++#define AIRPLAY_RESEND_BURST_MAX      16
++#define AIRPLAY_RESEND_DEDUP_MS       120
++#define AIRPLAY_RESEND_MIN_LEAD_MS    80
+ 
+ #define AIRPLAY_MD_DELAY_STARTUP      15360
+ #define AIRPLAY_MD_DELAY_SWITCH       (AIRPLAY_MD_DELAY_STARTUP * 2)
+@@ -283,6 +312,33 @@ struct airplay_session
+   // amplifier or DSP delays)
+   int offset_samples;
+ 
++  // DALI compact sync health. One sample per device every 30s, plus immediate
++  // anomaly start/clear transitions. This replaces 60 near-identical lines per
++  // device per minute while retaining the evidence an AI needs.
++  time_t sync_log_last_sec;
++  int sync_log_anomaly;
++
++  // DALI per-device delivery evidence. A UDP send succeeding only proves that
++  // macOS accepted the packet, not that this receiver kept playing it. Track
++  // receiver retransmit demand and RTSP feedback separately so a silent front
++  // pair is no longer hidden behind the generic STREAMING state.
++  time_t delivery_log_last_sec;
++  time_t feedback_last_ok_sec;
++  uint64_t packets_sent_window;
++  uint64_t send_errors_window;
++  bool send_blocked;
++  struct timespec send_blocked_since;
++  uint64_t retransmit_requests_window;
++  uint64_t retransmit_packets_window;
++  uint64_t retransmit_suppressed_window;
++
++  // DALI retransmit storm breaker (see packets_resend).
++  uint16_t resend_last_seq;
++  uint16_t resend_last_len;
++  struct timespec resend_last_ts;
++  double resend_tokens;
++  struct timespec resend_tokens_ts;
++
+   char *local_v4_address;
+   char *local_v6_address;
+   char local_mac_address[18];
+@@ -492,6 +548,9 @@ sequence_start(enum airplay_seq_type seq_type, struct airplay_session *session,
+ static void
+ sequence_continue(struct airplay_seq_ctx *seq_ctx);
+ 
++static void
++feedback_success(struct airplay_session *session);
++
+ 
+ /* ------------------------------- MISC HELPERS ----------------------------- */
+ 
+@@ -1136,7 +1195,17 @@ master_session_cleanup(struct airplay_master_session *ams)
+ 	; /* EMPTY */
+ 
+       if (!s)
+-	DPRINTF(E_WARN, L_AIRPLAY, "WARNING: struct airplay_master_session not found in list; BUG!\n");
++	{
++	  // DALI patch: same double-free as in session_cleanup() above, one
++	  // level down — and this is the one that actually aborted, because
++	  // master_session_free() immediately calls outputs_quality_unsubscribe()
++	  // and rtp_session_free() on the freed master session. The
++	  // "Bug! Unsubscription request for a quality level that there is no
++	  // subscription for" line in the log is this same object being
++	  // unsubscribed twice, one step before malloc noticed and aborted.
++	  DPRINTF(E_WARN, L_AIRPLAY, "struct airplay_master_session not in list — already cleaned up, not freeing again\n");
++	  return;
++	}
+       else
+ 	s->next = ams->next;
+     }
+@@ -1204,7 +1273,14 @@ master_session_make(struct media_quality *quality, bool use_ptp)
+   ams->use_ptp = use_ptp;
+   ams->samples_per_packet = AIRPLAY_SAMPLES_PER_PACKET;
+   ams->rawbuf_size = STOB(ams->samples_per_packet, quality->bits_per_sample, quality->channels);
+-  ams->output_buffer_samples = (buffer_duration_ms - AIRPLAY_AUDIO_LATENCY_MS) * quality->sample_rate / 1000;
++  // See AIRPLAY_SCHED_LATENCY_MS — keep advertised latencyMin at 250 ms but
++  // schedule with a larger send lead so WiFi jitter has room to recover.
++  if (buffer_duration_ms <= AIRPLAY_SCHED_LATENCY_MS)
++    {
++      DPRINTF(E_LOG, L_AIRPLAY, "Configuration of start_buffer_ms must be higher than sched latency (%d)\n", AIRPLAY_SCHED_LATENCY_MS);
++      goto error;
++    }
++  ams->output_buffer_samples = (buffer_duration_ms - AIRPLAY_SCHED_LATENCY_MS) * quality->sample_rate / 1000;
+ 
+   CHECK_NULL(L_AIRPLAY, ams->rawbuf = malloc(ams->rawbuf_size));
+   CHECK_NULL(L_AIRPLAY, ams->input_buffer = evbuffer_new());
+@@ -1273,7 +1349,32 @@ session_cleanup(struct airplay_session *session)
+ 	; /* EMPTY */
+ 
+       if (!s)
+-	DPRINTF(E_WARN, L_AIRPLAY, "WARNING: struct airplay_session not found in list; BUG!\n");
++	{
++	  // DALI patch: DO NOT FALL THROUGH TO session_free().
++	  //
++	  // Reaching here means the session is not in airplay_sessions, i.e.
++	  // some other path already unlinked and freed it. Upstream logged this
++	  // and then freed it a second time, which is a straight double free.
++	  // Confirmed as the cause of two SIGABRTs on 2026-08-01 (20:04:00 and
++	  // 21:09:15), both with
++	  //   ___BUG_IN_CLIENT_OF_LIBMALLOC_POINTER_BEING_FREED_WAS_NOT_ALLOCATED
++	  //   rtp_session_free <- master_session_free <- master_session_cleanup
++	  //   <- session_free <- session_cleanup <- session_success
++	  //   <- sequence_continue_cb <- evrtsp_read
++	  // and both immediately preceded in the log by this exact warning.
++	  //
++	  // The trigger is shutdown: "Got SIGTERM" -> "Player deinit" tears the
++	  // sessions down, then an RTSP reply that was already in flight
++	  // completes and runs the whole teardown again on freed memory. Since
++	  // the app SIGTERMs the engine on every restart, this fired on a large
++	  // share of restarts.
++	  //
++	  // Returning leaks one session struct in the worst case — during a
++	  // teardown, in a process that is exiting. That is not a cost worth
++	  // paying a crash to avoid.
++	  DPRINTF(E_WARN, L_AIRPLAY, "struct airplay_session not in list — already cleaned up, not freeing again\n");
++	  return;
++	}
+       else
+ 	s->next = session->next;
+     }
+@@ -1295,6 +1396,20 @@ session_failure(struct airplay_session *session)
+   session_cleanup(session);
+ }
+ 
++// A receiver can miss a single RTSP volume reply while its UDP audio stream is
++// still perfectly healthy. Treating that control-plane timeout as a dead media
++// session tore the speaker down and caused a 7-second audible dropout. Keep the
++// stream alive; delivery/feedback health will still retire it if media actually
++// fails, and a later volume command can reconnect the RTSP control socket.
++static void
++volume_command_failure(struct airplay_session *session)
++{
++  DPRINTF(E_WARN, L_AIRPLAY,
++    "AI event=volume_control_timeout_ignored device='%s' state=streaming\n",
++    session->devname);
++  session_status(session);
++}
++
+ static void
+ deferred_session_failure_cb(int fd, short what, void *arg)
+ {
+@@ -1752,6 +1867,12 @@ airplay_metadata_keep_alive_send(struct airplay_session *session)
+   sequence_start(AIRPLAY_SEQ_FEEDBACK, session, NULL, "keep_alive");
+ }
+ 
++static void
++feedback_success(struct airplay_session *session)
++{
++  session->feedback_last_ok_sec = time(NULL);
++}
++
+ static void
+ airplay_metadata_send(struct output_metadata *metadata)
+ {
+@@ -1957,6 +2078,7 @@ packet_send(struct airplay_session *session, struct rtp_packet *pkt)
+   size_t buf_len;
+   ssize_t sent;
+   int ret;
++  int send_error = 0;
+ 
+   if (!session)
+     return -1;
+@@ -1968,6 +2090,8 @@ packet_send(struct airplay_session *session, struct rtp_packet *pkt)
+ 	return -1;
+ 
+       sent = send(session->server_fd, buf, buf_len, 0);
++      if (sent < 0)
++        send_error = errno;
+       free(buf);
+     }
+   else
+@@ -1975,11 +2099,39 @@ packet_send(struct airplay_session *session, struct rtp_packet *pkt)
+       buf = pkt->data;
+       buf_len = pkt->data_len;
+       sent = send(session->server_fd, buf, buf_len, 0);
++      if (sent < 0)
++        send_error = errno;
+     }
+ 
+   if (sent < 0)
+     {
+-      DPRINTF(E_LOG, L_AIRPLAY, "Send error for '%s': %s\n", session->devname, strerror(errno));
++      session->send_errors_window++;
++      // A full local UDP queue is not a receiver disconnect. Keep the RTP
++      // history and session alive so the receiver can request missing packets.
++      // Do not sleep here: this thread also clocks every other room output.
++      if (send_error == ENOBUFS || send_error == EAGAIN
++          || send_error == EWOULDBLOCK || send_error == EINTR)
++        {
++          struct timespec now;
++          if (clock_gettime(CLOCK_MONOTONIC, &now) == 0)
++            {
++              if (!session->send_blocked)
++                {
++                  session->send_blocked = true;
++                  session->send_blocked_since = now;
++                  DPRINTF(E_WARN, L_AIRPLAY,
++                    "AI event=send_backpressure device='%s' error=%d action=retain_session\n",
++                    session->devname, send_error);
++                }
++              int64_t elapsed_ns = ((int64_t)now.tv_sec - session->send_blocked_since.tv_sec) * 1000000000
++                                 + now.tv_nsec - session->send_blocked_since.tv_nsec;
++              // Well inside the 700ms presentation buffer. Persistent failure
++              // still takes the normal reconnect path rather than going silent.
++              if (elapsed_ns >= 0 && elapsed_ns < 250000000)
++                return -1;
++            }
++        }
++      DPRINTF(E_LOG, L_AIRPLAY, "Send error for '%s': %s\n", session->devname, strerror(send_error));
+ 
+       // Can't free it right away, it would make the ->next in the calling
+       // master_session and session loops invalid
+@@ -1988,10 +2140,46 @@ packet_send(struct airplay_session *session, struct rtp_packet *pkt)
+     }
+   else if (sent != buf_len)
+     {
++      session->send_errors_window++;
+       DPRINTF(E_WARN, L_AIRPLAY, "Partial send (%zd) for '%s'\n", sent, session->devname);
+       return -1;
+     }
+ 
++  if (session->send_blocked)
++    {
++      DPRINTF(E_LOG, L_AIRPLAY, "AI event=send_backpressure_recovered device='%s'\n", session->devname);
++      session->send_blocked = false;
++    }
++  session->packets_sent_window++;
++  {
++    time_t now = time(NULL);
++    if (!session->delivery_log_last_sec)
++      session->delivery_log_last_sec = now;
++    else if (now - session->delivery_log_last_sec >= 30)
++      {
++        long feedback_age = session->feedback_last_ok_sec
++          ? (long)(now - session->feedback_last_ok_sec) : -1;
++        DPRINTF(E_LOG, L_AIRPLAY,
++          "AI event=delivery_health device='%s' sent_30s=%" PRIu64
++          " resend_req=%" PRIu64 " resend_pkts=%" PRIu64
++          " resend_supp=%" PRIu64 " send_err=%" PRIu64
++          " feedback_age_s=%ld state=%s\n",
++          session->devname, session->packets_sent_window,
++          session->retransmit_requests_window,
++          session->retransmit_packets_window,
++          session->retransmit_suppressed_window,
++          session->send_errors_window,
++          feedback_age,
++          session->state == AIRPLAY_STATE_STREAMING ? "streaming" : "connected");
++        session->delivery_log_last_sec = now;
++        session->packets_sent_window = 0;
++        session->send_errors_window = 0;
++        session->retransmit_requests_window = 0;
++        session->retransmit_packets_window = 0;
++        session->retransmit_suppressed_window = 0;
++      }
++  }
++
+ /*
+   DPRINTF(E_DBG, L_AIRPLAY, "RTP PACKET seqnum %u, rtptime %u, payload 0x%x, pktbuf_s %zu\n",
+     session->master_session->rtp_session->seqnum,
+@@ -2038,43 +2226,136 @@ control_packet_send(struct airplay_session *session, struct rtp_packet *pkt)
+ static void
+ packets_resend(struct airplay_session *session, uint16_t seqnum, int len)
+ {
++  struct airplay_master_session *ams;
+   struct rtp_session *rtp_session;
+   struct rtp_packet *pkt;
++  struct timespec now;
+   uint16_t s;
+   int i;
++  int sent = 0;
++  int suppressed = 0;
+   bool pkt_missing = false;
++  int64_t elapsed_ms;
++  int64_t age_samples;
++  int64_t lead_samples;
++  int64_t min_lead_samples;
++  uint16_t seq_distance;
++
++  ams = session->master_session;
++  rtp_session = ams->rtp_session;
++  session->retransmit_requests_window++;
++
++  if (len <= 0)
++    return;
++  if (len > AIRPLAY_RESEND_MAX_LEN)
++    len = AIRPLAY_RESEND_MAX_LEN;
+ 
+-  rtp_session = session->master_session->rtp_session;
++  clock_gettime(CLOCK_MONOTONIC, &now);
++
++  // Refill retransmit token bucket.
++  if (session->resend_tokens_ts.tv_sec == 0 && session->resend_tokens_ts.tv_nsec == 0)
++    {
++      session->resend_tokens = AIRPLAY_RESEND_BURST_MAX;
++      session->resend_tokens_ts = now;
++    }
++  else
++    {
++      elapsed_ms = ((int64_t)now.tv_sec - (int64_t)session->resend_tokens_ts.tv_sec) * 1000
++                 + ((int64_t)now.tv_nsec - (int64_t)session->resend_tokens_ts.tv_nsec) / 1000000;
++      if (elapsed_ms > 0)
++	{
++	  session->resend_tokens += (double)elapsed_ms * AIRPLAY_RESEND_RATE_PER_SEC / 1000.0;
++	  if (session->resend_tokens > AIRPLAY_RESEND_BURST_MAX)
++	    session->resend_tokens = AIRPLAY_RESEND_BURST_MAX;
++	  session->resend_tokens_ts = now;
++	}
++    }
++
++  // Duplicate / overlapping request within the dedup window — Bluesound will
++  // re-ask when a resend is still in flight; honouring every copy doubles
++  // UDP load on the live audio path.
++  if (session->resend_last_len > 0
++      && (session->resend_last_ts.tv_sec || session->resend_last_ts.tv_nsec))
++    {
++      elapsed_ms = ((int64_t)now.tv_sec - (int64_t)session->resend_last_ts.tv_sec) * 1000
++                 + ((int64_t)now.tv_nsec - (int64_t)session->resend_last_ts.tv_nsec) / 1000000;
++      if (elapsed_ms >= 0 && elapsed_ms < AIRPLAY_RESEND_DEDUP_MS)
++	{
++	  // Circular ranges [last, last+last_len) and [seqnum, seqnum+len) overlap
++	  // when each start falls inside the other range.
++	  if ((uint16_t)(seqnum - session->resend_last_seq) < session->resend_last_len
++	      || (uint16_t)(session->resend_last_seq - seqnum) < (uint16_t)len)
++	    {
++	      session->retransmit_suppressed_window += len;
++	      DPRINTF(E_DBG, L_AIRPLAY,
++	        "Suppress duplicate retransmit from '%s': seq=%" PRIu16 " len=%d (last=%" PRIu16 "/%d, %lld ms ago)\n",
++	        session->devname, seqnum, len, session->resend_last_seq, session->resend_last_len,
++	        (long long)elapsed_ms);
++	      return;
++	    }
++	}
++    }
+ 
+   DPRINTF(E_DBG, L_AIRPLAY, "Got retransmit request from '%s': seqnum %" PRIu16 " (len %d), next RTP session seqnum %" PRIu16 " (len %zu)\n",
+     session->devname, seqnum, len, rtp_session->seqnum, rtp_session->pktbuf_len);
+ 
+-  // Seems iOS returns 80 d6 00 01 bd 0d 00 00 over control when the packet is
+-  // not in buffer. And also  resends over control, which my amp doesn't
+-  // understand, since it keeps asking.
+-  // Example of resend over control (bd0d=seqnum 48397):
+-  // 0x000000: 80 d6 00 ee 80 60 bd 0d b4 04 4e c0 00 00 00 00 .....`....N.....
+-  // 0x000010: 99 cf 26 e3 fa a0 ed da 57 50 82 c8 be 1b 81 9e ..&.....WP......
+-  // 0x000020: a4 a5 c5 3c 07 83 71 21 e2 91 89 6a 81 bb b0 d3 ...<..q!...j....
+-  // 0x000030: f4 0e 5c 7f 84 14 1f 0d e6 63 83 26 7d b3 95 24 ..\......c.&}..$
+-  // 0x000040: 0d 52 11 ef a5 fb 6f 9d 86 8e 69 28 79 0e 73 5b .R....o...i(y.s[
+-  // 0x000050: 46 1f 04 2d 6b 7e 7f 1d 1e a6 46 04 7b f8 e3 80 F..-k~....F.{...
+-  // 0x000060: 85 ff 11 4f f2 b5 de f7 cf 0f 7e 4b 55 e5 7b 25 ...O......~KU.{%
+-  // 0x000070: 13 9a 5f c3 4e f4 9d d1 f5 cb...
++  min_lead_samples = (int64_t)ams->quality.sample_rate * AIRPLAY_RESEND_MIN_LEAD_MS / 1000;
+ 
+   // Note that seqnum may wrap around, so we don't use it for counting
+   for (i = 0, s = seqnum; i < len; i++, s++)
+     {
+       pkt = rtp_packet_get(rtp_session, s);
+-      if (pkt)
+-	packet_send(session, pkt);
+-      else
+-	pkt_missing = true;
++      if (!pkt)
++	{
++	  pkt_missing = true;
++	  suppressed++;
++	  continue;
++	}
++
++      // Age gate: packet is already at/past the playhead (plus a small RTT
++      // margin). Resending it only steals airtime from live packets.
++      seq_distance = (uint16_t)(rtp_session->seqnum - 1 - s);
++      age_samples = (int64_t)seq_distance * (int64_t)ams->samples_per_packet;
++      lead_samples = (int64_t)ams->output_buffer_samples - age_samples;
++      if (lead_samples < min_lead_samples)
++	{
++	  suppressed++;
++	  continue;
++	}
++
++      if (session->resend_tokens < 1.0)
++	{
++	  suppressed += (len - i);
++	  break;
++	}
++
++      packet_send(session, pkt);
++      session->resend_tokens -= 1.0;
++      sent++;
+     }
+ 
++  session->retransmit_packets_window += sent;
++  session->retransmit_suppressed_window += suppressed;
++  // Record the requested range (not only what we sent) so a re-ask for the
++  // same gap within the dedup window is dropped even if age-gating skipped
++  // some of the packets.
++  session->resend_last_seq = seqnum;
++  session->resend_last_len = (uint16_t)len;
++  session->resend_last_ts = now;
++
+   if (pkt_missing)
+-    DPRINTF(E_WARN, L_AIRPLAY, "Device '%s' retransmit request for seqnum %" PRIu16 " (len %d) is outside buffer range (next seqnum %" PRIu16 ", len %zu)\n",
+-      session->devname, seqnum, len, rtp_session->seqnum, rtp_session->pktbuf_len);
++    {
++      // DALI: do NOT tear the session down on a single out-of-window request.
++      // WiFi blips + retransmit storms (live resend_req=50..108/30s) routinely
++      // ask for seqnums that have aged out of the ring; failing the session
++      // caused hard-rejoin thrash that made the storm worse. Log and keep
++      // streaming — fresh packets will resume the receiver. Persistent silence
++      // is caught by the RTSP feedback / app-side strike path instead.
++      DPRINTF(E_WARN, L_AIRPLAY,
++        "AI event=delivery_unrecoverable device='%s' seq=%" PRIu16
++        " requested=%d next=%" PRIu16 " buffer=%zu action=continue\n",
++        session->devname, seqnum, len, rtp_session->seqnum, rtp_session->pktbuf_len);
++    }
+ }
+ 
+ static int
+@@ -2162,6 +2443,10 @@ packets_sync_send(struct airplay_master_session *ams)
+   struct airplay_session *session;
+   struct timespec ts;
+   bool is_sync_time;
++  // DALI patch: scratch for the clock divergence log below. The throttle that
++  // used to live here as a file-scope static is now per-session (see the struct)
++  // so every speaker gets a line, not just whichever one ran first.
++  int64_t divergence_ms;
+ 
+   // Check if it is time send a sync packet to sessions that are already running
+   is_sync_time = rtp_sync_is_time(ams->rtp_session);
+@@ -2177,6 +2462,24 @@ packets_sync_send(struct airplay_master_session *ams)
+       cur_stamp = ams->cur_stamp;
+ 
+       // Apply user configured offset
++      // DALI patch: refresh the per-speaker offset LIVE.
++      //
++      // Upstream computes session->offset_samples once, in session_make(), and
++      // player.c:speaker_offset_ms_set() says so out loud: "We can't change
++      // offset during playback". That makes a user-facing sync/space control
++      // useless — the value is written, the engine keeps using the old one, and
++      // nothing happens until the session restarts.
++      //
++      // Nothing actually prevents it: offset_samples is only consumed here, to
++      // shift the anchor we put in the sync packet. Audio bytes are untouched;
++      // we are just telling the receiver a different play-time. So re-read the
++      // device's current offset each time we build a sync packet (every 250 ms
++      // with the DALI sync cadence) and the slider becomes live.
++      {
++        struct output_device *dev = outputs_device_get(session->device_id);
++        if (dev)
++          session->offset_samples = dev->offset_ms * ams->rtp_session->quality.sample_rate / 1000;
++      }
+       cur_stamp.pos -= session->offset_samples;
+ 
+       // A device has joined and should get an init sync packet
+@@ -2193,6 +2496,43 @@ packets_sync_send(struct airplay_master_session *ams)
+ 	{
+ 	  sync_pkt = rtp_sync_packet_next(ams->rtp_session, cur_stamp, 0x80);
+ 	  control_packet_send(session, sync_pkt);
++
++	  // DALI patch: the joining-device branch above already logs cur_ts (the
++	  // player's pts) next to clock (real time), but nothing logs it once we
++	  // are streaming - which is exactly when the two drift apart. cur_stamp.ts
++	  // is the wall clock anchor we put in every sync packet, so (clock -
++	  // cur_ts) is the definitive number: it should stay flat, and if it climbs
++	  // towards the ~2000 ms AirPlay lead the receivers are about to glitch.
++      divergence_ms = ((int64_t)ts.tv_sec - (int64_t)cur_stamp.ts.tv_sec) * 1000L
++                    + ((int64_t)ts.tv_nsec - (int64_t)cur_stamp.ts.tv_nsec) / 1000000L;
++
++      {
++	const char *event = NULL;
++	int anomaly = session->sync_log_anomaly;
++
++	// Hysteresis avoids start/clear chatter around the warning boundary.
++	if (divergence_ms > 100 || divergence_ms < -100)
++	  anomaly = 1;
++	else if (divergence_ms < 50 && divergence_ms > -50)
++	  anomaly = 0;
++
++	if (anomaly && !session->sync_log_anomaly)
++	  event = "sync_anomaly_start";
++	else if (!anomaly && session->sync_log_anomaly)
++	  event = "sync_anomaly_clear";
++	else if (session->sync_log_last_sec == 0 || ts.tv_sec - session->sync_log_last_sec >= 30)
++	  event = "sync_health";
++
++	session->sync_log_anomaly = anomaly;
++	if (event)
++	  {
++	    session->sync_log_last_sec = ts.tv_sec;
++	    DPRINTF(anomaly ? E_WARN : E_LOG, L_AIRPLAY,
++	      "AI event=%s device='%s' divergence_ms=%" PRIi64 " timing=%s offset_ms=%d\n",
++	      event, session->devname, divergence_ms, ams->use_ptp ? "PTP" : "NTP",
++	      ams->rtp_session->quality.sample_rate ? (session->offset_samples * 1000 / ams->rtp_session->quality.sample_rate) : 0);
++	  }
++      }
+ 	}
+     }
+ }
+@@ -3097,6 +3437,15 @@ response_handler_setup_stream(struct evrtsp_request *req, struct airplay_session
+       goto error;
+     }
+ 
++  // DALI: enlarge the UDP send buffer so a short retransmit burst (or a
++  // timer catch-up of a few packets) does not locally drop live audio.
++  {
++    int sndbuf = 512 * 1024;
++    if (setsockopt(session->server_fd, SOL_SOCKET, SO_SNDBUF, &sndbuf, sizeof(sndbuf)) < 0)
++      DPRINTF(E_WARN, L_AIRPLAY, "Could not raise SO_SNDBUF on data socket for '%s': %s\n",
++	session->devname, strerror(errno));
++  }
++
+   session->state = AIRPLAY_STATE_SETUP;
+ 
+   plist_free(response);
+@@ -3623,14 +3972,14 @@ static struct airplay_seq_definition airplay_seq_definition[] =
+   { AIRPLAY_SEQ_STOP, session_success, session_failure },
+   { AIRPLAY_SEQ_FAILURE, session_success, session_failure},
+   { AIRPLAY_SEQ_PIN_START, session_success, session_failure },
+-  { AIRPLAY_SEQ_SEND_VOLUME, session_status, session_failure },
++  { AIRPLAY_SEQ_SEND_VOLUME, session_status, volume_command_failure },
+   { AIRPLAY_SEQ_SEND_TEXT, NULL, session_failure },
+   { AIRPLAY_SEQ_SEND_PROGRESS, NULL, session_failure },
+   { AIRPLAY_SEQ_SEND_ARTWORK, NULL, session_failure },
+   { AIRPLAY_SEQ_PAIR_SETUP, session_pair_success, session_failure },
+   { AIRPLAY_SEQ_PAIR_VERIFY, session_pair_success, session_failure },
+   { AIRPLAY_SEQ_PAIR_TRANSIENT, session_pair_success, session_failure },
+-  { AIRPLAY_SEQ_FEEDBACK, NULL, session_failure },
++  { AIRPLAY_SEQ_FEEDBACK, feedback_success, session_failure },
+ };
+ 
+ // The size of the second array dimension MUST at least be the size of largest
+@@ -3816,7 +4165,20 @@ sequence_continue(struct airplay_seq_ctx *seq_ctx)
+ 
+   ret = evrtsp_make_request(session->ctrl, req, cur_request->rtsp_type, uri);
+   if (ret < 0)
+-    goto error;
++    {
++      // DALI patch (crash fix): evrtsp_make_request TAILQ-inserts req on
++      // ctrl->requests BEFORE connecting, and a synchronous connect() failure
++      // (EHOSTDOWN/EHOSTUNREACH to a sleeping receiver with a negative route
++      // entry) returns -1 WITHOUT unlinking it. Ownership is therefore with the
++      // connection: evrtsp_connection_free() will free it during the session
++      // teardown that deferred_session_failure() schedules. Freeing it here too
++      // (the old `goto error` path) left a dangling TAILQ node — the freed
++      // block got reused, and evrtsp_connection_free's queue walk stored
++      // through the garbage next-pointer: the 2026-08-01 SIGSEGV at
++      // evrtsp_connection_free+160 (crash report owntone-2026-08-01-134941).
++      req = NULL;
++      goto error;
++    }
+ 
+   evrtsp_connection_set_closecb(session->ctrl, NULL, NULL);
+ 
+@@ -4276,6 +4638,7 @@ airplay_write(struct output_buffer *obuf)
+ 	evtimer_add(keep_alive_timer, &keep_alive_tv);
+ 
+       session->state = AIRPLAY_STATE_STREAMING;
++      evrtsp_connection_set_timeout(session->ctrl, AIRPLAY_STREAM_CONTROL_TIMEOUT_SEC);
+       // Make a cb?
+     }
+ }
+diff --git a/src/outputs/raop.c b/src/outputs/raop.c
+index 89c00e9..65e9e1c 100644
+--- a/src/outputs/raop.c
++++ b/src/outputs/raop.c
+@@ -2576,11 +2576,49 @@ raop_metadata_startup_send(struct raop_session *rs)
+   return raop_metadata_send_generic(rs, raop_cur_metadata, false);
+ }
+ 
++// DALI patch: response handler for keep-alive OPTIONS requests. Deliberately
++// NON-FATAL: a lost keep-alive (one stalled RTSP request on a congested
++// 2.4GHz link) must not kill a healthy audio stream — a genuinely dead
++// connection is still caught by raop_rtsp_close_cb.
++static void
++raop_cb_keep_alive(struct evrtsp_request *req, void *arg)
++{
++  struct raop_session *rs = arg;
++
++  rs->reqs_in_flight--;
++
++  if (!req)
++    {
++      // Review fix (MEDIUM-3): req == NULL is not a soft timeout — per the
++      // evrtsp contract it means the CONNECTION errored and was reset. The old
++      // "proceeding anyway" left the session in STREAMING on a dead connection
++      // forever: audio silently gone, and because the state never became
++      // STOPPED/FAILED, no resurrect path could ever rescue it. Declare the
++      // failure so the normal teardown -> FAILED -> reconnect machinery runs.
++      DPRINTF(E_WARN, L_RAOP, "Keep-alive OPTIONS to '%s' got no response (connection dead) - failing session for reconnect\n", rs->devname);
++      deferred_session_failure(rs);
++      return;
++    }
++  else if (req->response_code != RTSP_OK)
++    {
++      DPRINTF(E_WARN, L_RAOP, "Keep-alive OPTIONS to '%s' failed (proceeding anyway): %d %s\n", rs->devname, req->response_code, req->response_code_line);
++    }
++
++  if (!rs->reqs_in_flight)
++    evrtsp_connection_set_closecb(rs->ctrl, raop_rtsp_close_cb, rs);
++}
++
+ static int
+ raop_metadata_keep_alive_send(struct raop_session *rs)
+ {
++  // DALI patch: during pipe playback there is NO metadata, and the old gate
++  // below made the 25s keep-alive timer a complete no-op — the RTSP connection
++  // then sat idle for the whole stream, and devices that enforce an idle
++  // session timeout dropped the session mid-song on their own fixed cadence.
++  // Fall back to a plain OPTIONS request so every AirPlay 1 session sees
++  // periodic RTSP traffic regardless of metadata.
+   if (!rs->wanted_metadata || !raop_cur_metadata)
+-    return 0;
++    return raop_send_req_options(rs, raop_cb_keep_alive, "keep_alive");
+ 
+   raop_cur_metadata->startup = false;
+ 
+diff --git a/src/outputs/rtp_common.c b/src/outputs/rtp_common.c
+index 5b3d418..b1b05ea 100644
+--- a/src/outputs/rtp_common.c
++++ b/src/outputs/rtp_common.c
+@@ -90,7 +90,17 @@ rtp_session_new(struct media_quality *quality, int pktbuf_size, int sync_each_ns
+   if (sync_each_nsamples > 0)
+     session->sync_each_nsamples = sync_each_nsamples;
+   else if (sync_each_nsamples == 0 && quality)
+-    session->sync_each_nsamples = quality->sample_rate;
++    {
++      // DALI patch: NTP groups (no shared PTP) free-run between sync anchors, so
++      // re-anchor every 250ms. With PTP the speakers already share a clock — a
++      // 250ms cadence just multiplies how often a pts slew / catch-up blip is
++      // advertised as an audible jump (live: sync_anomaly -102ms → resend storm
++      // on Bluesound PowerNodes). Prefer the upstream 1 Hz cadence on PTP.
++      if (ptp_clock_id)
++	session->sync_each_nsamples = quality->sample_rate;
++      else
++	session->sync_each_nsamples = quality->sample_rate / 4;
++    }
+ 
+   return session;
+ }
+diff --git a/src/player.c b/src/player.c
+index f9ce616..70b74a2 100644
+--- a/src/player.c
++++ b/src/player.c
+@@ -118,7 +118,7 @@
+ // If a speaker fails during playback we try to bring it back by reconnecting
+ // after this number of seconds. When this feature was added, we had an issue
+ // with Homepods and ATV4's dropping connections, so it is also a workaround.
+-#define PLAYER_SPEAKER_RESURRECT_TIME 5
++#define PLAYER_SPEAKER_RESURRECT_TIME 3   // DALI: 3s. 1s was too tight and oscillated (teardown->resurrect->teardown glitch loop); 3s lets the AirPlay link settle. Pairs with pb_suspend() on the STOPPED path.
+ 
+ // Shorthand condition for outputs_start and outputs_device_start, both need to
+ // know if they should only probe the device, or fully start it.
+@@ -239,6 +239,10 @@ struct player_source
+   // This should at any time match the millisecond position of the media that is
+   // coming out of your device. Will be 0 during initial buffering.
+   uint32_t pos_ms;
++  // Fractional millisecond numerator carried between reads. Pipe sync markers
++  // can split one 10 ms read into smaller pieces; flooring every piece used to
++  // lose roughly 1 ms per marker and made DALI think playback was slowing down.
++  uint32_t pos_ms_remainder;
+ 
+   // How many samples the outputs buffer before playing (=delay)
+   int output_buffer_samples;
+@@ -313,6 +317,10 @@ static int clear_queue_on_stop_disabled;
+ 
+ // Player status
+ static enum play_status player_state;
++// Distinguish a room suspended by failed outputs from an intentional pause.
++// All failed siblings must remain eligible for reconnect after the first one
++// has suspended the shared player.
++static bool output_recovery_suspended;
+ static enum repeat_mode repeat;
+ static char shuffle;
+ static char consume;
+@@ -327,6 +335,17 @@ static struct event *pb_timer_ev;
+ 
+ // Time between ticks, i.e. time between when playback_cb() is invoked
+ static struct timespec player_tick_interval;
++// DALI patch: wall-clock tick accounting for the macOS overrun fix in
++// playback_cb() — see the long comment there. Only touched by the player thread.
++static struct timespec pb_tick_last;
++static uint64_t pb_tick_debt_ns;
++// High-signal DALI timing telemetry. Aggregated in 30s windows so a scheduler
++// storm leaves exact evidence without turning the logfile into the storm.
++static struct timespec pb_tick_health_last;
++static uint64_t pb_tick_window_max_raw;
++static uint64_t pb_tick_window_bursts;
++static uint64_t pb_tick_window_frames_smoothed;
++static uint64_t pb_tick_window_debt_peak_ns;
+ // Timer resolution
+ static struct timespec player_timer_res;
+ 
+@@ -855,6 +874,7 @@ session_update_read_start(uint32_t seek_ms)
+     return;
+ 
+   pb_session.reading_now->pos_ms     = seek_ms;
++  pb_session.reading_now->pos_ms_remainder = 0;
+   pb_session.reading_now->seek_ms    = seek_ms;
+   pb_session.reading_now->read_start = pb_session.pos;
+ 
+@@ -864,7 +884,7 @@ session_update_read_start(uint32_t seek_ms)
+ static inline void
+ session_update_read(int nsamples)
+ {
+-  uint32_t step_ms;
++  uint64_t scaled_ms;
+ 
+   // Did we just complete our first read? Then set the start timestamp
+   if (pb_session.start_ts.tv_sec == 0)
+@@ -881,11 +901,13 @@ session_update_read(int nsamples)
+   if (!pb_session.playing_now->quality.sample_rate)
+     return;
+ 
+-  step_ms = (1000 * nsamples) / pb_session.playing_now->quality.sample_rate;
+-
+   // After we have started playing we also must calculate new pos_ms
+   if (pb_session.pos > pb_session.playing_now->play_start)
+-    pb_session.playing_now->pos_ms += step_ms;
++    {
++      scaled_ms = pb_session.playing_now->pos_ms_remainder + 1000ULL * (uint64_t)nsamples;
++      pb_session.playing_now->pos_ms += scaled_ms / pb_session.playing_now->quality.sample_rate;
++      pb_session.playing_now->pos_ms_remainder = scaled_ms % pb_session.playing_now->quality.sample_rate;
++    }
+ }
+ 
+ static void
+@@ -928,9 +950,47 @@ session_update_read_quality(struct media_quality *quality)
+ static void
+ session_update_read_ts(struct timespec *ts)
+ {
+-  pb_session.pts = *ts;
++  struct timespec now_ts;
++  struct timespec diff;
++  int64_t diff_ms;
++
++  // DALI patch v4 — asymmetric clamp. Read before touching.
++  //
++  // v3 soft-slew (max 10 ms/s pullback when ahead) lost to timer catch-up:
++  // live 2026-08-06 17:13–17:15 showed perpetual
++  //   pts_slew diff_ms=-15..-30 step_ms=-10
++  // while Bluesound resend_req climbed 90→165/30s (Aug 3/5 baseline was 0–5).
++  // pts ahead of CLOCK_MONOTONIC is advertised in AirPlay sync packets →
++  // receivers underrun → retransmit storm. Soft-slew-when-behind ALSO prepaid
++  // the same lag catch-up was about to repay → overshoot (the v2 hard-snap
++  // bug, just slower).
++  //
++  // v4 rules:
++  //   pts AHEAD  → hard snap pts = now (immediate; no drip correction)
++  //   pts BEHIND → do nothing here; timer catch-up is the only recovery path
++  // *ts still only proves a marker arrived; its value is ignored.
++#define PTS_AHEAD_DEADBAND_MS  5
++
++  if (clock_gettime(CLOCK_MONOTONIC, &now_ts) < 0)
++    goto out;
++
++  // Already at or behind wall clock — leave it alone.
++  if (timespec_cmp(pb_session.pts, now_ts) <= 0)
++    goto out;
++
++  diff = timespec_sub(pb_session.pts, now_ts);
++  diff_ms = (int64_t)diff.tv_sec * 1000 + diff.tv_nsec / 1000000;
++  if (diff_ms < PTS_AHEAD_DEADBAND_MS)
++    goto out;
++
++  DPRINTF(E_LOG, L_PLAYER,
++    "AI event=pts_clamp_ahead diff_ms=%" PRIi64 "\n",
++    diff_ms);
++  pb_session.pts = now_ts;
+ 
++ out:
+   free(ts);
++#undef PTS_AHEAD_DEADBAND_MS
+ }
+ 
+ static void
+@@ -947,7 +1007,10 @@ static void
+ session_update_play_metadata(struct input_metadata *metadata)
+ {
+   if (metadata->pos_is_updated)
+-    pb_session.playing_now->pos_ms = metadata->pos_ms;
++    {
++      pb_session.playing_now->pos_ms = metadata->pos_ms;
++      pb_session.playing_now->pos_ms_remainder = 0;
++    }
+   if (metadata->len_ms)
+     pb_session.playing_now->len_ms = metadata->len_ms;
+ }
+@@ -961,6 +1024,17 @@ session_restart(void)
+   pb_session.pts.tv_nsec = 0;
+   pb_session.read_deficit = 0;
+   pb_session.metadata_sent = 0;
++  // DALI patch: the wall-clock tick accountant must not carry a debt across a
++  // restart — the gap while we were stopped is not audio anyone is owed.
++  pb_tick_last.tv_sec = 0;
++  pb_tick_last.tv_nsec = 0;
++  pb_tick_debt_ns = 0;
++  pb_tick_health_last.tv_sec = 0;
++  pb_tick_health_last.tv_nsec = 0;
++  pb_tick_window_max_raw = 0;
++  pb_tick_window_bursts = 0;
++  pb_tick_window_frames_smoothed = 0;
++  pb_tick_window_debt_peak_ns = 0;
+ }
+ 
+ static void
+@@ -1272,7 +1346,10 @@ static void
+ playback_cb(int fd, short what, void *arg)
+ {
+   struct timespec ts;
++  struct timespec health_now;
++  uint64_t raw_overrun;
+   uint64_t overrun;
++  bool skip_tick;
+   int nbytes;
+   int nsamples;
+   int i;
+@@ -1280,6 +1357,7 @@ playback_cb(int fd, short what, void *arg)
+ 
+   // Check if we missed any timer expirations
+   overrun = 0;
++  skip_tick = false;
+ #ifdef HAVE_TIMERFD
+   ret = read(fd, &overrun, sizeof(overrun));
+   if (ret <= 0)
+@@ -1287,13 +1365,134 @@ playback_cb(int fd, short what, void *arg)
+   else if (overrun > 0)
+     overrun--;
+ #else
+-  ret = timer_getoverrun(pb_timer);
+-  if (ret < 0)
+-    DPRINTF(E_LOG, L_PLAYER, "Error getting timer overrun\n");
+-  else
+-    overrun = ret;
++  // DALI patch — THE FIX FOR THE BUFFER RATCHET. Read before touching.
++  //
++  // On macOS there is no timerfd; misc.c backs timer_settime() with
++  // setitimer(ITIMER_REAL) and timer_getoverrun() is a STUB that always
++  // returns 0 ("since we don't know if there have been signals that weren't
++  // delivered, assume none"). So upstream's lost-tick compensation is dead
++  // code here: overrun is permanently 0, and the player consumes exactly ONE
++  // tick of samples per callback no matter how much wall time really passed.
++  //
++  // The tick is nominally 10 ms, but SIGALRM delivery plus the work done in
++  // this callback makes the real period slightly longer, and coalesced signals
++  // are lost outright (POSIX signals do not queue). Every microsecond of that
++  // is audio never consumed: the producer writes at true real time, the player
++  // reads slightly less, and the surplus accumulates in OwnTone's input_buffer
++  // until it saturates (~2.18 s) and back-pressure flushes every AirPlay
++  // output at once. Measured on this Mac: ~7000 ppm, i.e. the 0.75 s start
++  // buffer ratchets to 2.2 s in roughly three minutes. That is the glitch.
++  //
++  // Fix: derive the overrun from the wall clock, which is what timerfd gives
++  // Linux for free. Accumulate elapsed time as a debt and hand the existing
++  // catch-up loop an extra read whenever a whole tick has built up. This
++  // corrects FRACTIONAL drift, not just whole missed ticks — 0.07 ms of
++  // shortfall per tick pays itself off as one double-read every ~143 ticks.
++  {
++    struct timespec tick_now;
++
++    if (clock_gettime(CLOCK_MONOTONIC, &tick_now) == 0)
++      {
++        uint64_t tick_ns = (uint64_t)player_tick_interval.tv_nsec;
++
++        if (pb_tick_last.tv_sec != 0 && tick_ns > 0)
++          {
++            struct timespec el = timespec_sub(tick_now, pb_tick_last);
++            uint64_t el_ns = (uint64_t)el.tv_sec * 1000000000ULL + (uint64_t)el.tv_nsec;
++
++            // A pause/resume or a debugger stop can hand us a huge gap; that is
++            // not audio we owe anyone, so discard it rather than reading a
++            // burst. One second of catch-up is already far more than any real
++            // scheduling hiccup.
++            //
++            // Wall time is authoritative for the TOTAL number of reads. libevent
++            // may deliver accumulated SIGALRM callbacks back-to-back; consuming
++            // one unconditional base read for each callback and then adding
++            // wall-clock catch-up reads double-counted those ticks and drained a
++            // real-time pipe by 8–10%. Send at most three reads now and preserve
++            // the remainder as debt for later callbacks.
++            if (el_ns < 1000000000ULL)
++              {
++                uint64_t reads_due;
++                uint64_t reads_now;
++
++                pb_tick_debt_ns += el_ns;
++                reads_due = pb_tick_debt_ns / tick_ns;
++                if (reads_due == 0)
++                  skip_tick = true;
++                else
++                  {
++                    reads_now = MIN(reads_due, 3);
++                    pb_tick_debt_ns -= reads_now * tick_ns;
++                    overrun = reads_now - 1;
++                  }
++              }
++            else
++              pb_tick_debt_ns = 0;
++          }
++        pb_tick_last = tick_now;
++      }
++  }
+ #endif /* HAVE_TIMERFD */
+ 
++  // Pace catch-up: at most 2 extras this callback. Remainder stays in
++  // pb_tick_debt_ns (macOS path) and is repaid on subsequent ticks.
++  raw_overrun = overrun;
++  if (raw_overrun > 0)
++    {
++      uint64_t sent_extra = raw_overrun;
++#ifdef HAVE_TIMERFD
++      // Linux timerfd can report a large overrun in one shot; pace the same way
++      // and keep the unpaid remainder as debt for later ticks.
++      if (sent_extra > 2)
++	sent_extra = 2;
++      if (raw_overrun > sent_extra && player_tick_interval.tv_nsec > 0)
++	pb_tick_debt_ns += (raw_overrun - sent_extra) * (uint64_t)player_tick_interval.tv_nsec;
++#endif
++      if (raw_overrun > 1)
++        pb_tick_window_bursts++;
++      pb_tick_window_frames_smoothed += raw_overrun - sent_extra;
++      if (raw_overrun > pb_tick_window_max_raw)
++        pb_tick_window_max_raw = raw_overrun;
++      if (pb_tick_debt_ns > pb_tick_window_debt_peak_ns)
++        pb_tick_window_debt_peak_ns = pb_tick_debt_ns;
++      if (raw_overrun > 1 && pb_tick_window_bursts == 1)
++        DPRINTF(E_WARN, L_PLAYER,
++          "AI event=timer_catchup raw_ticks=%" PRIu64 " sent_extra=%" PRIu64 " debt_ms=%" PRIu64 "\n",
++          raw_overrun, sent_extra, pb_tick_debt_ns / 1000000ULL);
++      overrun = sent_extra;
++    }
++
++  // One compact timing-health line every 30 seconds. This makes a future report
++  // immediately answer: was the source late, did the scheduler pause, how large
++  // was the worst pause, and did the anti-burst guard engage?
++  if (clock_gettime(CLOCK_MONOTONIC, &health_now) == 0)
++    {
++      if (pb_tick_health_last.tv_sec == 0)
++        pb_tick_health_last = health_now;
++      else if (health_now.tv_sec - pb_tick_health_last.tv_sec >= 30)
++        {
++          DPRINTF(E_LOG, L_PLAYER,
++            "AI event=timer_health burst_events=%" PRIu64 " max_raw_ticks=%" PRIu64
++            " frames_deferred=%" PRIu64 " debt_ms=%" PRIu64 " debt_peak_ms=%" PRIu64 " clock=%s\n",
++            pb_tick_window_bursts, pb_tick_window_max_raw,
++            pb_tick_window_frames_smoothed, pb_tick_debt_ns / 1000000ULL,
++            pb_tick_window_debt_peak_ns / 1000000ULL,
++            pb_session.pts.tv_sec == 0 ? "unanchored" : "anchored");
++          pb_tick_health_last = health_now;
++          pb_tick_window_max_raw = 0;
++          pb_tick_window_bursts = 0;
++          pb_tick_window_frames_smoothed = 0;
++          pb_tick_window_debt_peak_ns = 0;
++        }
++    }
++
++  // A coalesced signal callback can arrive before a full tick of wall time has
++  // elapsed. It represents no new audio deadline, so do not perform the base
++  // source read below.
++  if (skip_tick)
++    return;
++
+   // We are too delayed, probably some output blocked: reset if first overrun or abort if second overrun
+   if (overrun > pb_write_deficit_max)
+     {
+@@ -1317,7 +1516,7 @@ playback_cb(int fd, short what, void *arg)
+   else
+     {
+       if (overrun > 1) // An overrun of 1 is no big deal
+-	DPRINTF(E_WARN, L_PLAYER, "Output delay detected: player is %" PRIu64 " ticks behind, catching up\n", overrun);
++	DPRINTF(E_DBG, L_PLAYER, "Output delay detected: player is %" PRIu64 " ticks behind, catching up\n", overrun);
+ 
+       pb_write_recovery = false;
+     }
+@@ -1372,6 +1571,17 @@ playback_cb(int fd, short what, void *arg)
+ 	}
+     }
+ 
++  // Hard ceiling: pts must never lead wall clock. Catch-up extras + fractional
++  // debt leaks otherwise advertise a future playhead over AirPlay sync and
++  // Bluesound answers with retransmit storms (resend_req=100+/30s).
++  {
++    struct timespec wall_now;
++    if (pb_session.pts.tv_sec != 0
++	&& clock_gettime(CLOCK_MONOTONIC, &wall_now) == 0
++	&& timespec_cmp(pb_session.pts, wall_now) > 0)
++      pb_session.pts = wall_now;
++  }
++
+   if (pb_session.read_deficit_max && pb_session.read_deficit > pb_session.read_deficit_max)
+     {
+       DPRINTF(E_LOG, L_PLAYER, "Source is not providing sufficient data, temporarily suspending playback (deficit=%zu/%zu bytes)\n",
+@@ -1507,13 +1717,23 @@ device_streaming_cb(struct output_device *device, enum output_device_state statu
+ 
+       // The device can fail outside of playback, e.g. if it disconnects after a
+       // flush command
+-      if (player_state != PLAY_PLAYING)
++      if (player_state != PLAY_PLAYING
++          && !(player_state == PLAY_PAUSED && output_recovery_suspended))
+ 	goto out;
+ 
+-      if (outputs_sessions_count() == 0)
+-	pb_suspend();
+-
+-      if (!device->resurrect)
++      if (outputs_sessions_count() == 0 && player_state == PLAY_PLAYING)
++        {
++          output_recovery_suspended = true;
++          pb_suspend();
++        }
++
++      // DALI: AirPlay "Other" devices (Bluesound / DALI PowerNode) default
++      // resurrect=false — only ATV4/HomePod opt in. An RTSP close mid-stream
++      // lands here as FAILED, and without a reconnect the front speaker stays
++      // dead while the healthy speaker keeps streaming (Living Room pattern in
++      // owntone.log). Mirror the STOPPED path: reconnect any selected speaker
++      // so one failure does not require an app-level rejoin or engine restart.
++      if (!device->resurrect && !device->selected)
+ 	goto out;
+ 
+       DPRINTF(E_LOG, L_PLAYER, "Attempting reconnection in %d sec to the %s device '%s'\n", PLAYER_SPEAKER_RESURRECT_TIME, device->type_name, device->name);
+@@ -1524,6 +1744,58 @@ device_streaming_cb(struct output_device *device, enum output_device_state statu
+   else if (status == OUTPUT_STATE_STOPPED)
+     {
+       DPRINTF(E_INFO, L_PLAYER, "The %s device '%s' stopped\n", device->type_name, device->name);
++
++      // DALI patch: some AirPlay devices (e.g. a Bluesound POWERNODE) end their
++      // session on their own mid-playback with a clean STOPPED rather than
++      // FAILED. Upstream only auto-reconnects on FAILED, so the device stays
++      // silently dead (still "selected") until the engine is restarted. If we
++      // are still playing and this device is meant to be on, resurrect it so the
++      // user never has to restart the engine.
++      // CRITICAL: do NOT gate on the live player_state. When BOTH speakers stop
++      // in the same deferred_cb tick, the first stop's pb_suspend() below flips
++      // player_state PLAY_PLAYING -> PLAY_PAUSED, which would otherwise make the
++      // second speaker's handler skip its own resurrect (the bug where one
++      // speaker stays dead and the user must reconnect). Accept PAUSED too, and
++      // arm the resurrect BEFORE the suspend so ordering can never suppress it.
++      //
++      // Review fix (CRITICAL-1): accepting ANY PLAY_PAUSED was far too broad.
++      // Every pause path (user pause, deficit pb_suspend) flushes outputs, the
++      // 10s delayed stop then lands here with state PAUSED and selected=true,
++      // and the resurrect would pb_resume() — i.e. user pauses and playback
++      // audibly un-pauses itself ~13s later, and an idle pipe put all speakers
++      // into a permanent suspend->stop->resurrect->suspend flap loop. Only
++      // accept PAUSED when the pause happened moments ago on THIS same
++      // double-stop path (the pb_suspend a few lines below stamps the clock);
++      // a pause that is seconds old means the user or the deficit guard did it,
++      // and a stopped device must then stay stopped until playback resumes.
++      {
++        static struct timespec stopped_suspend_ts;   // stamped at the pb_suspend below
++        struct timespec now_ts;
++        int paused_by_this_path = 0;
++
++        clock_gettime(CLOCK_MONOTONIC, &now_ts);
++        if (player_state == PLAY_PAUSED
++            && stopped_suspend_ts.tv_sec != 0
++            && now_ts.tv_sec - stopped_suspend_ts.tv_sec < 2)
++          paused_by_this_path = 1;
++
++      if ((player_state == PLAY_PLAYING || paused_by_this_path) && device->selected)
++	{
++	  DPRINTF(E_LOG, L_PLAYER, "Attempting reconnection in %d sec to the stopped %s device '%s'\n", PLAYER_SPEAKER_RESURRECT_TIME, device->type_name, device->name);
++	  worker_execute(player_speaker_resurrect, &(device->id), sizeof(device->id), PLAYER_SPEAKER_RESURRECT_TIME);
++
++	  // Suspend only on the FIRST stop (while still PLAYING and the last live
++	  // session is gone), so the player stops draining the input into nothing
++	  // during the gap. Guarding on PLAY_PLAYING makes this run at most once
++	  // per double-stop, avoiding a double-suspend.
++	  if (outputs_sessions_count() == 0 && player_state == PLAY_PLAYING)
++	    {
++	      clock_gettime(CLOCK_MONOTONIC, &stopped_suspend_ts);
++	      output_recovery_suspended = true;
++	      pb_suspend();
++	    }
++	}
++      }
+     }
+   else
+     {
+@@ -1803,6 +2075,7 @@ pb_session_stop(void)
+ static void
+ pb_abort(void)
+ {
++  output_recovery_suspended = false;
+   // Immediate stop of all outputs
+   outputs_stop(device_streaming_cb);
+   outputs_metadata_purge();
+@@ -1984,6 +2257,7 @@ playing_now(void *arg, int *retval)
+ static enum command_state
+ playback_stop(void *arg, int *retval)
+ {
++  output_recovery_suspended = false;
+   if (player_state == PLAY_STOPPED)
+     {
+       *retval = 0;
+@@ -2030,6 +2304,7 @@ playback_start_bh(void *arg, int *retval)
+ 
+   // We also ask listeners to update speaker/volume state, since it is possible
+   // some of the speakers we tried to start responded with failure
++  output_recovery_suspended = false;
+   status_update(PLAY_PLAYING, LISTENER_PLAYER | LISTENER_SPEAKER | LISTENER_VOLUME);
+ 
+   *retval = 0;
+@@ -2470,6 +2745,7 @@ playback_pause_bh(void *arg, int *retval)
+ static enum command_state
+ playback_pause(void *arg, int *retval)
+ {
++  output_recovery_suspended = false;
+   if (player_state == PLAY_STOPPED)
+     {
+       *retval = -1;
+@@ -2498,6 +2774,7 @@ playback_pause(void *arg, int *retval)
+ static enum command_state
+ playback_flush(void *arg, int *retval)
+ {
++  output_recovery_suspended = false;
+   if (player_state == PLAY_STOPPED)
+     {
+       *retval = -1;
+@@ -2562,6 +2839,8 @@ device_to_speaker_info(struct player_speaker_info *spk, struct output_device *de
+     spk->format = device->supported_formats;
+ 
+   spk->selected = OUTPUTS_DEVICE_DISPLAY_SELECTED(device);
++  spk->connected = (device->state == OUTPUT_STATE_CONNECTED || device->state == OUTPUT_STATE_STREAMING);
++  spk->streaming = (device->state == OUTPUT_STATE_STREAMING);
+ 
+   spk->has_password = device->has_password;
+   spk->has_video = device->has_video;
+@@ -2978,6 +3257,9 @@ speaker_resurrect(void *arg, int *retval)
+       // Playback was suspended by device_streaming_cb() because the speaker was
+       // the only one playing. In that case we need to first resume the source,
+       // then wait for the speaker to reactivate, and then run bottom half.
++      // A queued reconnect must not undo a user pause made during its delay.
++      if (!output_recovery_suspended)
++        goto out;
+       *retval = pb_resume();
+       if (*retval < 0)
+ 	goto out;
+diff --git a/src/player.h b/src/player.h
+index 258d8e1..bf34b6d 100644
+--- a/src/player.h
++++ b/src/player.h
+@@ -42,6 +42,10 @@ struct player_speaker_info {
+   uint32_t supported_formats;
+ 
+   bool selected;
++  // DALI health: selection is only the user's intent. A selected AirPlay
++  // device can have no live session, so expose the backend's actual state too.
++  bool connected;
++  bool streaming;
+   bool has_password;
+   bool requires_auth;
+   bool needs_auth_key;
+diff --git a/src/ptpd.c b/src/ptpd.c
+index 0fa7736..55a16b0 100644
+--- a/src/ptpd.c
++++ b/src/ptpd.c
+@@ -120,7 +120,16 @@ ptpd_init(uint64_t clock_id_seed)
+   else if (!airptp_create_own_service)
+     return 0;
+ 
+-  ret = airptp_daemon_start(ptpd_hdl, clock_id_seed, false);
++  // DALI patch: start the daemon as *shared* (is_shared = true). With false,
++  // daemon.c's run() takes the `else` branch of `if (daemon->is_shared)` and
++  // never calls daemon_shm_create(), so the POSIX shm segment AIRPTP_SHM_NAME
++  // is never published. A second OwnTone instance then gets NULL back from
++  // airptp_daemon_find() in ptpd_find_or_bind() and always tries to bind ports
++  // 319/320 itself, which it always loses. Empirically the live log showed 120
++  // "Creating own ptp service" and 0 "Using host's ptp daemon". Publishing the
++  // segment lets instance #2 attach to instance #1's grandmaster instead of
++  // fighting it for the port.
++  ret = airptp_daemon_start(ptpd_hdl, clock_id_seed, true);
+   if (ret < 0)
+     {
+       DPRINTF(E_LOG, L_AIRPLAY, "%s\n", airptp_errmsg_get());

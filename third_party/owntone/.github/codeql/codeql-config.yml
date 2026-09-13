@@ -1,0 +1,4 @@
+name: "OwnTone CodeQL config"
+
+paths-ignore: 
+  - htdocs

@@ -1,0 +1,8 @@
+.DS_Store
+.build/
+build/
+*.xcodeproj
+*.dSYM/
+vendor/owntone/
+node_modules/
+*.log
