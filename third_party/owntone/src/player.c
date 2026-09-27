@@ -265,6 +265,9 @@ struct player_session
   // It will be equal to:
   // pts = start_ts + ticks_elapsed * player_tick_interval
   struct timespec pts;
+  // Last pipe marker seen by the bounded behind-clock correction.
+  struct timespec last_pts_slew_ts;
+  unsigned int pts_slew_count;
 
   // Equals current number of samples written to outputs
   uint32_t pos;
@@ -952,9 +955,13 @@ session_update_read_ts(struct timespec *ts)
 {
   struct timespec now_ts;
   struct timespec diff;
+  struct timespec elapsed;
+  struct timespec step = { .tv_sec = 0, .tv_nsec = 100000 };
   int64_t diff_ms;
 
-  // DALI patch v4 — asymmetric clamp. Read before touching.
+  // DALI patch v5 — keep the ahead clamp, and repay persistent behind drift
+  // at no more than 0.1 ms per second (100 ppm). The pipe marker proves a
+  // second of source audio has passed; its timestamp is not a playback time.
   //
   // v3 soft-slew (max 10 ms/s pullback when ahead) lost to timer catch-up:
   // live 2026-08-06 17:13–17:15 showed perpetual
@@ -965,18 +972,38 @@ session_update_read_ts(struct timespec *ts)
   // the same lag catch-up was about to repay → overshoot (the v2 hard-snap
   // bug, just slower).
   //
-  // v4 rules:
-  //   pts AHEAD  → hard snap pts = now (immediate; no drip correction)
-  //   pts BEHIND → do nothing here; timer catch-up is the only recovery path
-  // *ts still only proves a marker arrived; its value is ignored.
+  //   pts AHEAD  -> hard snap pts = now
+  //   pts BEHIND -> timer catch-up handles short stalls; only a sustained lag
+  //                 over 100 ms gets the slow correction below
+  // A marker's capture time can be stale by the time it is played, so use the
+  // current monotonic clock only for the bound, never as a direct PTS reset.
 #define PTS_AHEAD_DEADBAND_MS  5
 
   if (clock_gettime(CLOCK_MONOTONIC, &now_ts) < 0)
     goto out;
 
-  // Already at or behind wall clock — leave it alone.
   if (timespec_cmp(pb_session.pts, now_ts) <= 0)
-    goto out;
+    {
+      diff = timespec_sub(now_ts, pb_session.pts);
+      diff_ms = (int64_t)diff.tv_sec * 1000 + diff.tv_nsec / 1000000;
+      if (pb_session.last_pts_slew_ts.tv_sec != 0)
+	{
+	  elapsed = timespec_sub(now_ts, pb_session.last_pts_slew_ts);
+	  if (diff_ms > 100 && elapsed.tv_sec >= 1 && pb_tick_debt_ns <= 20000000ULL)
+	    {
+	      pb_session.pts = timespec_add(pb_session.pts, step);
+	      pb_session.last_pts_slew_ts = now_ts;
+	      pb_session.pts_slew_count++;
+	      if (pb_session.pts_slew_count == 1 || pb_session.pts_slew_count % 300 == 0)
+		DPRINTF(E_LOG, L_PLAYER,
+		  "AI event=pts_slew_behind lag_ms=%" PRIi64 " step_us=100 count=%u\n",
+		  diff_ms, pb_session.pts_slew_count);
+	    }
+	}
+      else
+	pb_session.last_pts_slew_ts = now_ts;
+      goto out;
+    }
 
   diff = timespec_sub(pb_session.pts, now_ts);
   diff_ms = (int64_t)diff.tv_sec * 1000 + diff.tv_nsec / 1000000;
