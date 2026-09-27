@@ -3,7 +3,8 @@
 // The macOS app (Sources/DALI/SyncBeacon.swift) serves one JSON object on
 // loopback port 3697:
 //
-//     {"app":"DALI","streaming":true,"delayMs":890}
+//     {"app":"DALI","streaming":true,"delayMs":890,
+//      "extensionVersion":"1.2.0","bundledExtensionVersion":"1.2.0"}
 //
 //   streaming — whether a room is live right now.
 //   delayMs   — the app's own measured end-to-end audio delay (engine backlog
@@ -20,14 +21,35 @@
   'use strict';
 
   var URL_ = 'http://127.0.0.1:3697/';
-  var TIMEOUT_MS = 700;
+  // Chrome can briefly queue localhost fetches while decoding video. Status
+  // can wait; audio controls keep their shorter deadline.
+  var STATUS_TIMEOUT_MS = 5000;
+  var SIGNAL_TIMEOUT_MS = 700;
   var MAX_DELAY_MS = 4000;
   var PROTOCOL_VERSION = 1;
 
   var OFFLINE = { running: false, streaming: false, delayMs: 0 };
 
+  // Who is asking. Every request carries `v=<version>&b=<build>` so the app
+  // knows an extension is really running (and which one) — its beacon reports
+  // that back as `extensionVersion`. Set once by the worker at startup.
+  var identity = '';
+  function setIdentity(version, build) {
+    identity = '';
+    if (typeof version === 'string' && /^\d+(?:\.\d+){0,3}$/.test(version)) {
+      identity = '&v=' + version;
+      if (build) identity += '&b=' + encodeURIComponent(String(build).slice(0, 32));
+    }
+  }
+
   function offline() {
     return { running: false, streaming: false, delayMs: 0 };
+  }
+
+  // A transport failure is not an explicit app stop. The worker may retain
+  // a recent validated reading briefly; incompatible replies still fail closed.
+  function unavailable() {
+    return { running: false, streaming: false, delayMs: 0, unavailable: true };
   }
 
   // Anything that is not unmistakably DALI is treated as "not running": port
@@ -43,7 +65,10 @@
     if (!isFinite(ms) || ms < 0) ms = 0;
     ms = Math.min(MAX_DELAY_MS, Math.round(ms));
     var result = { running: true, streaming: streaming, delayMs: streaming ? ms : 0 };
-    if (typeof data.extensionVersion === 'string') result.extensionVersion = data.extensionVersion;
+    // `bundledExtensionVersion` (app 2026-09-23+) is what the app ships in its
+    // managed extension folder. `extensionVersion` now means "the extension the
+    // app hears from", i.e. us, and must never be read as an update target.
+    if (typeof data.bundledExtensionVersion === 'string') result.bundledExtensionVersion = data.bundledExtensionVersion;
     return result;
   }
 
@@ -52,16 +77,16 @@
   function fetchStatus(fetchImpl) {
     var f = fetchImpl || function (u, o) { return fetch(u, o); };
     var ctrl = (typeof AbortController === 'function') ? new AbortController() : null;
-    var timer = ctrl ? setTimeout(function () { ctrl.abort(); }, TIMEOUT_MS) : 0;
+    var timer = ctrl ? setTimeout(function () { ctrl.abort(); }, STATUS_TIMEOUT_MS) : 0;
     var opts = { cache: 'no-store', credentials: 'omit', headers: { 'X-DALI-Client': 'chrome-extension' } };
     if (ctrl) opts.signal = ctrl.signal;
     // Cache-buster: the beacon says no-store, but a stale value here would mean
     // a stale delay.
-    return Promise.resolve().then(function () { return f(URL_ + '?t=' + Date.now(), opts); }).then(function (res) {
-      if (!res || !res.ok) return offline();
-      return res.json().then(normalize, offline);
+    return Promise.resolve().then(function () { return f(URL_ + '?t=' + Date.now() + identity, opts); }).then(function (res) {
+      if (!res || !res.ok) return unavailable();
+      return res.json().then(normalize, unavailable);
     }).catch(function () {
-      return offline();
+      return unavailable();
     }).finally(function () {
       if (timer) clearTimeout(timer);
     });
@@ -81,12 +106,12 @@
   function signal(kind, fetchImpl) {
     var f = fetchImpl || function (u, o) { return fetch(u, o); };
     var ctrl = (typeof AbortController === 'function') ? new AbortController() : null;
-    var timer = ctrl ? setTimeout(function () { ctrl.abort(); }, TIMEOUT_MS) : 0;
+    var timer = ctrl ? setTimeout(function () { ctrl.abort(); }, SIGNAL_TIMEOUT_MS) : 0;
     var opts = { cache: 'no-store', credentials: 'omit', headers: { 'X-DALI-Client': 'chrome-extension' } };
     if (ctrl) opts.signal = ctrl.signal;
     // `kind` may already carry a query (/now?d=…): join with & then.
     var sep = kind.indexOf('?') >= 0 ? '&' : '?';
-    return Promise.resolve().then(function () { return f(URL_ + kind + sep + 't=' + Date.now(), opts); }).then(function (res) {
+    return Promise.resolve().then(function () { return f(URL_ + kind + sep + 't=' + Date.now() + identity, opts); }).then(function (res) {
       if (timer) clearTimeout(timer);
       return !!(res && res.ok);
     }).catch(function () {
@@ -98,6 +123,7 @@
   root.DALIBeacon = {
     URL: URL_,
     signal: signal,
+    setIdentity: setIdentity,
     MAX_DELAY_MS: MAX_DELAY_MS,
     OFFLINE: OFFLINE,
     offline: offline,

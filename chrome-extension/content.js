@@ -15,6 +15,25 @@
 // applies the number. When DALI is not streaming, this script does exactly
 // nothing to the page.
 //
+// WHY A FRAME BUFFER AND NOT currentTime. The room hears the Mac's audio, and
+// the Mac's audio comes out of THIS <video> element. Anything done to the
+// element's timeline — seeking it back by the delay, pausing it at start,
+// nudging playbackRate — moves its audio by exactly the same amount, so the
+// room would still be `delay` behind the picture. The picture has to be held
+// back on its own, which only a copy of the frames can do. The same mechanism
+// therefore works unchanged for VOD and for LIVE (Twitch, YouTube Live, HLS,
+// DASH): nothing ever seeks, so there is no live edge to fight, no rebuffer
+// is triggered, and stalls/ads/quality switches only change which frames
+// arrive. Accuracy is one capture interval: frames are stamped with their
+// requestVideoFrameCallback display time and the one nearest `now - delay` is
+// shown, so the error stays within ±half a frame (±17 ms at 30 fps) and never
+// accumulates — there is no clock to drift, each frame is timed on its own.
+//
+// Limits (the page then plays undelayed, exactly as without the extension):
+// DRM/EME video (Netflix, Prime, Disney+...) cannot be captured; closed shadow
+// roots cannot be seen; a <video> element that itself goes fullscreen or into
+// picture-in-picture sits above anything we can draw.
+//
 // Three rules run the whole thing:
 //
 //   1. ALWAYS CATCH UP. Every entry order works — extension loaded mid-video,
@@ -35,8 +54,8 @@
   // Bump BUILD on every edit. The service worker prints version + build on
   // startup (chrome://extensions -> "service worker"); that line is the only
   // way to confirm which code Chrome actually has loaded.
-  const VERSION = '1.1.0';
-  const BUILD = '2026-09-13.a';
+  const VERSION = '1.2.1';
+  const BUILD = '2026-09-27.a';
 
   if (typeof chrome === 'undefined' || !chrome.runtime) return;
 
@@ -74,7 +93,7 @@
   // Preferred capture rate. Lowered automatically if the byte budget cannot
   // hold `delay x fps` frames — dropping frame rate is far less bad than
   // silently shortening the delay.
-  const TARGET_FPS = 30;
+  const TARGET_FPS = 60;
   const MIN_FPS = 10;
   // Consecutive createImageBitmap failures before giving up on a video.
   const MAX_CAPTURE_ERRORS = 4;
@@ -92,6 +111,11 @@
   // How often we ask the service worker for the beacon reading.
   const POLL_MS = 1000;
   const POLL_MIN_GAP_MS = 600;
+  // While DALI is off or idle nothing depends on the number; ask rarely.
+  const IDLE_POLL_GAP_MS = 2500;
+  // Slow sweep for videos no event can announce: a player created inside a
+  // shadow root after load fires no mutation or media event on `document`.
+  const DISCOVER_MS = 4000;
   // The MV3 service worker is killed aggressively and revived by the next
   // message. A failed ask means "retry now", not "DALI is gone" — only give up
   // on the delay after this long with no answer at all.
@@ -145,6 +169,9 @@
     mutationObserver: null,
     evalTimer: 0,
     reason: 'no-video',
+    discoverTimer: 0,
+    shadowWatch: [],             // [root, MutationObserver] for open shadow roots we listen on
+    watchedRoots: new WeakSet(),
     lastBest: null,
     lastBestArea: 0,
     videoIssues: new WeakMap(),  // video -> 'protected' | 'capture-failed'
@@ -271,6 +298,9 @@
     let score = area;
     if (!v.paused && !v.ended && v.readyState >= 2) score *= 8;
     else if (v.readyState >= 2) score *= 2;
+    // The one making sound is the one the room hears. A muted autoplay
+    // preview or background loop must not outrank it at similar size.
+    try { if (!v.muted && v.volume > 0) score *= 2; } catch (e) { /* ignore */ }
     return score;
   }
 
@@ -292,10 +322,48 @@
     try {
       for (const v of root.querySelectorAll('video')) out.push(v);
       for (const el of root.querySelectorAll('*')) {
-        if (el.shadowRoot) allVideos(el.shadowRoot, out);
+        if (el.shadowRoot) {
+          watchShadowRoot(el.shadowRoot);
+          allVideos(el.shadowRoot, out);
+        }
       }
     } catch (e) { /* detached / cross-origin: skip this root */ }
     return out;
+  }
+
+  // Media events do not cross a shadow boundary (they are not composed), and a
+  // MutationObserver on the document does not see inside one either. So every
+  // open root we find gets the same capture listeners and observer as the
+  // document; otherwise a web-component player's play/pause/seek would only be
+  // noticed on the next 1 s tick, and a seek would show a second of stale
+  // picture first.
+  const MEDIA_EVENTS = ['play', 'playing', 'pause', 'seeked', 'emptied', 'loadstart', 'loadeddata', 'waiting', 'ended', 'volumechange'];
+
+  function watchShadowRoot(root) {
+    if (!S.scanning || !root || S.watchedRoots.has(root)) return;
+    S.watchedRoots.add(root);
+    try {
+      for (const t of MEDIA_EVENTS) root.addEventListener(t, onMediaEvent, true);
+      root.addEventListener('encrypted', onEncrypted, true);
+    } catch (e) { /* ignore */ }
+    let mo = null;
+    try {
+      mo = new MutationObserver(onMutations);
+      mo.observe(root, { childList: true, subtree: true });
+    } catch (e) { mo = null; }
+    S.shadowWatch.push([root, mo]);
+  }
+
+  function unwatchShadowRoots() {
+    for (const [root, mo] of S.shadowWatch) {
+      try {
+        for (const t of MEDIA_EVENTS) root.removeEventListener(t, onMediaEvent, true);
+        root.removeEventListener('encrypted', onEncrypted, true);
+      } catch (e) { /* ignore */ }
+      if (mo) { try { mo.disconnect(); } catch (e) { /* ignore */ } }
+    }
+    S.shadowWatch = [];
+    S.watchedRoots = new WeakSet();
   }
 
   function findBestVideo() {
@@ -405,6 +473,8 @@
       this.capH = 0;
       this.frameBytes = 0;
       this.capFps = TARGET_FPS;
+      this.sourceFrameInterval = 1000 / 30;
+      this.lastDecodedStamp = 0;
       this.capacity = 8;
       this.vfcId = 0;
       this.rafCapId = 0;
@@ -628,9 +698,11 @@
       if (this.eff > target) {
         this.eff = target;
       } else if (this.eff < target) {
-        this.eff = this.rampRate > 0
-          ? Math.min(target, this.eff + dt * this.rampRate)
-          : target;
+        // The app's delay moved up (measurement step, trim drag) after the
+        // picture was already running: ease into it in slow motion rather
+        // than freezing the picture for the difference.
+        if (this.rampRate <= 0) this.rampRate = 1 / RAMP_FACTOR;
+        this.eff = Math.min(target, this.eff + dt * this.rampRate);
         if (this.eff >= target) this.rampRate = 0;   // ramp finished
       }
       return this.eff;
@@ -853,11 +925,18 @@
         stamp = displayTime;
       }
 
-      if (now - this.lastCaptureTime < (1000 / this.capFps) - 2) return;
+      const decodedInterval = stamp - this.lastDecodedStamp;
+      if (this.lastDecodedStamp && decodedInterval >= 8 && decodedInterval <= 100) {
+        this.sourceFrameInterval += (decodedInterval - this.sourceFrameInterval) * 0.2;
+      }
+      this.lastDecodedStamp = stamp;
+      // Use the frame timestamp so callback scheduling jitter does not drop
+      // alternating decoded frames from an otherwise smooth video.
+      if (stamp - this.lastCaptureTime < (1000 / this.capFps) - 2) return;
       // Don't queue captures faster than they complete. Checked before the rate
       // limiter is armed, so the next callback retries immediately.
       if (this.inflight >= 3) return;
-      this.lastCaptureTime = now;
+      this.lastCaptureTime = stamp;
 
       const gen = this.gen;
       let promise;
@@ -963,7 +1042,11 @@
       if (!v.seeking) this.lastTimeSeen = v.currentTime;
       if (this.watchdog(now)) return;
 
-      const target = now - this.effectiveDelayMs(now);
+      // Nearest frame, not newest-older: allowing half a capture interval of
+      // lead centres the error on zero (±17 ms at 30 fps) instead of always
+      // showing a picture up to a whole frame too late.
+      const frameInterval = Math.max(1000 / (this.capFps || TARGET_FPS), this.sourceFrameInterval);
+      const target = now - this.effectiveDelayMs(now) + frameInterval / 2;
       const buf = this.buffer;
       let frame = null;
       while (buf.length && buf[0].t <= target) {
@@ -1198,7 +1281,8 @@
     if (S.dead || S.suspended || !extensionAlive()) return;
     if (S.pollInflight) return;
     const now = Date.now();
-    if (!force && now - S.lastPollAt < POLL_MIN_GAP_MS) return;
+    const gap = S.dali.streaming ? POLL_MIN_GAP_MS : IDLE_POLL_GAP_MS;
+    if (!force && now - S.lastPollAt < gap) return;
     S.lastPollAt = now;
     S.pollInflight = true;
     let p;
@@ -1288,6 +1372,7 @@
   // page that is silently doing nothing still has to check back in.
 
   let lastReportedPlaying = null;
+  let lastReportedAudible = null;
   let lastReportAt = 0;
 
   // THE HEARTBEAT, AND THE BUG IT FIXES (rooms going silent mid-video).
@@ -1315,16 +1400,18 @@
   function reportPlaystate(force) {
     if (!extensionAlive()) return;
     const playing = anyPlayingMedia();
+    const audible = anyAudibleMedia();
     const now = Date.now();
-    if (!force && playing === lastReportedPlaying &&
+    if (!force && playing === lastReportedPlaying && audible === lastReportedAudible &&
         now - lastReportAt < REPORT_HEARTBEAT_MS) return;
     lastReportedPlaying = playing;
+    lastReportedAudible = audible;
     lastReportAt = now;
     const p = S.pipeline;
-    const msg = { type: 'playstate', playing: playing,
+    const msg = { type: 'playstate', playing: playing, audible: audible,
       cutEligible: !!(p && p.armed && !p.detached && pageVisible() &&
         scoreVideo(p.video) > 0 && !p.video.muted && p.video.volume > 0) };
-    if (playing) {
+    if (audible) {
       // For the app's now-playing line. The worker unions frames per tab and
       // forwards the list to the beacon; none of this touches the delay.
       msg.title = String(document.title || '').slice(0, 80);
@@ -1377,6 +1464,17 @@
       } catch (e) { /* detached */ }
     }
     return false;
+  }
+
+  // Activity shows sound-producing media, while the separate playback-intent
+  // flag above protects buffered audio through loading and seeking.
+  function anyAudibleMedia() {
+    return allMedia().some(v => {
+      try {
+        return v.isConnected && !v.paused && !v.ended && !v.seeking &&
+          v.readyState >= 3 && !v.muted && v.volume > 0;
+      } catch (e) { return false; }
+    });
   }
 
   function tick() {
@@ -1449,6 +1547,16 @@
     // ticking too — otherwise it ages out of the union and a paused video in
     // some other tab silences the room on top of it.
     if (best.any || anyPlayingMedia()) startTicking(); else stopTicking();
+
+    // Reels keep replacing and looping short sources. Leave Instagram's
+    // picture alone, but keep the heartbeat above so its audio still prevents
+    // an unrelated paused browser tab from cutting the room.
+    const host = location.hostname.toLowerCase().replace(/\.$/, '');
+    if (host === 'instagram.com' || host.endsWith('.instagram.com')) {
+      detachPipeline();
+      S.reason = 'site-bypass';
+      return;
+    }
 
     if (!best.video) {
       detachPipeline();
@@ -1634,6 +1742,28 @@
     scheduleEvaluate();
   }
 
+  function onMutations(mutations) {
+    // The video being ripped out of the DOM has to stop the picture in the
+    // same tick, not on the next 1 s health tick.
+    const p = S.pipeline;
+    if (p && !p.detached && !p.video.isConnected) {
+      p.cutOut('removed');
+      detachPipeline();
+    }
+    if (mutationTouchesVideo(mutations)) scheduleEvaluate();
+  }
+
+  // Same-document navigation on any SPA (Navigation API, Chrome 102+). The
+  // element may or may not survive; element swaps are caught by emptied /
+  // loadstart / removal, so this only asks for a fresh look — it never cuts a
+  // video that keeps playing across the route change (mini-players).
+  function onNavigateGeneric() { scheduleEvaluate(); }
+
+  function discover() {
+    if (S.dead || S.suspended || S.ticking || !pageVisible()) return;
+    if (allVideos().length) scheduleEvaluate();
+  }
+
   function mutationTouchesVideo(mutations) {
     for (const m of mutations) {
       for (const n of m.addedNodes) {
@@ -1661,6 +1791,9 @@
     document.addEventListener('emptied', onMediaEvent, true);
     document.addEventListener('loadstart', onMediaEvent, true);
     document.addEventListener('loadeddata', onMediaEvent, true);
+    document.addEventListener('waiting', onMediaEvent, true);
+    document.addEventListener('ended', onMediaEvent, true);
+    document.addEventListener('volumechange', onMediaEvent, true);
     document.addEventListener('encrypted', onEncrypted, true);
     document.addEventListener('enterpictureinpicture', onPipChange, true);
     document.addEventListener('leavepictureinpicture', onPipChange, true);
@@ -1676,16 +1809,14 @@
     window.addEventListener('popstate', onSpaNavigate);
 
     try {
-      S.mutationObserver = new MutationObserver((mutations) => {
-        // The video being ripped out of the DOM has to stop the picture in the
-        // same tick, not on the next 1 s health tick.
-        const p = S.pipeline;
-        if (p && !p.detached && !p.video.isConnected) {
-          p.cutOut('removed');
-          detachPipeline();
-        }
-        if (mutationTouchesVideo(mutations)) scheduleEvaluate();
-      });
+      if (window.navigation && typeof window.navigation.addEventListener === 'function') {
+        window.navigation.addEventListener('navigatesuccess', onNavigateGeneric);
+      }
+    } catch (e) { /* ignore */ }
+    S.discoverTimer = setInterval(discover, DISCOVER_MS);
+
+    try {
+      S.mutationObserver = new MutationObserver(onMutations);
       S.mutationObserver.observe(document.documentElement || document, {
         childList: true,
         subtree: true
@@ -1706,6 +1837,9 @@
     document.removeEventListener('emptied', onMediaEvent, true);
     document.removeEventListener('loadstart', onMediaEvent, true);
     document.removeEventListener('loadeddata', onMediaEvent, true);
+    document.removeEventListener('waiting', onMediaEvent, true);
+    document.removeEventListener('ended', onMediaEvent, true);
+    document.removeEventListener('volumechange', onMediaEvent, true);
     document.removeEventListener('encrypted', onEncrypted, true);
     document.removeEventListener('enterpictureinpicture', onPipChange, true);
     document.removeEventListener('leavepictureinpicture', onPipChange, true);
@@ -1717,6 +1851,14 @@
     window.removeEventListener('yt-navigate-start', onSpaNavigate, true);
     window.removeEventListener('yt-navigate-finish', onSpaNavigate, true);
     window.removeEventListener('popstate', onSpaNavigate);
+
+    try {
+      if (window.navigation && typeof window.navigation.removeEventListener === 'function') {
+        window.navigation.removeEventListener('navigatesuccess', onNavigateGeneric);
+      }
+    } catch (e) { /* ignore */ }
+    if (S.discoverTimer) { clearInterval(S.discoverTimer); S.discoverTimer = 0; }
+    unwatchShadowRoots();
 
     if (S.mutationObserver) {
       S.mutationObserver.disconnect();

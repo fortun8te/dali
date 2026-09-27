@@ -132,3 +132,13 @@ frame-number video. `?real=1` keeps Chrome's native frame callbacks. Its older
 full-suite driver includes exploratory scenarios and optional live-beacon
 reads. Use the deterministic suite as the release gate, then perform browser
 and in-room checks before claiming platform and speaker compatibility.
+
+## Version 1.2.1
+
+- Browser status requests tolerate brief scheduling delays and retain the last confirmed app status for up to ten seconds after connection failures. Explicit stop replies still take effect immediately.
+- Capture supports up to 60 fps within the memory budget and uses frame timestamps to avoid dropping frames because callbacks arrive unevenly.
+- The activity list excludes paused, muted, ended, and unready media while retaining buffering intent for audio-control decisions.
+- Instagram feed videos and Reels play without picture delay. Playback reports remain active so an unrelated paused tab cannot silence their audio.
+- Build identity: `2026-09-27.a`. Includes the current extension check-in and recovery fixes.
+
+Verification: 60 automated regression checks. Live YouTube verification is recorded separately from physical speaker lip-sync, which cannot be established from browser telemetry alone.

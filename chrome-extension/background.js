@@ -1,6 +1,6 @@
 // DALI Video Sync — service worker.
 //
-// Three jobs:
+// Four jobs:
 //   1. Poll the DALI app's sync beacon on 127.0.0.1:3697 and hand the answer to
 //      any content script that asks. A page cannot fetch plain
 //      http://127.0.0.1 from an https document, so the worker does the fetch.
@@ -8,7 +8,9 @@
 //      installed, updated or reloaded. Chrome does NOT do this by itself, so
 //      without it a freshly loaded extension does nothing on any tab you
 //      already had open until you reload each one.
-//   3. Print the version and build stamp on startup, so there is a way to
+//   3. Tell the app which extension build is running (every request carries
+//      v=<version>&b=<build>; a 30 s alarm checks in even with no video open).
+//   4. Print the version and build stamp on startup, so there is a way to
 //      confirm which code Chrome actually has loaded (chrome://extensions ->
 //      "service worker"). That console line is the only UI this extension has.
 //
@@ -34,11 +36,16 @@ importScripts('beacon.js');
 
 // Bump BUILD on every edit — it is what tells you whether Chrome is running
 // the code you just wrote. Keep it in step with the same constant in content.js.
-const BUILD = '2026-09-13.a';
+const BUILD = '2026-09-27.a';
+
+// Stamp every request with who we are, so the app can show that the extension
+// is really running (its beacon echoes this back as `extensionVersion`).
+DALIBeacon.setIdentity(chrome.runtime.getManifest().version, BUILD);
 
 // The app refreshes delayMs once a second, so caching for less than that is
 // wasted work and caching for much more would lag a room going live.
 const CACHE_MS = 750;
+const BEACON_FAILURE_GRACE_MS = 10000;
 
 let cache = { at: 0, value: null, pending: null };
 
@@ -67,7 +74,9 @@ function newerVersion(target, current) {
 }
 
 async function maybeReloadForUpdate(status) {
-  const target = status && status.extensionVersion;
+  // Only the app's MANAGED-folder version is an update target. Its
+  // `extensionVersion` field is an echo of our own identity, not an offer.
+  const target = status && status.bundledExtensionVersion;
   if (updateCheckPending || !newerVersion(target, chrome.runtime.getManifest().version)) return;
   updateCheckPending = true;
   try {
@@ -128,24 +137,35 @@ banner('worker up');
 
 function readBeacon() {
   const now = Date.now();
-  if (cache.value && now - cache.at < CACHE_MS) return Promise.resolve(cache.value);
+  if (cache.value && now - cache.at < CACHE_MS &&
+      (cache.expiresAt == null || now < cache.expiresAt)) return Promise.resolve(cache.value);
   if (cache.pending) return cache.pending;
+
+  function transportFailure() {
+    const now = Date.now();
+    const expiresAt = lastStatus.at + BEACON_FAILURE_GRACE_MS;
+    const keep = lastStatus.value && lastStatus.value.running && now < expiresAt;
+    const value = keep ? lastStatus.value : DALIBeacon.offline();
+    cache = { at: now, value, pending: null,
+              expiresAt: keep ? Math.min(now + CACHE_MS, expiresAt) : now + CACHE_MS };
+    // Never refresh lastStatus.at from a timeout. Repeated failures must age
+    // out, and audio-cut decisions must retain the actual validation time.
+    return value;
+  }
+
   cache.pending = DALIBeacon.fetchStatus().then((value) => {
+    if (value.unavailable) return transportFailure();
     maybeReloadForUpdate(value);
     const prev = cache.value;
     cache = { at: Date.now(), value, pending: null };
+    // An explicit idle or incompatible reply replaces the old reading now.
     lastStatus = { value: value, at: Date.now() };
     if (!prev || prev.running !== value.running || prev.streaming !== value.streaming ||
         Math.abs((prev.delayMs || 0) - value.delayMs) > 20) {
       log('beacon', JSON.stringify(value));
     }
     return value;
-  }).catch(() => {
-    const value = DALIBeacon.offline();
-    cache = { at: Date.now(), value, pending: null };
-    lastStatus = { value: value, at: Date.now() };
-    return value;
-  });
+  }).catch(transportFailure);
   return cache.pending;
 }
 
@@ -166,7 +186,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     const stopped = !!(previous && previous.playing && previous.cutEligible && !msg.playing &&
       !msg.gone && Date.now() - previous.at <= FRAME_STALE_MS);
     if (msg.gone) frames.delete(key);
-    else frames.set(key, { playing: !!msg.playing, at: Date.now(),
+    else frames.set(key, { playing: !!msg.playing, audible: msg.audible === true, at: Date.now(),
                            cutEligible: msg.cutEligible !== false,
                            title: msg.title || '', host: msg.host || '',
                            live: !!msg.live, held: !!msg.held, art: msg.art || '' });
@@ -333,12 +353,13 @@ function evaluateCut(stopped = false) {
 const NOW_REASSERT_MS = 4000;
 let lastNowJSON = '[]';   // nothing has played yet: an empty list needs no sending
 let lastNowAt = 0;
+let nowSignalQueue = Promise.resolve();
 
 function nowList() {
   const now = Date.now();
   const byTab = new Map();
   for (const [key, f] of frames) {
-    if (now - f.at > FRAME_STALE_MS || !f.playing || !f.title) continue;
+    if (now - f.at > FRAME_STALE_MS || !f.playing || !f.audible || !f.title) continue;
     const parts = key.split(':');
     const tab = parts[0];
     const fid = Number(parts[1]) || 0;
@@ -382,8 +403,13 @@ function publishNow(force) {
       (json === '[]' || now - lastNowAt < NOW_REASSERT_MS)) return;
   lastNowJSON = json;
   lastNowAt = now;
-  DALIBeacon.signal('now?d=' + encodeURIComponent(json)).then((ok) => {
-    log('now', ok ? 'sent' : 'failed', json);
+  // An old playing report must finish before a newer empty report is sent.
+  // Drop superseded reports that have not started yet.
+  nowSignalQueue = nowSignalQueue.catch(() => {}).then(() => {
+    if (json !== lastNowJSON) return;
+    return DALIBeacon.signal('now?d=' + encodeURIComponent(json)).then((ok) => {
+      log('now', ok ? 'sent' : 'failed', json);
+    });
   });
 }
 
@@ -462,3 +488,21 @@ chrome.runtime.onStartup.addListener(() => {
   banner('browser startup');
   reinject('browser startup');
 });
+
+// -------------------------------------------------------------------------
+// Check-in.
+//
+// Content scripts only ask for the beacon while a tab has media, so without
+// this the app could not tell "extension installed, nothing playing" from "no
+// extension at all". One cheap loopback request every 30 s (the shortest alarm
+// Chrome allows) keeps the app's `extensionVersion` honest. It touches no page.
+
+const CHECKIN_ALARM = 'dali-checkin';
+if (chrome.alarms && chrome.alarms.create) {
+  try {
+    chrome.alarms.create(CHECKIN_ALARM, { periodInMinutes: 0.5, delayInMinutes: 0.1 });
+    chrome.alarms.onAlarm.addListener((alarm) => {
+      if (alarm && alarm.name === CHECKIN_ALARM) readBeacon();
+    });
+  } catch (e) { /* alarms unavailable: content-script polls still check in */ }
+}
