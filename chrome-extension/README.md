@@ -142,3 +142,7 @@ and in-room checks before claiming platform and speaker compatibility.
 - Build identity: `2026-09-27.a`. Includes the current extension check-in and recovery fixes.
 
 Verification: 60 automated regression checks. Live YouTube verification is recorded separately from physical speaker lip-sync, which cannot be established from browser telemetry alone.
+
+## Version 1.2.2
+
+Preserves browser presentation timestamps when a decoded-frame callback arrives early. In the deterministic 60 fps callback-jitter regression, capture improved from 61/120 to 120/120 frames, with presentation error at most 8.4 ms against the requested delay. All 61 regression checks pass. These simulated timings do not measure physical speaker lip-sync. Build: `2026-09-27.b`.

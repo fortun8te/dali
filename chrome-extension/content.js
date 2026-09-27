@@ -54,8 +54,8 @@
   // Bump BUILD on every edit. The service worker prints version + build on
   // startup (chrome://extensions -> "service worker"); that line is the only
   // way to confirm which code Chrome actually has loaded.
-  const VERSION = '1.2.1';
-  const BUILD = '2026-09-27.a';
+  const VERSION = '1.2.2';
+  const BUILD = '2026-09-27.b';
 
   if (typeof chrome === 'undefined' || !chrome.runtime) return;
 
@@ -916,12 +916,13 @@
       if (!this.capW || !this.capH) return;
 
       const now = performance.now();
-      // The frame we are about to grab is the one on screen now. rVFC's
-      // expectedDisplayTime is the same clock and is more accurate, but a
-      // future value would report a frame as newer than it is — clamp it.
+      // A decoded-frame callback can arrive before its display deadline.
+      // Preserve that deadline: clamping early callbacks to now introduces
+      // jitter into both the capture limiter and the delayed presentation.
+      // Reject only implausible timestamps from a different clock.
       let stamp = now;
       if (typeof displayTime === 'number' && isFinite(displayTime) &&
-          displayTime <= now + 1 && now - displayTime < 200) {
+          displayTime <= now + 100 && now - displayTime < 200) {
         stamp = displayTime;
       }
 

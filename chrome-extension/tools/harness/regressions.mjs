@@ -940,3 +940,27 @@ test('a 60fps source retains its cadence with a 700ms picture delay', async () =
   assert.equal(p.capFps, 60);
   assert.ok(p.bufferBytes <= 256 * 1024 * 1024);
 });
+
+test('early and late decoded callbacks preserve 60fps cadence and presentation timestamps', async () => {
+  const c = content();
+  await settle();
+  c.runtime.sendMessage = async () => ({ running: true, streaming: true, delayMs: 700 });
+  c.api.applyStatus({ running: true, streaming: true, delayMs: 700 });
+  c.media('play');
+  const p = c.api.S.pipeline;
+  const base = c.clock.now;
+  const errors = [];
+  for (let i = 1; i <= 120; i++) {
+    const expectedDisplayTime = base + i * 1000 / 60;
+    const callbackTime = expectedDisplayTime + (i % 2 ? -8 : 4);
+    await c.clock.advance(callbackTime - c.clock.now);
+    c.video.currentTime += 1 / 60;
+    p.capture(expectedDisplayTime);
+    await settle();
+    p.drawTick();
+    if (i > 60 && p.current) errors.push(Math.abs(c.clock.now - p.current.t - 700));
+  }
+  assert.equal(p.captureCount, 120, 'callback scheduling jitter must not discard decoded frames');
+  assert.ok(Math.abs(p.sourceFrameInterval - 1000 / 60) < 0.01);
+  assert.ok(Math.max(...errors) <= 1000 / 120 + 0.1, 'presentation follows decoded frame time within half a frame');
+});
