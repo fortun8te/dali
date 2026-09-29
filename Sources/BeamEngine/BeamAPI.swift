@@ -2,6 +2,7 @@
 // Every endpoint here was proven by curl during Phase 0.
 
 import Foundation
+import os
 
 public struct Output: Codable, Identifiable, Equatable, Sendable {
     public let id: String
@@ -34,6 +35,17 @@ public struct PlayerState: Codable, Equatable, Sendable {
     enum CodingKeys: String, CodingKey {
         case state, volume, item_progress_ms, item_id, item_length_ms
     }
+
+    /// A reply without a usable `volume` is still proof the engine is alive; it
+    /// must not surface as a failed poll (the health loop counts those).
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        state = try c.decode(String.self, forKey: .state)
+        volume = (try? c.decodeIfPresent(Int.self, forKey: .volume)) ?? 0
+        item_progress_ms = try? c.decodeIfPresent(Int.self, forKey: .item_progress_ms)
+        item_id = try? c.decodeIfPresent(Int.self, forKey: .item_id)
+        item_length_ms = try? c.decodeIfPresent(Int.self, forKey: .item_length_ms)
+    }
 }
 
 /// An album in OwnTone's library (your ~/Music), used by the player model.
@@ -59,62 +71,273 @@ public struct BeamAPIError: Error, CustomStringConvertible {
     public var description: String { "BeamAPI: \(what)" }
 }
 
+// MARK: - transport
+//
+// THE KNOWN OWNTONE CRASH: SIGSEGV in evhttp_add_header_internal <-
+// httpd_header_add <- jsonapi_request. OwnTone's HTTP thread is single and its
+// command lane stalls for ~15 s whenever it is inside an RTSP handshake. Any
+// request queued behind that stall is served LATE; if the client has already
+// hung up (a URLSession timeout, a cancelled Task, a second client's overlapping
+// request) the engine writes headers onto a connection that is gone and dies.
+//
+// So the client rules are: (1) one request on the wire per engine at a time,
+// shared by EVERY BeamAPI value for that port (DALIStore and EngineSupervisor
+// each own one), (2) a request that has been written is NEVER cancelled or
+// abandoned at the socket — a caller that runs out of patience (its deadline,
+// or its own Task being cancelled) simply stops waiting and the late reply is
+// dropped, (3) a request that has not been written yet is dropped when its
+// caller gives up, so an abandoned burst cannot pile onto a stalled engine,
+// (4) no connection reuse (a fresh session per request) so we never talk to the
+// corpse of a previous engine over a pooled socket.
+
+/// Resumes exactly one waiter exactly once, from any thread, in any order
+/// relative to `wait()` — the result may land before the continuation exists.
+final class ReplySlot: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<Data, Error>?
+    private var result: Result<Data, Error>?
+    private var finished = false
+
+    var isResolved: Bool { lock.lock(); defer { lock.unlock() }; return finished }
+
+    @discardableResult
+    func resolve(_ r: Result<Data, Error>) -> Bool {
+        lock.lock()
+        guard !finished else { lock.unlock(); return false }
+        finished = true
+        if let c = continuation {
+            continuation = nil
+            lock.unlock()
+            c.resume(with: r)
+        } else {
+            result = r
+            lock.unlock()
+        }
+        return true
+    }
+
+    func wait() async throws -> Data {
+        try await withCheckedThrowingContinuation { (c: CheckedContinuation<Data, Error>) in
+            lock.lock()
+            if let r = result {
+                result = nil
+                lock.unlock()
+                c.resume(with: r)
+            } else {
+                continuation = c
+                lock.unlock()
+            }
+        }
+    }
+}
+
+/// One serial lane per engine port; see the block comment above.
+final class RequestLane: @unchecked Sendable {
+    struct Op { let request: URLRequest; let slot: ReplySlot }
+    private struct State {
+        var queue: [Op] = []
+        var busy = false
+        var notBefore = Date.distantPast
+        var wakePending = false
+    }
+
+    private static let registry = OSAllocatedUnfairLock(initialState: [Int: RequestLane]())
+    static func shared(port: Int) -> RequestLane {
+        registry.withLock { lanes in
+            if let lane = lanes[port] { return lane }
+            let lane = RequestLane()
+            lanes[port] = lane
+            return lane
+        }
+    }
+
+    private let state = OSAllocatedUnfairLock(initialState: State())
+    private let config: URLSessionConfiguration
+
+    private init() {
+        let cfg = URLSessionConfiguration.ephemeral
+        // These are the LAST-RESORT bounds for a socket that has gone silent, not
+        // the caller's patience (that is BeamAPI.readDeadline/writeDeadline, and
+        // it never touches the socket). They sit well beyond OwnTone's longest
+        // observed stall (~34 s in the flight log) only for a truly dead peer;
+        // the health loop respawns a wedged engine long before this fires, and a
+        // respawn closes the socket from the server side anyway.
+        cfg.timeoutIntervalForRequest = 45
+        cfg.timeoutIntervalForResource = 60
+        cfg.waitsForConnectivity = false
+        cfg.httpMaximumConnectionsPerHost = 1
+        cfg.httpShouldUsePipelining = false
+        cfg.httpShouldSetCookies = false
+        cfg.httpCookieStorage = nil
+        cfg.urlCache = nil
+        cfg.requestCachePolicy = .reloadIgnoringLocalCacheData
+        cfg.connectionProxyDictionary = [:]     // loopback: never via a system proxy
+        config = cfg
+    }
+
+    func enqueue(_ op: Op) {
+        state.withLock { s in
+            s.queue.removeAll { $0.slot.isResolved }     // callers that gave up
+            s.queue.append(op)
+        }
+        pump()
+    }
+
+    /// Keep the lane quiet for `seconds` (right after an engine spawn, while its
+    /// HTTP thread is still initialising). Queued requests wait; they do not fail.
+    func holdOff(_ seconds: TimeInterval) {
+        state.withLock { $0.notBefore = max($0.notBefore, Date().addingTimeInterval(seconds)) }
+    }
+
+    private enum Next { case none, run(Op), wait(TimeInterval) }
+
+    private func pump() {
+        let next: Next = state.withLock { s in
+            guard !s.busy else { return .none }
+            s.queue.removeAll { $0.slot.isResolved }
+            guard !s.queue.isEmpty else { return .none }
+            let hold = s.notBefore.timeIntervalSinceNow
+            if hold > 0 {
+                if s.wakePending { return .none }
+                s.wakePending = true
+                return .wait(hold)
+            }
+            s.busy = true
+            return .run(s.queue.removeFirst())
+        }
+        switch next {
+        case .none:
+            break
+        case .wait(let hold):
+            Task {
+                try? await Task.sleep(nanoseconds: UInt64(hold * 1_000_000_000) + 10_000_000)
+                self.state.withLock { $0.wakePending = false }
+                self.pump()
+            }
+        case .run(let op):
+            // Unstructured on purpose: nothing a caller does can cancel this.
+            Task {
+                await self.perform(op)
+                self.state.withLock { $0.busy = false }
+                self.pump()
+            }
+        }
+    }
+
+    private func perform(_ op: Op) async {
+        // A throwaway session per request: URLSession pools keep-alive sockets
+        // (and reserves the `Connection` header, so "close" cannot be forced),
+        // and a pooled socket to a previous engine's corpse is exactly what a
+        // respawn leaves behind. Invalidating after the reply has fully landed
+        // closes the socket cleanly, never mid-serve. Loopback: connect is free.
+        let session = URLSession(configuration: config)
+        defer { session.finishTasksAndInvalidate() }
+        do {
+            let (data, resp) = try await session.data(for: op.request)
+            guard let http = resp as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+                throw BeamAPIError(what: "\(op.request.httpMethod ?? "GET") \(op.request.url?.path ?? "?") -> \((resp as? HTTPURLResponse)?.statusCode ?? -1)")
+            }
+            op.slot.resolve(.success(data))
+        } catch {
+            op.slot.resolve(.failure(error))
+        }
+    }
+}
+
+/// Decodes to nil instead of failing the whole list, so one odd element can
+/// never make a healthy engine look dead to the health loop.
+private struct Lossy<T: Decodable>: Decodable {
+    let value: T?
+    init(from decoder: Decoder) throws { value = try? T(from: decoder) }
+}
+
+extension Output {
+    private enum DecodeKeys: String, CodingKey {
+        case id, name, type, selected, connected, streaming, volume, offset_ms
+    }
+    /// Only `id` is essential; OwnTone omits or nulls the rest for some devices.
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: DecodeKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        name = (try? c.decodeIfPresent(String.self, forKey: .name)) ?? ""
+        type = (try? c.decodeIfPresent(String.self, forKey: .type)) ?? ""
+        selected = (try? c.decodeIfPresent(Bool.self, forKey: .selected)) ?? false
+        connected = try? c.decodeIfPresent(Bool.self, forKey: .connected)
+        streaming = try? c.decodeIfPresent(Bool.self, forKey: .streaming)
+        volume = (try? c.decodeIfPresent(Int.self, forKey: .volume)) ?? 0
+        offset_ms = try? c.decodeIfPresent(Int.self, forKey: .offset_ms)
+    }
+}
+
 public struct BeamAPI: Sendable {
     public let baseURL: URL
-    private let session: URLSession
+    private let lane: RequestLane
+
+    /// How long a CALLER waits before giving up on a reply. Giving up never
+    /// touches the socket (see the transport notes above): the request stays
+    /// queued or in flight and its late reply is discarded.
+    /// Reads are cheap and the health loop counts every miss as a strike, so
+    /// they are bounded tighter than writes, which can legitimately sit behind
+    /// a ~15 s RTSP handshake on OwnTone's command lane.
+    static let readDeadline: TimeInterval = 6
+    static let writeDeadline: TimeInterval = 15
 
     public init(port: Int = 3689) {
         baseURL = URL(string: "http://127.0.0.1:\(port)")!
-        let cfg = URLSessionConfiguration.ephemeral
-        // This is loopback, not the internet, so a wedged command lane should
-        // announce itself fast — but 2s was measured too tight for this engine
-        // under real load: the flight log's own `apiSLOW`/`APIHANG` samples are
-        // not spread out, they are PINNED at 2000-2009ms (72 of 78 measured) —
-        // i.e. requests that were about to succeed, cut off by the clock rather
-        // than by a real wedge. The health loop reads any such timeout as a
-        // strike, and two strikes SIGKILLs the engine (DALIStore.
-        // noteEngineAPIFailure) — so this one number was killing healthy engines
-        // and producing the volume-write-succeeded-but-reported-failed loop
-        // ("Kitchen volume drift engine=81 want=63 -> resend" in the debug
-        // log). 4s keeps a comfortable margin under the 8s FIFO ceiling (still
-        // two clean strikes before that matters) while giving a merely slow
-        // response room to actually land instead of being read as a wedge.
-        cfg.timeoutIntervalForRequest = 4
-        cfg.timeoutIntervalForResource = 6
-        session = URLSession(configuration: cfg)
+        lane = RequestLane.shared(port: port)
     }
+
+    /// Keep every request to this engine waiting for `seconds` (used right after
+    /// a spawn so nothing hits the HTTP thread while it is still coming up).
+    public func holdOff(for seconds: TimeInterval) { lane.holdOff(seconds) }
 
     // MARK: requests
 
-    private func request(_ method: String, _ path: String, body: Data? = nil) async throws -> Data {
-        var req = URLRequest(url: baseURL.appendingPathComponent(path))
-        // appendingPathComponent escapes "?" so split query manually:
+    private func request(_ method: String, _ path: String, body: Data? = nil,
+                         deadline: TimeInterval? = nil) async throws -> Data {
+        try Task.checkCancellation()
+        // Split the query manually: appendingPathComponent would escape "?".
+        var comps = URLComponents(url: baseURL, resolvingAgainstBaseURL: false)!
         if let q = path.firstIndex(of: "?") {
-            var comps = URLComponents(url: baseURL, resolvingAgainstBaseURL: false)!
             comps.path = String(path[..<q])
             comps.percentEncodedQuery = String(path[path.index(after: q)...])
-            req = URLRequest(url: comps.url!)
+        } else {
+            comps.path = path
         }
+        guard let url = comps.url else { throw BeamAPIError(what: "bad path \(path)") }
+        var req = URLRequest(url: url)
         req.httpMethod = method
         req.httpBody = body
+        req.setValue("close", forHTTPHeaderField: "Connection")   // hint; the per-request session is what enforces it
         if body != nil { req.setValue("application/json", forHTTPHeaderField: "Content-Type") }
-        let (data, resp) = try await session.data(for: req)
-        guard let http = resp as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
-            throw BeamAPIError(what: "\(method) \(path) -> \((resp as? HTTPURLResponse)?.statusCode ?? -1)")
+
+        let limit = deadline ?? (method == "GET" ? Self.readDeadline : Self.writeDeadline)
+        let slot = ReplySlot()
+        let timer = Task {
+            do { try await Task.sleep(nanoseconds: UInt64(limit * 1_000_000_000)) } catch { return }
+            slot.resolve(.failure(BeamAPIError(what: "\(method) \(path) no reply in \(Int(limit))s")))
         }
-        return data
+        defer { timer.cancel() }
+        lane.enqueue(RequestLane.Op(request: req, slot: slot))
+        // Cancelling THIS task only stops the wait; the lane keeps (or drops,
+        // if not yet written) the request itself.
+        return try await withTaskCancellationHandler {
+            try await slot.wait()
+        } onCancel: {
+            slot.resolve(.failure(CancellationError()))
+        }
     }
 
     // MARK: API surface
 
-    public func isUp() async -> Bool {
-        (try? await request("GET", "/api/config")) != nil
+    public func isUp(deadline: TimeInterval? = nil) async -> Bool {
+        (try? await request("GET", "/api/config", deadline: deadline)) != nil
     }
 
     public func outputs() async throws -> [Output] {
-        struct Wrapper: Codable { let outputs: [Output] }
+        struct Wrapper: Decodable { let outputs: [Lossy<Output>] }
         let data = try await request("GET", "/api/outputs")
-        return try JSONDecoder().decode(Wrapper.self, from: data).outputs
+        return try JSONDecoder().decode(Wrapper.self, from: data).outputs.compactMap(\.value)
     }
 
     public func setOutputs(ids: [String]) async throws {
@@ -162,8 +385,8 @@ public struct BeamAPI: Sendable {
         _ = try await request("PUT", "/api/player/play")
     }
 
-    public func pause() async throws {
-        _ = try await request("PUT", "/api/player/pause")
+    public func pause(deadline: TimeInterval? = nil) async throws {
+        _ = try await request("PUT", "/api/player/pause", deadline: deadline)
     }
 
     public func stop() async throws {

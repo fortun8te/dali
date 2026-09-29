@@ -41,8 +41,29 @@ public actor SpotifySupervisor {
     public func setStateHandler(_ h: @escaping @Sendable (State) -> Void) { onStateChange = h }
     private func transition(_ s: State) { state = s; onStateChange?(s) }
 
-    /// Resolve librespot binary: bundled helper first, then PATH.
+    /// Resolve librespot binary: bundled helper first, then PATH. The answer is
+    /// cached (isLibrespotAvailable is read from UI paths, and every miss used to
+    /// spawn `which` — twice); a miss is re-checked after a minute so installing
+    /// librespot while DALI runs is still noticed.
+    private var resolvedBinary: URL?
+    private var lastResolveMissAt: Date?
+
     private func resolveBinary() -> URL? {
+        if let resolvedBinary, FileManager.default.isExecutableFile(atPath: resolvedBinary.path) {
+            return resolvedBinary
+        }
+        if let miss = lastResolveMissAt, Date().timeIntervalSince(miss) < 60 { return nil }
+        if let found = locateBinary() {
+            resolvedBinary = found
+            lastResolveMissAt = nil
+            return found
+        }
+        resolvedBinary = nil
+        lastResolveMissAt = Date()
+        return nil
+    }
+
+    private func locateBinary() -> URL? {
         let bundled = Bundle.main.bundleURL
             .appendingPathComponent("Contents/Helpers/librespot/librespot")
         if FileManager.default.isExecutableFile(atPath: bundled.path) { return bundled }
@@ -50,24 +71,51 @@ public actor SpotifySupervisor {
         for p in ["/opt/homebrew/bin/librespot", "/usr/local/bin/librespot"] {
             if FileManager.default.isExecutableFile(atPath: p) { return URL(fileURLWithPath: p) }
         }
-        if let found = try? Process.run(URL(fileURLWithPath: "/usr/bin/which"),
-                                        arguments: ["librespot"]) { _ = found }
         // Use `which` result
         let q = Process()
         q.executableURL = URL(fileURLWithPath: "/usr/bin/which")
         q.arguments = ["librespot"]
         let pipe = Pipe()
         q.standardOutput = pipe
-        try? q.run()
+        q.standardError = FileHandle.nullDevice
+        guard (try? q.run()) != nil else { return nil }
+        // Drain BEFORE waiting: waiting first can deadlock on a full pipe.
+        let out = pipe.fileHandleForReading.readDataToEndOfFile()
         q.waitUntilExit()
         if q.terminationStatus == 0,
-           let out = try? pipe.fileHandleForReading.readToEnd(),
            let path = String(data: out, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
            !path.isEmpty {
             return URL(fileURLWithPath: path)
         }
         return nil
     }
+
+    /// A librespot left behind by a DALI that crashed keeps the "DALI" Connect
+    /// device name and keeps writing into the same FIFO, so the next librespot
+    /// doubles every Spotify sample. Only processes writing to OUR pipe are touched.
+    private nonisolated static func reapStale(pipePath: String) {
+        func ours(_ pid: Int32) -> Bool {
+            guard let info = EngineSupervisor.processArguments(of: pid),
+                  URL(fileURLWithPath: info.executable).lastPathComponent == "librespot",
+                  let i = info.argv.firstIndex(of: "--device"), i + 1 < info.argv.count
+            else { return false }
+            return info.argv[i + 1] == pipePath
+        }
+        var stale = EngineSupervisor.pids(named: "librespot").filter(ours)
+        guard !stale.isEmpty else { return }
+        for pid in stale { kill(pid, SIGTERM) }
+        let deadline = Date().addingTimeInterval(1.5)
+        while !stale.isEmpty && Date() < deadline {
+            usleep(50_000)
+            stale = stale.filter(ours)
+        }
+        for pid in stale where ours(pid) { kill(pid, SIGKILL) }
+    }
+
+    /// Identity of the librespot we manage; bumped on every spawn. A superseded
+    /// child's terminationHandler lands asynchronously and must not clear the
+    /// live child's handle (that leaked a second librespot on the next start()).
+    private var generation = 0
 
     public func start() async throws {
         guard process == nil else { return }
@@ -85,6 +133,7 @@ public actor SpotifySupervisor {
             transition(.running) // virtual running
             return
         }
+        Self.reapStale(pipePath: pipePath.path)
 
         let p = Process()
         p.executableURL = bin
@@ -106,10 +155,14 @@ public actor SpotifySupervisor {
         // librespot credentials are cached in --cache after first OAuth/zeroconf.
         // First Connect requires Spotify Premium auth via discovery — that flow is
         // handled entirely by librespot's zeroconf + Spotify app.
+        // Never a Pipe: nothing drains it, and a full pipe blocks the child.
         p.standardOutput = FileHandle.nullDevice
         p.standardError = FileHandle.nullDevice
+        generation += 1
+        let gen = generation
         p.terminationHandler = { [weak self] proc in
-            Task { await self?.handleDeath(status: proc.terminationStatus) }
+            let status = proc.terminationStatus
+            Task { await self?.handleDeath(generation: gen, status: status) }
         }
         do {
             try p.run()
@@ -120,21 +173,26 @@ public actor SpotifySupervisor {
         }
         process = p
 
-        // Health: give it 5s to publish mDNS (_spotify-connect._tcp)
-        for _ in 0..<20 {
-            if p.isRunning {
-                try? await Task.sleep(nanoseconds: 250_000_000)
-                // If we survive 1s, consider it running — mDNS is async
-                transition(.running)
-                log.info("librespot running as '\(self.deviceName)' → pipe \(self.pipePath.path)")
-                return
-            }
+        // Health: it must survive 1s; mDNS (_spotify-connect._tcp) publishes
+        // asynchronously after that.
+        for _ in 0..<4 {
+            try? await Task.sleep(nanoseconds: 250_000_000)
+            // A stop() (or a newer start) during the wait owns the state now.
+            guard gen == generation, !intentionalStop else { return }
+            if !p.isRunning { break }
+        }
+        guard gen == generation, !intentionalStop else { return }
+        if p.isRunning {
+            transition(.running)
+            log.info("librespot running as '\(self.deviceName)' → pipe \(self.pipePath.path)")
+            return
         }
         transition(.failed("librespot exited immediately"))
         throw BeamAPIError(what: "librespot exited immediately")
     }
 
-    private func handleDeath(status: Int32) async {
+    private func handleDeath(generation gen: Int, status: Int32) async {
+        guard gen == generation else { return }
         process = nil
         if intentionalStop { transition(.stopped); return }
         log.error("librespot died status=\(status) — will restart on next DALI start")
@@ -151,8 +209,11 @@ public actor SpotifySupervisor {
                 try? await Task.sleep(nanoseconds: 50_000_000)
             }
             if p.isRunning { p.interrupt(); kill(p.processIdentifier, SIGKILL) }
+            // Only clear OUR child: a start() may have replaced it while we slept.
+            if process === p { process = nil }
+        } else {
+            process = nil
         }
-        process = nil
         transition(.stopped)
     }
 

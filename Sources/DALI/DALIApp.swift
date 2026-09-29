@@ -5,7 +5,10 @@ import Observation
 
 @main
 struct DALIApp: App {
-    @State private var session = DALIApplicationSession()
+    // A process-wide singleton, not `DALIApplicationSession()`: SwiftUI may
+    // build the App value more than once, and every extra session would boot
+    // a second DALIStore — a second engine, capture tap and beacon listener.
+    @State private var session = DALIApplicationSession.shared
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
 
     var body: some Scene {
@@ -20,6 +23,7 @@ struct DALIApp: App {
                 }
             }
             .background(WindowConfigurator())
+            .background(PreviewHooks())
         }
         .windowResizability(.contentSize)
         .windowStyle(.hiddenTitleBar)
@@ -30,7 +34,9 @@ struct DALIApp: App {
                 SettingsView().environment(store)
             } else {
                 Text("Finish setup in the DALI window to choose your speakers.")
-                    .font(.bodyBase).padding(24).frame(width: 330)
+                    .font(.body13).foregroundStyle(Color.paper62)
+                    .padding(Space.xl).frame(width: 330)
+                    .background(Color.ink)
             }
         }
 
@@ -60,26 +66,32 @@ struct DALIApp: App {
 @MainActor
 @Observable
 final class DALIApplicationSession {
+    static let shared = DALIApplicationSession()
+
     let onboarding: OnboardingState
     private(set) var store: DALIStore?
 
-    init() {
+    private init() {
         let defaults = UserDefaults.standard
         let persisted = defaults.persistentDomain(forName: Bundle.main.bundleIdentifier ?? "com.fortun8te.dali") ?? [:]
-        let engine = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("DALI/engine")
+        let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+            ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support")
+        let engine = support.appendingPathComponent("DALI/engine")
         onboarding = OnboardingState(defaults: defaults, persisted: persisted,
                                      engineExists: FileManager.default.fileExists(atPath: engine.path))
         // Only a previously requested managed extension copy is updated.
         // Existing unpacked installs in other folders are left where they are.
-        do { try ExtensionInstaller.updateExistingInstall() }
-        catch { NSLog("DALI browser extension update: %@", error.localizedDescription) }
+        // Off the main thread: it compares and copies files, and launch is
+        // when the window is trying to appear.
+        Task.detached(priority: .utility) {
+            do { try ExtensionInstaller.updateExistingInstall() }
+            catch { NSLog("DALI browser extension update: %@", error.localizedDescription) }
+        }
         if !onboarding.isPresented { ensureStore() }
     }
 
     func ensureStore() {
         guard store == nil else { return }
-        DALIExecution.engineStarted = true
         store = DALIStore()
     }
 
@@ -88,10 +100,6 @@ final class DALIApplicationSession {
         ensureStore()
     }
 }
-
-/// Closing an unstarted setup must not kill another running DALI's engine.
-@MainActor
-private enum DALIExecution { static var engineStarted = false }
 
 private struct OnboardingHost: View {
     let session: DALIApplicationSession
@@ -115,7 +123,7 @@ private struct OnboardingHost: View {
                                  let speaker = store.speakers.first(where: { $0.id == id }) else { return }
                            store.toggle(speaker)
                        }, finish: finish)
-            .task(id: state.step) {
+            .visibleTask(id: state.step) {
                 guard state.step == .speakers else { return }
                 session.ensureStore()
                 while !Task.isCancelled {
@@ -179,47 +187,41 @@ private struct MenuBarPanel: View {
         Button("Quit DALI") { NSApp.terminate(nil) }
     }
 
-    private var isError: Bool {
-        if case .error = store.phase { return true }
-        return false
-    }
+    private var isError: Bool { store.isError }
 
-    /// The same verb the big button shows, so the menu and the panel never
-    /// disagree about what one press does.
+    /// The same verb the primary button shows, so the menu and the panel
+    /// never disagree about what one press does.
     private var verb: String {
-        switch store.phase {
-        case .starting: return "Stop"
-        case .error: return "Fix the issue in DALI"
-        case .streaming:
-            if store.mode == .player { return store.isPlaying ? "Pause" : "Resume" }
-            return "Stop"
-        case .idle:
-            return store.mode == .player ? "Play to Room" : "Play everywhere"
-        }
+        store.isError ? "Fix the issue in DALI" : store.primaryVerb
     }
 }
 
-/// Dark titlebar blending + keep the window floating-feel clean.
-private struct WindowConfigurator: NSViewRepresentable {
-    func makeNSView(context: Context) -> NSView {
-        let v = NSView()
-        DispatchQueue.main.async {
-            guard let w = v.window else { return }
-            w.titlebarAppearsTransparent = true
-            w.styleMask.insert(.fullSizeContentView)   // content flows under the titlebar
-            w.isOpaque = false
-            w.backgroundColor = .clear
-            w.hasShadow = true
-            w.appearance = NSAppearance(named: .darkAqua)
-            w.standardWindowButton(.zoomButton)?.isEnabled = false
-            w.isMovableByWindowBackground = false
+/// UI harness only (`DALI_PREVIEW=1`): `DALI_PREVIEW_OPEN=settings|setup`
+/// opens that window on launch so it can be screenshotted. Inert otherwise.
+private struct PreviewHooks: View {
+    @Environment(\.openWindow) private var openWindow
+    @Environment(\.openSettings) private var openSettings
+
+    var body: some View {
+        Color.clear.frame(width: 0, height: 0).task {
+            guard DALIStore.isPreview else { return }
+            if ProcessInfo.processInfo.environment["DALI_PREVIEW_ACTIVATE"] == "1" {
+                NSApp.activate(ignoringOtherApps: true)
+            }
+            switch ProcessInfo.processInfo.environment["DALI_PREVIEW_OPEN"] {
+            case "settings": openSettings()
+            case "setup": openWindow(id: "setup")
+            default: break
+            }
         }
-        return v
     }
-    func updateNSView(_ nsView: NSView, context: Context) {}
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    // Closing the panel must never end a live room: the app keeps running from
+    // the menu bar and the Dock, and only Quit stops it.
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
+
     // Clicking the Dock icon with the window closed reopens it.
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         if !flag {
@@ -236,16 +238,4 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return true
     }
 
-    func applicationWillTerminate(_ notification: Notification) {
-        guard DALIExecution.engineStarted else { return }
-        // The supervisor's SIGTERM teardown is async; guarantee no orphan engine
-        // keeps the speakers occupied after we quit.
-        let helper = Bundle.main.bundleURL
-            .appendingPathComponent("Contents/Helpers/owntone/owntone").path
-        let task = Process()
-        task.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
-        task.arguments = ["-f", helper]
-        try? task.run()
-        task.waitUntilExit()
-    }
 }

@@ -35,6 +35,17 @@ public struct OwnToneConfig: Sendable {
     }
     public var confFile: URL { etcDir.appendingPathComponent("owntone.conf") }
 
+    /// libconfuse string literal: a path or user name containing `"` or `\` would
+    /// otherwise end the string early and make the whole file unparseable — the
+    /// engine then fails to start on every launch for that user.
+    private static func quoted(_ value: String) -> String {
+        let escaped = value
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+            .replacingOccurrences(of: "\n", with: " ")
+        return "\"\(escaped)\""
+    }
+
     public var rendered: String {
         // The database and media directory are persistent. Re-scanning the
         // user's whole Music folder on every app launch used to contend with
@@ -44,9 +55,9 @@ public struct OwnToneConfig: Sendable {
         let skipInitialScan = FileManager.default.fileExists(atPath: dbFile.path)
         return """
         general {
-            uid = "\(NSUserName())"
-            db_path = "\(dbFile.path)"
-            logfile = "\(logFile.path)"
+            uid = \(Self.quoted(NSUserName()))
+            db_path = \(Self.quoted(dbFile.path))
+            logfile = \(Self.quoted(logFile.path))
             loglevel = info
             trusted_networks = { "localhost" }
             websocket_interface = "lo0"
@@ -57,7 +68,7 @@ public struct OwnToneConfig: Sendable {
         library {
             name = "Beam"
             port = \(port)
-            directories = { "\(mediaDir.path)", "\(musicDir.path)" }
+            directories = { \(Self.quoted(mediaDir.path)), \(Self.quoted(musicDir.path)) }
             pipe_autostart = true
             filescan_disable = \(skipInitialScan ? "true" : "false")
             // Pin the pipe end to the exact format the capture side feeds
@@ -83,8 +94,15 @@ public struct OwnToneConfig: Sendable {
         for dir in [etcDir, varDir, mediaDir] {
             try fm.createDirectory(at: dir, withIntermediateDirectories: true)
         }
+        // The path must be a real FIFO. A regular file left there (a stray
+        // touch, a restore from backup) makes OwnTone read EOF forever and the
+        // capture side write into a file that nobody plays.
+        var st = stat()
+        if lstat(pipePath.path, &st) == 0, (st.st_mode & S_IFMT) != S_IFIFO {
+            try fm.removeItem(at: pipePath)
+        }
         if !fm.fileExists(atPath: pipePath.path) {
-            guard mkfifo(pipePath.path, 0o644) == 0 else {
+            guard mkfifo(pipePath.path, 0o644) == 0 || errno == EEXIST else {
                 throw BeamAPIError(what: "mkfifo failed errno \(errno)")
             }
         }

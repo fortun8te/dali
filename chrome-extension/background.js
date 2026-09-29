@@ -36,7 +36,7 @@ importScripts('beacon.js');
 
 // Bump BUILD on every edit — it is what tells you whether Chrome is running
 // the code you just wrote. Keep it in step with the same constant in content.js.
-const BUILD = '2026-09-27.b';
+const BUILD = '2026-09-29.a';
 
 // Stamp every request with who we are, so the app can show that the extension
 // is really running (its beacon echoes this back as `extensionVersion`).
@@ -135,9 +135,16 @@ banner('worker up');
 // -------------------------------------------------------------------------
 // Beacon
 
+// While the app is closed every tab with a video asks for the beacon every
+// few seconds and every ask is a doomed loopback connect. Answer "offline"
+// from the cache for longer and longer (up to 4 s) instead of retrying at the
+// full rate; one success snaps back to the normal cadence.
+const OFFLINE_BACKOFF_MS = [CACHE_MS, 1500, 3000, 4000];
+let offlineStreak = 0;
+
 function readBeacon() {
   const now = Date.now();
-  if (cache.value && now - cache.at < CACHE_MS &&
+  if (cache.value && now - cache.at < (cache.ttl || CACHE_MS) &&
       (cache.expiresAt == null || now < cache.expiresAt)) return Promise.resolve(cache.value);
   if (cache.pending) return cache.pending;
 
@@ -146,8 +153,13 @@ function readBeacon() {
     const expiresAt = lastStatus.at + BEACON_FAILURE_GRACE_MS;
     const keep = lastStatus.value && lastStatus.value.running && now < expiresAt;
     const value = keep ? lastStatus.value : DALIBeacon.offline();
-    cache = { at: now, value, pending: null,
-              expiresAt: keep ? Math.min(now + CACHE_MS, expiresAt) : now + CACHE_MS };
+    // A held reading keeps the fast retry (it is about to expire); only a
+    // settled "offline" backs off.
+    if (keep) offlineStreak = 0;
+    else offlineStreak = Math.min(offlineStreak + 1, OFFLINE_BACKOFF_MS.length);
+    const ttl = keep ? CACHE_MS : OFFLINE_BACKOFF_MS[Math.max(0, offlineStreak - 1)];
+    cache = { at: now, value, pending: null, ttl,
+              expiresAt: keep ? Math.min(now + CACHE_MS, expiresAt) : now + ttl };
     // Never refresh lastStatus.at from a timeout. Repeated failures must age
     // out, and audio-cut decisions must retain the actual validation time.
     return value;
@@ -155,6 +167,7 @@ function readBeacon() {
 
   cache.pending = DALIBeacon.fetchStatus().then((value) => {
     if (value.unavailable) return transportFailure();
+    offlineStreak = 0;
     maybeReloadForUpdate(value);
     const prev = cache.value;
     cache = { at: Date.now(), value, pending: null };
@@ -185,6 +198,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     const previous = frames.get(key);
     const stopped = !!(previous && previous.playing && previous.cutEligible && !msg.playing &&
       !msg.gone && Date.now() - previous.at <= FRAME_STALE_MS);
+    ensureSweep();
     if (msg.gone) frames.delete(key);
     else frames.set(key, { playing: !!msg.playing, audible: msg.audible === true, at: Date.now(),
                            cutEligible: msg.cutEligible !== false,
@@ -376,12 +390,12 @@ function nowList() {
     .map((e) => (e.a ? { t: e.t, h: e.h, l: e.l, k: e.k, a: e.a } : { t: e.t, h: e.h, l: e.l, k: e.k }));
 }
 
-// The beacon reads ONE chunk of the request and parses the first line out of
-// it, so the whole "GET /now?d=… HTTP/1.1" line has to arrive in a single TCP
-// segment. Three tabs each carrying a 300-char artwork URL encodes to ~1550
-// bytes, which is over a 1460-byte MSS — the line would split, the app would
-// parse a truncated path and drop the report. Shed artwork first (it is the
-// least important field and the biggest), then titles, until it fits.
+// The report rides in the URL of a GET, and the app caps a whole request
+// (line + headers) at 16 KB and drops anything bigger. Older app builds also
+// parsed only the first TCP segment (~1460 bytes), so this stays well under
+// both: three tabs each carrying a 300-char artwork URL would encode to ~1550
+// bytes. Shed artwork first (it is the least important field and the biggest),
+// then titles, until it fits.
 const NOW_MAX_ENCODED = 1000;
 
 function fitNow(list) {
@@ -429,7 +443,26 @@ if (chrome.tabs && chrome.tabs.onRemoved) {
 // Backstop sweep: evaluateCut() is otherwise only triggered BY a message, so
 // a frame that goes silent without ever sending a final report needs this to
 // be noticed at all.
-setInterval(() => { evaluateCut(); publishNow(false); }, 2000);
+//
+// It runs only while there is something to sweep. A timer that fires every 2 s
+// forever wakes the worker's event loop for nothing on a browser with no video
+// open (MV3 revives this worker on every 30 s check-in alarm, and each
+// revival used to start a fresh, permanent interval). Timers die with the
+// worker anyway; a revived worker restarts this on the first playstate report.
+let sweepTimer = null;
+
+function sweep() {
+  evaluateCut();
+  publishNow(false);
+  if (!frames.size && !cutState && !cutGraceTimer && lastNowJSON === '[]') {
+    clearInterval(sweepTimer);
+    sweepTimer = null;
+  }
+}
+
+function ensureSweep() {
+  if (!sweepTimer) sweepTimer = setInterval(sweep, 2000);
+}
 
 // -------------------------------------------------------------------------
 // Content-script port.

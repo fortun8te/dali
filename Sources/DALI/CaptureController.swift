@@ -1,13 +1,22 @@
 // Wires ProcessTap -> FormatConverter -> FIFOWriter inside the app.
 // Owns the audio objects; everything here is off the main thread except
 // start/stop entry points.
+//
+// Thread map: the HAL's realtime IO thread only memcpys into a ring (see
+// ProcessTap); the tap's consumer thread runs `attachHandler`'s closure
+// (convert, resample, account, hand to the FIFO writer); the analysis queue does
+// metering; `recoveryQueue` runs rebuilds. `lock` is therefore only ever taken
+// by non-realtime threads.
 
 import Foundation
 import AVFoundation
+import AppKit
+import Synchronization
 
 final class CaptureController: @unchecked Sendable {
     private var tap: ProcessTap?
     private var fifo: FIFOWriter?
+    private var fifoPathInUse: String?
     private let lock = NSLock()
     // Hardware start/stop may wait for an audio callback, so serialize lifecycle
     // operations separately from the callback's state lock. In particular stop
@@ -18,7 +27,33 @@ final class CaptureController: @unchecked Sendable {
         lock.lock(); defer { lock.unlock() }
         return sessionGeneration
     }
-    private(set) var isRunning = false
+    private var _isRunning = false
+    var isRunning: Bool { lock.lock(); defer { lock.unlock() }; return _isRunning }
+
+    /// Monotonic seconds that keep counting through sleep and are immune to wall
+    /// clock steps (NTP, DST, manual change), unlike Date().
+    private static func monoNow() -> Double {
+        Double(clock_gettime_nsec_np(CLOCK_MONOTONIC)) / 1_000_000_000
+    }
+
+    // SELF-HEALING (see requestRecovery). Device-change / wake / stall events all
+    // funnel into ONE single-flight, spaced, backed-off rebuild instead of each
+    // subsystem rebuilding on its own.
+    private let recoveryQueue = DispatchQueue(label: "dali.capture.recovery")
+    private var recoveryScheduled = false
+    private var recoveryFailures = 0
+    private var lastRecoveryMono = -1000.0
+    private var stallAttempts = 0
+    private var activeToken = 0
+    private var startParams: (fifoPath: String, muteLocal: Bool, source: ProcessTap.Source)?
+    private var wakeObserver: NSObjectProtocol?
+    private var recoveriesAcc = 0
+    /// Diagnostic hook for the flight log / analytics ("device_change: ...").
+    /// Called on the recovery queue.
+    var onEvent: ((String) -> Void)?
+    // Analysis blocks queued but not yet run. Bounded so a starved analysis
+    // queue can never build an unbounded pile of retained buffers.
+    private let analysisBacklog = Atomic<Int>(0)
 
     // OwnTone's pipe playback needs a CONTINUOUS, REAL-TIME byte stream: it plays
     // exactly 44100*4 bytes per wall-clock second and trusts that contract. We
@@ -26,10 +61,11 @@ final class CaptureController: @unchecked Sendable {
     // silence, so audio-time never drifts from real time (drift caused the
     // slow-building stutters/stops).
     private var silenceTimer: DispatchSourceTimer?
-    private var lastBufferAt = Date.distantPast
-    private var lastFillAt = Date.distantPast    // wall clock of last silence top-up
+    private var lastBufferMono = 0.0             // monotonic secs of last tap buffer, 0 = none yet
+    private var lastFillMono = 0.0               // monotonic secs of last silence top-up
     private var feedingSilence = false
-    private var varispeed = Varispeed()          // smooth drift control
+    // (The Varispeed resampler is owned by the consumer thread's handler closure,
+    // not shared state: its only caller is that thread, so it needs no lock.)
     // The drift-control ratio is computed once per second by DALIStore's flight
     // loop from OwnTone's REAL drain/playback clock (the only observable speaker
     // clock) and pushed in here. The audio thread just applies it. This replaces
@@ -76,12 +112,15 @@ final class CaptureController: @unchecked Sendable {
     private var corrByteTot = 0.0     // Σ bytes through the varispeed
     private var silenceBytesAcc = 0   // keepalive zeros written this interval
     private var tapRebuildAcc = 0     // tap rebuilds since the last readMetrics
-    private var lastMetricsAt = Date()
+    private var lastMetricsMono = CaptureController.monoNow()
 
-    // Visualization levels (read by the UI at ~15Hz). Updated off the audio
+    // Visualization levels (read by the UI at ~30Hz). Updated off the audio
     // thread on a dedicated analysis queue so the realtime capture path does
     // only convert + write, never DSP under a contended lock.
-    private let analysisQueue = DispatchQueue(label: "dali.analysis", qos: .utility)
+    // userInitiated, not utility: the source-silence mute and the beat clock ride
+    // on this queue, and a utility thread starves under load exactly when the
+    // room needs it.
+    private let analysisQueue = DispatchQueue(label: "dali.analysis", qos: .userInitiated)
     private var _level: Double = 0
     private var _bass: Double = 0
     private var _treble: Double = 0
@@ -94,12 +133,14 @@ final class CaptureController: @unchecked Sendable {
     /// instead of sitting at full brightness all the time.
     private var slowDb: (level: Double, bass: Double, treble: Double) = (-45, -45, -45)
     private var levelPrimed = false
-    // Peak since the UI last read. The panel polls at ~15 Hz and a transient
+    // Peak since the UI last read. The panel polls at ~30 Hz and a transient
     // decays inside that window, so without this the canvas saw noise, not beats.
     private var peakSinceRead: (level: Double, bass: Double, treble: Double) = (0, 0, 0)
     /// Monotonic count of detected beats (bass onsets), with a refractory gap so
     /// one kick is one beat.
     private var _beatCount = 0
+    private var lastLevelAt: Date?
+    private var lastBeatWallAt: Date?
     private var audioClock = 0.0        // seconds of audio seen, monotonic
     private var lastBeatAt = -1.0
     private var lpSlow: Double = 0
@@ -112,6 +153,7 @@ final class CaptureController: @unchecked Sendable {
     private var inFrames = 0          // input frames consumed this interval
     private var outBytes = 0          // bytes produced (post-convert) this interval
     private var lastTapNs: UInt64 = 0
+    private var overrunsSeen = 0      // tap ring overruns already reported
 
     // ZERO-BUFFER CANARY.
     // Core Audio process taps are documented to enter a state where the IOProc
@@ -151,19 +193,21 @@ final class CaptureController: @unchecked Sendable {
     /// STOP arriving (anchor device unplugged, tap start silently failed).
     var secondsSinceLastBuffer: Double {
         lock.lock(); defer { lock.unlock() }
-        guard lastBufferAt != .distantPast else { return 0 }
-        return Date().timeIntervalSince(lastBufferAt)
+        guard lastBufferMono > 0 else { return 0 }
+        return max(0, Self.monoNow() - lastBufferMono)
     }
 
     /// One consistent reading for the room canvas: the peak of each band since
-    /// the last call (so a transient between two 15 Hz polls is not lost), plus
+    /// the last call (so a transient between two 30 Hz polls is not lost), plus
     /// the beat counter. Consuming — call it once per UI tick and no more.
-    func readLevels() -> (level: Double, bass: Double, treble: Double, beats: Int) {
+    func readLevels() -> (at: Date?, level: Double, bass: Double, treble: Double,
+                          beats: Int, beatAt: Date?) {
         lock.lock(); defer { lock.unlock() }
-        let v = (max(_level, peakSinceRead.level),
+        let v = (lastLevelAt,
+                 max(_level, peakSinceRead.level),
                  max(_bass, peakSinceRead.bass),
                  max(_treble, peakSinceRead.treble),
-                 _beatCount)
+                 _beatCount, lastBeatWallAt)
         peakSinceRead = (0, 0, 0)
         return v
     }
@@ -230,10 +274,21 @@ final class CaptureController: @unchecked Sendable {
         /// interval, as a fraction (0.004 = +0.4%). Differs from `ratio` when
         /// the ratio moved mid-interval or silence diluted it.
         var appliedCorr = 0.0
+        /// Records the capture ring dropped this interval because the consumer
+        /// thread fell seconds behind. Nonzero = a real fault, like FIFO drops.
+        var tapOverruns = 0
+        /// Self-healing tap rebuilds (device change / wake / stall) this interval.
+        var recoveries = 0
     }
     func readMetrics() -> Flight {
         lock.lock(); defer { lock.unlock() }
         var f = Flight()
+        if let t = tap {
+            let o = t.overrunCount
+            f.tapOverruns = max(0, o - overrunsSeen)
+            overrunsSeen = o
+        }
+        f.recoveries = recoveriesAcc; recoveriesAcc = 0
         if let fw = fifo { f.written = fw.writtenBytes; f.dropped = fw.droppedBytes; f.pending = fw.pendingBytes; f.eagain = fw.eagainCount }
         f.bufCount = bufCount; f.maxGapMs = maxGapMs; f.convRebuilds = convRebuilds
         f.inFrames = inFrames; f.outBytes = outBytes; f.inRate = converterInputRate
@@ -242,9 +297,9 @@ final class CaptureController: @unchecked Sendable {
         f.tapRebuilds = tapRebuildAcc
         let total = corrByteTot + Double(silenceBytesAcc)
         f.appliedCorr = total > 0 ? corrByteSum / total : 0
-        let now = Date()
-        f.intervalSec = max(0.001, now.timeIntervalSince(lastMetricsAt))
-        lastMetricsAt = now
+        let now = Self.monoNow()
+        f.intervalSec = max(0.001, now - lastMetricsMono)
+        lastMetricsMono = now
         bufCount = 0; maxGapMs = 0; convRebuilds = 0; inFrames = 0; outBytes = 0
         corrByteSum = 0; corrByteTot = 0; silenceBytesAcc = 0; tapRebuildAcc = 0
         return f
@@ -255,35 +310,56 @@ final class CaptureController: @unchecked Sendable {
                source: ProcessTap.Source = .system) throws {
         lifecycleLock.lock(); defer { lifecycleLock.unlock() }
         lock.lock()
-        guard !isRunning else { lock.unlock(); return }
+        guard !_isRunning else { lock.unlock(); return }
         sessionGeneration += 1
+        // A FIFO left by a failed earlier start must not be reused for a
+        // different path.
+        var staleFifo: FIFOWriter?
+        if let f = fifo, fifoPathInUse != fifoPath { staleFifo = f; fifo = nil }
         let pipe = fifo ?? FIFOWriter(path: fifoPath)
         fifo = pipe
-        if lastFillAt == .distantPast { lastFillAt = Date(); bytesWritten = 0 }
-        lastBufferAt = Date()
+        fifoPathInUse = fifoPath
+        if lastFillMono == 0 { lastFillMono = Self.monoNow(); bytesWritten = 0 }
+        lastBufferMono = Self.monoNow()
+        startParams = (fifoPath, muteLocal, source)
+        stallAttempts = 0
+        recoveryFailures = 0
+        recoveryScheduled = false
+        overrunsSeen = 0
         lock.unlock()
+        staleFifo?.closePipe()
 
         let tap = ProcessTap()
         attachHandler(to: tap, pipe: pipe)
         try tap.start(muteLocal: muteLocal, source: source)
-        lock.lock(); self.tap = tap; isRunning = true; lock.unlock()
+        lock.lock(); self.tap = tap; _isRunning = true; lock.unlock()
         startSilenceKeepalive()
+        installWakeObserver()
     }
 
     /// Swap the TAP only (source / mute change) while keeping the same FIFO and
     /// silence timer alive, so the pipe never loses its writer and OwnTone never
     /// sees an EOF. No teardown, no zero-writer gap.
     @discardableResult
+    ///
+    /// `keepRunningOnFailure` is for the self-healing path: a failed rebuild then
+    /// leaves the session "running" (tap nil, keepalive silence flowing) so the
+    /// caller's backoff retries and DALIStore's watchdog can still see it. The
+    /// default (false) keeps the original contract for external callers.
     func rebuild(fifoPath: String, muteLocal: Bool, source: ProcessTap.Source,
-                 expectedSession: Int? = nil) -> Bool {
+                 expectedSession: Int? = nil, keepRunningOnFailure: Bool = false) -> Bool {
         lifecycleLock.lock(); defer { lifecycleLock.unlock() }
         lock.lock()
-        guard isRunning, let pipe = fifo else { lock.unlock(); return false }
+        guard _isRunning, let pipe = fifo else { lock.unlock(); return false }
         guard expectedSession == nil || expectedSession == sessionGeneration else {
             lock.unlock(); return false
         }
         let oldTap = tap
         tap = nil
+        startParams = (fifoPath, muteLocal, source)
+        activeToken &+= 1        // events from the old tap are stale from here on
+        overrunsSeen = 0
+        lastRecoveryMono = Self.monoNow()
         converterInputRate = 0
         tapRebuildAcc += 1       // hard discontinuity: the drift loop must freeze
         zeroBufferRun = 0        // fresh tap, fresh canary
@@ -297,10 +373,12 @@ final class CaptureController: @unchecked Sendable {
         heardAudioSinceBuild = false
         let silenceCB = onSourceSilenceChanged
         feedingSilence = false
-        lastFillAt = Date()
-        lastBufferAt = Date()    // fresh grace period for the no-buffers watchdog
+        lastFillMono = Self.monoNow()
+        lastBufferMono = Self.monoNow()    // fresh grace period for the no-buffers watchdog
         lock.unlock()
         if wasSilent, let silenceCB { Task { @MainActor in silenceCB(false) } }
+        // Joins the old consumer thread, so its handler can never run again (or
+        // race the new tap's) after this returns.
         oldTap?.stop()
 
         let newTap = ProcessTap()
@@ -310,31 +388,111 @@ final class CaptureController: @unchecked Sendable {
             lock.lock(); tap = newTap; lock.unlock()
             return true
         } catch {
+            FileHandle.standardError.write(Data("CaptureController: tap rebuild failed: \(error)\n".utf8))
             // Never leave a failed tap masquerading as a running capture. The
             // caller can stop the stream and surface the real error instead of
             // silently sending zeros and retrying forever.
-            lock.lock(); isRunning = false; tap = nil; lock.unlock()
+            lock.lock()
+            if !keepRunningOnFailure { _isRunning = false }
+            tap = nil
+            lock.unlock()
             return false
         }
+    }
+
+    // MARK: self-healing
+
+    /// Funnel for every "the tap is probably stale" signal: HAL invalidation
+    /// (default output changed, rate change, aggregate died, coreaudiod restart),
+    /// wake from sleep, and callbacks that stopped arriving. SINGLE-FLIGHT (one
+    /// pending recovery at a time, extra requests coalesce), SPACED (never sooner
+    /// than 3 s after the previous rebuild, doubling per consecutive failure up to
+    /// 30 s), so a flapping device cannot turn into a rebuild storm.
+    private func requestRecovery(_ reason: String, after delay: TimeInterval) {
+        lock.lock()
+        guard _isRunning, !recoveryScheduled else { lock.unlock(); return }
+        recoveryScheduled = true
+        let session = sessionGeneration
+        let spacing = min(3.0 * pow(2.0, Double(min(recoveryFailures, 4))), 30.0)
+        let sinceLast = Self.monoNow() - lastRecoveryMono
+        lock.unlock()
+        let wait = max(delay, spacing - sinceLast)
+        recoveryQueue.asyncAfter(deadline: .now() + wait) { [weak self] in
+            self?.runRecovery(reason: reason, session: session)
+        }
+    }
+
+    private func runRecovery(reason: String, session: Int) {
+        lock.lock()
+        recoveryScheduled = false
+        guard _isRunning, sessionGeneration == session, let p = startParams else {
+            lock.unlock(); return
+        }
+        lock.unlock()
+        // After sleep the HAL usually needs a rebuild, but if buffers are already
+        // flowing again the tap survived and rebuilding would only splice a gap.
+        if reason == "wake", secondsSinceLastBuffer < 0.5 {
+            onEvent?("capture_recovery_skipped: wake, tap healthy")
+            return
+        }
+        onEvent?("capture_recovery: \(reason)")
+        FileHandle.standardError.write(Data("CaptureController: rebuilding tap (\(reason))\n".utf8))
+        let ok = rebuild(fifoPath: p.fifoPath, muteLocal: p.muteLocal, source: p.source,
+                         expectedSession: session, keepRunningOnFailure: true)
+        lock.lock()
+        recoveriesAcc += 1
+        let stillOurs = _isRunning && sessionGeneration == session
+        if ok { recoveryFailures = 0 } else if stillOurs { recoveryFailures += 1 }
+        let failures = recoveryFailures
+        lock.unlock()
+        if !ok && stillOurs {
+            let backoff = min(2.0 * pow(2.0, Double(min(failures - 1, 4))), 30.0)
+            onEvent?("capture_recovery_failed: retry in \(Int(backoff))s")
+            requestRecovery("retry after failed rebuild", after: backoff)
+        }
+    }
+
+    private func installWakeObserver() {
+        guard wakeObserver == nil else { return }
+        wakeObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didWakeNotification, object: nil, queue: nil
+        ) { [weak self] _ in
+            // Devices reappear a beat after the wake notification.
+            self?.requestRecovery("wake", after: 2.5)
+        }
+    }
+
+    private func removeWakeObserver() {
+        if let o = wakeObserver { NSWorkspace.shared.notificationCenter.removeObserver(o) }
+        wakeObserver = nil
     }
 
     /// Install the capture callback: convert, account, write, and hand a copy to
     /// the analysis queue for the visualization. The audio thread does no DSP.
     private func attachHandler(to tap: ProcessTap, pipe: FIFOWriter) {
+        lock.lock(); activeToken &+= 1; let token = activeToken; lock.unlock()
+        // The HAL reconfigured under the tap (default output moved, rate change,
+        // aggregate died, coreaudiod restarted). Only the CURRENT tap's events count.
+        tap.onInvalidated = { [weak self] reason in
+            guard let self else { return }
+            self.lock.lock(); let current = self.activeToken == token; self.lock.unlock()
+            if current { self.requestRecovery(reason, after: 1.0) }
+        }
+        // Consumer-thread state (one thread per tap, so no locking needed).
         var conv: FormatConverter?
+        var varispeed = Varispeed()          // smooth drift control
         tap.onBuffer = { [weak self] buffer in
             guard let self else { return }
             var rebuilt = false
-            // Rebuild the converter if the device's mix rate changed mid-session
-            // (AirPods / DAC switching the rate); feeding 48k through a 44.1k
-            // converter would corrupt timing.
-            if conv == nil || self.converterInputRate != buffer.format.sampleRate {
+            // Rebuild the converter if the device's mix rate or layout changed
+            // mid-session (AirPods / DAC switching the rate); feeding 48k
+            // through a 44.1k converter would corrupt timing.
+            if conv == nil || !(conv!.accepts(buffer.format)) {
                 conv = FormatConverter(from: buffer.format)
-                self.converterInputRate = buffer.format.sampleRate
                 // The new converter is a fresh resampler with no relation to the
                 // previous stream's last frame; reset varispeed so it doesn't
                 // interpolate a click across the discontinuity.
-                self.lock.lock(); self.varispeed.reset(); self.lock.unlock()
+                varispeed.reset()
                 rebuilt = true
             }
             guard let converted = conv?.convert(buffer) else { return }
@@ -348,16 +506,19 @@ final class CaptureController: @unchecked Sendable {
             // bit-perfect passthrough branch and never resamples audio it
             // cannot audibly improve.
             let ratio = abs(rawRatio - 1.0) < Self.driftDeadzone ? 1.0 : rawRatio
-            let data = self.varispeed.process(converted, ratio: ratio)
+            let data = varispeed.process(converted, ratio: ratio)
+            guard !data.isEmpty else { return }
 
             let now = DispatchTime.now().uptimeNanoseconds
             self.lock.lock()
-            self.lastBufferAt = Date()
+            self.lastBufferMono = Self.monoNow()
+            self.stallAttempts = 0            // callbacks are alive: re-arm the stall watchdog
+            let session = self.sessionGeneration
             self.bytesWritten += data.count
             self.lastRatio = ratio
             self.corrByteSum += (ratio - 1.0) * Double(data.count)
             self.corrByteTot += Double(data.count)
-            if self.lastTapNs != 0 {
+            if self.lastTapNs != 0, now >= self.lastTapNs {   // UInt64 subtraction traps on underflow
                 let gap = Double(now - self.lastTapNs) / 1_000_000
                 if gap > self.maxGapMs { self.maxGapMs = gap }
             }
@@ -365,17 +526,26 @@ final class CaptureController: @unchecked Sendable {
             self.bufCount += 1
             self.inFrames += Int(buffer.frameLength)
             self.outBytes += data.count
-            if rebuilt { self.convRebuilds += 1 }
+            if rebuilt { self.convRebuilds += 1; self.converterInputRate = buffer.format.sampleRate }
             self.lock.unlock()
+            let capturedAt = Date()
             pipe.write(data)
-            self.analyze(data)
+            if self.analysisBacklog.load(ordering: .relaxed) < 256 {
+                _ = self.analysisBacklog.wrappingAdd(1, ordering: .relaxed)
+                self.analyze(data, capturedAt: capturedAt, session: session)
+            }
         }
     }
 
     /// Loudness + band split for the room visualization, off the audio thread.
-    private func analyze(_ data: Data) {
+    private func analyze(_ data: Data, capturedAt: Date, session: Int) {
         analysisQueue.async { [weak self] in
             guard let self else { return }
+            defer { _ = self.analysisBacklog.wrappingSubtract(1, ordering: .relaxed) }
+            self.lock.lock()
+            let current = self.sessionGeneration == session
+            self.lock.unlock()
+            guard current else { return }
             // Zero-buffer canary (see zeroBufferRun). Early-exits on the first
             // non-zero sample, so on real audio this is a couple of comparisons.
             let anyNonZero = data.withUnsafeBytes { raw -> Bool in
@@ -402,6 +572,7 @@ final class CaptureController: @unchecked Sendable {
             let secs = Double(data.count) / 176_400.0
             var flipped: Bool? = nil
             self.lock.lock()
+            guard self.sessionGeneration == session else { self.lock.unlock(); return }
             if anyNonZero {
                 self.zeroBufferRun = 0; self.heardAudioSinceBuild = true
                 self.silentSec = 0
@@ -451,6 +622,7 @@ final class CaptureController: @unchecked Sendable {
                 return (db(sumSq), db(bassAcc), db(trebAcc))
             }
             self.lock.lock()
+            guard self.sessionGeneration == session else { self.lock.unlock(); return }
             // A level that IS the music, not a loudness meter.
             //
             // Measured over two real tracks, the old purely-loudness reading sat
@@ -481,12 +653,14 @@ final class CaptureController: @unchecked Sendable {
             let (b, bOnset) = band(bass, &self.slowDb.bass, &self.refDb.bass)
             let (t, _) = band(treble, &self.slowDb.treble, &self.refDb.treble)
             self.levelPrimed = true
+            self.lastLevelAt = capturedAt
 
             // The beat: a clear bass onset, at most one per 220 ms.
             self.audioClock += dt
             if bOnset > 0.55, self.audioClock - self.lastBeatAt > 0.22 {
                 self.lastBeatAt = self.audioClock
                 self._beatCount &+= 1
+                self.lastBeatWallAt = capturedAt
             }
             // Instant attack, release fast enough that a beat is a beat.
             self._level = l > self._level ? l : self._level * 0.86 + l * 0.14
@@ -506,40 +680,54 @@ final class CaptureController: @unchecked Sendable {
         t.setEventHandler { [weak self] in
             guard let self else { return }
             lock.lock()
-            let now = Date()
+            // A tick that was already running when stop() cancelled us must not
+            // touch the freshly reset state.
+            guard let f = fifo, _isRunning || tap != nil, lastBufferMono > 0 else { lock.unlock(); return }
+            let now = Self.monoNow()
             // Start a forward-paced keepalive promptly if the tap stops calling.
             // Never backfill the historical gap: those late zeros cannot repair
             // past audio and only queue ahead of newly resumed sound.
-            let quiet = now.timeIntervalSince(lastBufferAt) > 0.12
+            let stalled = now - lastBufferMono
+            let quiet = stalled > 0.12
             var fill = 0
             if quiet {
                 let quantum = Self.bytesPerSecond / 20     // 50 ms
                 if !feedingSilence {
                     feedingSilence = true
-                    lastFillAt = now
+                    lastFillMono = now
                     fill = quantum
                 } else {
-                    let gap = now.timeIntervalSince(lastFillAt)
+                    // Clamp before the Double->Int conversion: Int(x) traps on
+                    // NaN/overflow, and a wild clock delta must not be able to.
+                    let gap = min(max(now - lastFillMono, 0), 1.0)
                     var bytes = Int(gap * Double(Self.bytesPerSecond))
                     bytes -= bytes % 4
                     fill = min(max(bytes, 0), quantum)
                     if fill > 0 {
-                        lastFillAt = lastFillAt.addingTimeInterval(
-                            Double(fill) / Double(Self.bytesPerSecond)
-                        )
+                        lastFillMono += Double(fill) / Double(Self.bytesPerSecond)
                     }
                 }
             } else {
                 feedingSilence = false
-                lastFillAt = lastBufferAt
+                lastFillMono = lastBufferMono
             }
-            let f = fifo
             if fill > 0 { bytesWritten += fill; silenceBytesAcc += fill }
             // Queue the zero block before releasing the same lock used by the
             // real-audio callback. This guarantees resumed PCM cannot overtake
             // an already-decided silence write.
-            if fill > 0 { f?.write(Data(count: fill)) }
+            if fill > 0 { f.write(Data(count: fill)) }
+            // STALL WATCHDOG. The tap is "running" but its callbacks stopped
+            // (HAL reconfigured, sleep/wake, permission flip). Rebuild it from
+            // here after 4 s, then 8 s; after that DALIStore's own >10 s
+            // watchdog escalates to a full stream restart.
+            var stallReason: String?
+            if tap != nil, !recoveryScheduled, stallAttempts < 2,
+               stalled > 4.0 * pow(2.0, Double(stallAttempts)) {
+                stallAttempts += 1
+                stallReason = String(format: "no tap callbacks for %.0fs", stalled)
+            }
             lock.unlock()
+            if let stallReason { requestRecovery(stallReason, after: 0) }
         }
         t.resume()
         silenceTimer = t
@@ -549,6 +737,7 @@ final class CaptureController: @unchecked Sendable {
         lifecycleLock.lock(); defer { lifecycleLock.unlock() }
         silenceTimer?.cancel()
         silenceTimer = nil
+        removeWakeObserver()
         // DEADLOCK FIX. tap.stop() calls AudioDeviceStop + AudioDeviceDestroy-
         // IOProcID, both of which BLOCK until the IOProc block is no longer
         // executing — and that block's first act is `self.lock.lock()`. Calling
@@ -563,24 +752,32 @@ final class CaptureController: @unchecked Sendable {
         let oldTap = tap
         let oldFifo = fifo
         sessionGeneration += 1
+        activeToken &+= 1
         tap = nil
         fifo = nil
+        fifoPathInUse = nil
+        startParams = nil
+        recoveryScheduled = false
         lock.unlock()
         oldTap?.stop()
         oldFifo?.closePipe()
 
         lock.lock(); defer { lock.unlock() }
-        lastFillAt = .distantPast
-        lastBufferAt = .distantPast
+        lastFillMono = 0
+        lastBufferMono = 0
         feedingSilence = false
         bytesWritten = 0
-        varispeed.reset()
         targetRatio = 1.0
         lastRatio = 1.0
         corrByteSum = 0; corrByteTot = 0; silenceBytesAcc = 0; tapRebuildAcc = 0
-        lastMetricsAt = Date()
+        lastMetricsMono = Self.monoNow()
         zeroBufferRun = 0
         heardAudioSinceBuild = false
-        isRunning = false
+        stallAttempts = 0; recoveryFailures = 0; recoveriesAcc = 0
+        lastTapNs = 0
+        _level = 0; _bass = 0; _treble = 0
+        peakSinceRead = (0, 0, 0)
+        lastLevelAt = nil; lastBeatWallAt = nil
+        _isRunning = false
     }
 }

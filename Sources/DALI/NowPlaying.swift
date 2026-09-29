@@ -47,7 +47,9 @@ final class NowPlayingMonitor {
 
     /// The browser's report, freshest first.
     private(set) var browser: [NowItem] = []
-    private var browserAt: Date = .distantPast
+    /// Read on demand by `items`/`anyHeld`; expiry clears `browser` itself, so
+    /// the timestamp must not make every 4 s report re-render the panel.
+    @ObservationIgnored private var browserAt: Date = .distantPast
     /// Spotify / Music, whichever is playing.
     private(set) var apps: [NowItem] = []
 
@@ -57,25 +59,38 @@ final class NowPlayingMonitor {
     /// Fetched covers, keyed by URL. Small and bounded: the row shows one.
     private(set) var art: [URL: NSImage] = [:]
     @ObservationIgnored private var artInFlight = Set<URL>()
+    /// Covers that failed to load, so a row's body does not refetch them on
+    /// every redraw.
+    @ObservationIgnored private var artFailed = Set<URL>()
+    /// A page-supplied og:image can be anything; never hold more than this.
+    private static let maxArtBytes = 4 * 1024 * 1024
 
     /// The cover for `url` if it has arrived; starts the fetch if it has not.
     func artwork(_ url: URL?) -> NSImage? {
         guard let url else { return nil }
         if let img = art[url] { return img }
-        guard !artInFlight.contains(url) else { return nil }
+        guard !artInFlight.contains(url), !artFailed.contains(url) else { return nil }
         artInFlight.insert(url)
         Task { [weak self] in
             let img: NSImage?
             if url.isFileURL {
                 img = NSImage(contentsOf: url)
-            } else if let (data, _) = try? await URLSession.shared.data(from: url) {
-                img = NSImage(data: data)
-            } else { img = nil }
+            } else {
+                let request = URLRequest(url: url, cachePolicy: .returnCacheDataElseLoad, timeoutInterval: 8)
+                if let (data, response) = try? await URLSession.shared.data(for: request),
+                   data.count <= Self.maxArtBytes,
+                   (response as? HTTPURLResponse).map({ (200..<300).contains($0.statusCode) }) ?? true {
+                    img = NSImage(data: data)
+                } else { img = nil }
+            }
             guard let self else { return }
             self.artInFlight.remove(url)
             if let img {
                 if self.art.count > 12 { self.art.removeAll() }
                 self.art[url] = img
+            } else {
+                if self.artFailed.count > 32 { self.artFailed.removeAll() }
+                self.artFailed.insert(url)
             }
         }
         return nil
@@ -114,9 +129,9 @@ final class NowPlayingMonitor {
         var out: [NowItem] = []
         for o in arr {
             guard let raw = o["t"] as? String else { continue }
-            let title = Self.cleanTitle(raw, host: o["h"] as? String ?? "")
+            let title = String(Self.cleanTitle(String(raw.prefix(300)), host: o["h"] as? String ?? "").prefix(200))
             guard !title.isEmpty, seen.insert(title).inserted else { continue }
-            let host = (o["h"] as? String ?? "").lowercased()
+            let host = String((o["h"] as? String ?? "").prefix(200)).lowercased()
             let art = (o["a"] as? String).flatMap { URL(string: $0) }
                 .flatMap { $0.scheme == "https" ? $0 : nil }
             out.append(NowItem(title: title,
@@ -127,7 +142,10 @@ final class NowPlayingMonitor {
                                held: (o["k"] as? Int ?? 0) != 0,
                                artURL: art))
         }
-        browser = Array(out.prefix(3))
+        // @Observable notifies on every set, equal or not; the worker repeats
+        // this report every 4 s, so only publish when something changed.
+        let next = Array(out.prefix(3))
+        if next != browser { browser = next }
         browserAt = Date()
         armExpiry()
     }
@@ -138,7 +156,7 @@ final class NowPlayingMonitor {
         expiryTask = Task { [weak self] in
             try? await Task.sleep(nanoseconds: UInt64((Self.browserTTL + 0.5) * 1_000_000_000))
             guard !Task.isCancelled, let self else { return }
-            if Date().timeIntervalSince(self.browserAt) >= Self.browserTTL { self.browser = [] }
+            if Date().timeIntervalSince(self.browserAt) >= Self.browserTTL, !self.browser.isEmpty { self.browser = [] }
         }
     }
 
@@ -175,13 +193,18 @@ final class NowPlayingMonitor {
             pollTask = Task { [weak self] in
                 while !Task.isCancelled {
                     guard let self else { return }
-                    self.apps = await Self.askApps()
+                    let found = await Self.askApps()
+                    // @Observable notifies on every set, equal or not; only
+                    // publish a change. And a poll that was already in flight
+                    // when the room stopped must not repopulate the panel.
+                    if !Task.isCancelled, found != self.apps { self.apps = found }
                     try? await Task.sleep(nanoseconds: 3_000_000_000)
                 }
             }
         } else {
             pollTask?.cancel(); pollTask = nil
-            apps = []
+            if !apps.isEmpty { apps = [] }
+            Self.clearCoverFiles()
         }
     }
 
@@ -197,7 +220,11 @@ final class NowPlayingMonitor {
         let running = Set(NSWorkspace.shared.runningApplications.compactMap(\.bundleIdentifier))
         let targets = scriptable.filter { running.contains($0.bundleID) }
         guard !targets.isEmpty else { return [] }
-        return await Task.detached(priority: .utility) {
+        // A dispatch thread, not Task.detached: this blocks on osascript for up
+        // to 2.5 s per app, and blocking calls do not belong on the cooperative
+        // pool that every other Task in the app shares.
+        return await withCheckedContinuation { (cont: CheckedContinuation<[NowItem], Never>) in
+            DispatchQueue.global(qos: .utility).async {
             var out: [NowItem] = []
             for t in targets {
                 // osascript in its own process, not NSAppleScript in ours: Apple
@@ -220,7 +247,12 @@ final class NowPlayingMonitor {
                         set p to ""
                         try
                             set p to (POSIX path of (path to temporary items)) & "dali-cover-" & (database ID of tr) & ".img"
-                            tell application "System Events" to set present to exists file p
+                            set present to true
+                            try
+                                (POSIX file p) as alias
+                            on error
+                                set present to false
+                            end try
                             if not present then
                                 set d to raw data of artwork 1 of tr
                                 set f to open for access POSIX file p with write permission
@@ -248,8 +280,22 @@ final class NowPlayingMonitor {
                                    source: t.source, app: t.app, kind: .music,
                                    live: false, held: false, artURL: art))
             }
-            return out
-        }.value
+            cont.resume(returning: out)
+            }
+        }
+    }
+
+    /// Music covers are written to the temp folder, one file per track. The OS
+    /// sweeps that folder eventually; this keeps a long session from stacking
+    /// them up in the meantime. Only our own `dali-cover-*.img` files.
+    private static func clearCoverFiles() {
+        DispatchQueue.global(qos: .utility).async {
+            let dir = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("TemporaryItems")
+            guard let names = try? FileManager.default.contentsOfDirectory(atPath: dir.path) else { return }
+            for name in names where name.hasPrefix("dali-cover-") && name.hasSuffix(".img") {
+                try? FileManager.default.removeItem(at: dir.appendingPathComponent(name))
+            }
+        }
     }
 
     /// Run a script through /usr/bin/osascript; nil on error, timeout or a
@@ -263,11 +309,20 @@ final class NowPlayingMonitor {
         task.standardOutput = out
         task.standardError = FileHandle.nullDevice
         do { try task.run() } catch { return nil }
+        let pid = task.processIdentifier
         let watchdog = DispatchWorkItem { if task.isRunning { task.terminate() } }
+        // SIGTERM is a request. An osascript stuck in an Apple Event to a
+        // wedged app can sit on it, and then readDataToEndOfFile below would
+        // hold this thread (and the whole poll) forever; SIGKILL cannot be
+        // ignored.
+        let hardKill = DispatchWorkItem { if task.isRunning { kill(pid, SIGKILL) } }
         DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + timeout, execute: watchdog)
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + timeout + 1, execute: hardKill)
         let data = out.fileHandleForReading.readDataToEndOfFile()
         task.waitUntilExit()
         watchdog.cancel()
+        hardKill.cancel()
+        try? out.fileHandleForReading.close()
         guard task.terminationStatus == 0 else { return nil }
         return String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
     }

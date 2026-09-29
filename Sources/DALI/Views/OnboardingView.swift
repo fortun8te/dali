@@ -21,7 +21,6 @@ struct OnboardingView: View {
     var preview = false
     var previewIcon: NSImage?
 
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var actionError: String?
     @State private var audioSettingsOpened = false
     @State private var browserSetupOpened = false
@@ -38,7 +37,7 @@ struct OnboardingView: View {
                     page
                     if let actionError {
                         Text(actionError)
-                            .font(.bodySmall).foregroundStyle(Color.amber)
+                            .font(.body13).foregroundStyle(Color.amber)
                             .fixedSize(horizontal: false, vertical: true)
                             .accessibilityLabel("Setup issue: \(actionError)")
                     }
@@ -53,7 +52,7 @@ struct OnboardingView: View {
         .padding(.horizontal, 28)
         .padding(.top, 32)
         .padding(.bottom, 26)
-        .frame(width: 420, height: state.step == .welcome || state.step == .ready ? 390 : 540)
+        .frame(width: 420, height: 540)
         .background(background.ignoresSafeArea())
         .preferredColorScheme(.dark)
         .onChange(of: state.step) { _, step in
@@ -67,16 +66,16 @@ struct OnboardingView: View {
 
     private var header: some View {
         HStack(alignment: .firstTextBaseline) {
-            Text("DALI").font(.serifSection).foregroundStyle(Color.paper)
+            Text("DALI").font(.wordmark(22)).foregroundStyle(Color.paper)
             Spacer()
-            Text("\(state.step.rawValue + 1) / \(OnboardingState.Step.allCases.count)").font(.bodySmall).foregroundStyle(Color.paper60)
+            Text("\(state.step.rawValue + 1) / \(OnboardingState.Step.allCases.count)").font(.body13).foregroundStyle(Color.paper62)
         }
     }
 
     private var progress: some View {
         HStack(spacing: 5) {
             ForEach(OnboardingState.Step.allCases, id: \.rawValue) { step in
-                Capsule().fill(step.rawValue <= state.step.rawValue ? Color.accentBlue : Color.paper.opacity(0.10))
+                Capsule().fill(step.rawValue <= state.step.rawValue ? Color.paper : Color.white.opacity(0.10))
                     .frame(height: 3)
             }
         }
@@ -98,9 +97,9 @@ struct OnboardingView: View {
         VStack(alignment: .leading, spacing: 24) {
             title("Your sound.\nEverywhere.", body: "Play your Mac on one speaker or across your room.")
             HStack(spacing: 9) {
-                Image(systemName: "wifi").foregroundStyle(Color.paper60)
+                Image(systemName: "wifi").foregroundStyle(Color.paper62)
                 Text("Mac and speakers on the same Wi-Fi.")
-                    .font(.bodySmall).foregroundStyle(Color.paper60)
+                    .font(.body13).foregroundStyle(Color.paper62)
             }
         }
     }
@@ -110,10 +109,10 @@ struct OnboardingView: View {
             title("Allow Mac audio.", body: "One permission to play sound on your speakers. No microphone access needed.")
             AudioPermissionCard(preview: preview, icon: previewIcon)
             Text("In System Settings, add DALI to Screen & System Audio Recording and turn it on.")
-                .font(.bodySmall).foregroundStyle(Color.paper60)
+                .font(.body13).foregroundStyle(Color.paper62)
                 .fixedSize(horizontal: false, vertical: true)
             Text("Drag the app into the list, or use + to choose it.")
-                .font(.bodySmall).foregroundStyle(Color.paper60)
+                .font(.body13).foregroundStyle(Color.paper62)
             if audioSettingsOpened {
                 smallAction("Open settings again", symbol: "arrow.up.forward") { openAudioSettings() }
             }
@@ -126,8 +125,8 @@ struct OnboardingView: View {
             title("Choose your speakers.", body: "Select one or more. You can change this later.")
             if let discoveryError {
                 VStack(alignment: .leading, spacing: 8) {
-                    Text("Speakers are not available yet.").font(.bodyMedium).foregroundStyle(Color.paper)
-                    Text(discoveryError).font(.bodySmall).foregroundStyle(Color.paper60)
+                    Text("Speakers are not available yet.").font(.body13Medium).foregroundStyle(Color.paper)
+                    Text(discoveryError).font(.body13).foregroundStyle(Color.paper62)
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 .padding(16).frame(maxWidth: .infinity, alignment: .leading)
@@ -135,9 +134,9 @@ struct OnboardingView: View {
             } else if speakers.isEmpty {
                 VStack(spacing: 13) {
                     SpeakerIcon(kind: .pair).scaleEffect(1.15)
-                    Text("Looking for AirPlay speakers…").font(.bodyMedium).foregroundStyle(Color.paper)
+                    Text("Looking for AirPlay speakers…").font(.body13Medium).foregroundStyle(Color.paper)
                     Text("Turn them on and connect to the same Wi-Fi. Allow local network access if asked.")
-                        .font(.bodySmall).foregroundStyle(Color.paper60)
+                        .font(.body13).foregroundStyle(Color.paper62)
                         .multilineTextAlignment(.center)
                         .fixedSize(horizontal: false, vertical: true)
                 }
@@ -150,13 +149,13 @@ struct OnboardingView: View {
                             HStack(spacing: 12) {
                                 SpeakerIcon(active: speaker.selected)
                                 VStack(alignment: .leading, spacing: 3) {
-                                    Text(speaker.name).font(.bodyMedium).foregroundStyle(Color.paper)
-                                    Text(speaker.detail).font(.bodySmall).foregroundStyle(Color.paper60)
+                                    Text(speaker.name).font(.body13Medium).foregroundStyle(Color.paper)
+                                    Text(speaker.detail).font(.body13).foregroundStyle(Color.paper62)
                                 }
                                 Spacer(minLength: 4)
                                 Image(systemName: speaker.selected ? "checkmark.circle.fill" : "circle")
                                     .font(.system(size: 18))
-                                    .foregroundStyle(speaker.selected ? Color.accentBlue : Color.paper35)
+                                    .foregroundStyle(speaker.selected ? Color.paper : Color.paper38)
                             }
                             .padding(.horizontal, 14).padding(.vertical, 8)
                             .contentShape(Rectangle())
@@ -172,7 +171,7 @@ struct OnboardingView: View {
             }
             smallAction("Look again", symbol: "arrow.clockwise") { if !preview { discover() } }
             Text("Nothing plays until you press Play in DALI.")
-                .font(.bodySmall).foregroundStyle(Color.paper60)
+                .font(.body13).foregroundStyle(Color.paper62)
         }
     }
 
@@ -190,7 +189,7 @@ struct OnboardingView: View {
                 }
             }
             Text("YouTube, TikTok, Instagram and other video sites. Some protected videos cannot be synced.")
-                .font(.bodySmall).foregroundStyle(Color.paper60)
+                .font(.body13).foregroundStyle(Color.paper62)
                 .fixedSize(horizontal: false, vertical: true)
 
         }
@@ -202,7 +201,7 @@ struct OnboardingView: View {
                   ? "\(selectedCount == 1 ? "1 speaker selected" : "\(selectedCount) speakers selected"). Press Play in DALI when you’re ready."
                   : "Choose your speakers in DALI, then press Play.")
             Text("Your Mac’s volume keys work as usual. Setup is always available in Settings.")
-                .font(.bodySmall).foregroundStyle(Color.paper60)
+                .font(.body13).foregroundStyle(Color.paper62)
                 .fixedSize(horizontal: false, vertical: true)
 
         }
@@ -210,22 +209,23 @@ struct OnboardingView: View {
 
     private func title(_ heading: String, body: String) -> some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text(heading).font(.serif(30)).foregroundStyle(Color.paper)
+            Text(heading).font(.system(size: 26, weight: .semibold)).foregroundStyle(Color.paper)
                 .fixedSize(horizontal: false, vertical: true)
                 .accessibilityAddTraits(.isHeader)
-            Text(body).font(.bodyLarge).foregroundStyle(Color.paper60)
+            Text(body).font(.system(size: 15)).foregroundStyle(Color.paper62)
                 .fixedSize(horizontal: false, vertical: true)
         }
     }
 
     private func instruction(_ number: String, _ heading: String, detail: String) -> some View {
         HStack(alignment: .top, spacing: 11) {
-            Text(number).font(.badge).foregroundStyle(Color.accentBlue)
+            Text(number).font(.captionMedium.monospacedDigit()).foregroundStyle(Color.paper)
                 .frame(width: 22, height: 22)
-                .background(Circle().fill(Color.accentBlue.opacity(0.10)))
+                .background(Circle().fill(Color.raised))
+                .overlay(Circle().strokeBorder(EdgeLight(), lineWidth: 0.75))
             VStack(alignment: .leading, spacing: 4) {
-                Text(heading).font(.bodyMedium).foregroundStyle(Color.paper)
-                Text(detail).font(.bodySmall).foregroundStyle(Color.paper60)
+                Text(heading).font(.body13Medium).foregroundStyle(Color.paper)
+                Text(detail).font(.body13).foregroundStyle(Color.paper62)
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
@@ -233,9 +233,9 @@ struct OnboardingView: View {
 
     private func smallAction(_ title: String, symbol: String, action: @escaping () -> Void) -> some View {
         Button(action: action) {
-            Label(title, systemImage: symbol).font(.bodySmall).foregroundStyle(Color.accentBlue)
+            Label(title, systemImage: symbol)
         }
-        .buttonStyle(.plain)
+        .buttonStyle(SecondaryButtonStyle(accent: true))
     }
 
     private var primaryLabel: String {
@@ -274,22 +274,16 @@ struct OnboardingView: View {
                     return
                 }
                 if state.step == .ready { finish() }
-                else { withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.2)) { state.advance() } }
+                else { state.advance() }
             } label: {
-                HStack {
-                    Spacer()
+                HStack(spacing: 6) {
                     Text(primaryLabel)
                     Image(systemName: "arrow.right").font(.system(size: 11, weight: .medium))
-                    Spacer()
                 }
-                .font(.bodyMedium).foregroundStyle(Color.paper)
-                .padding(.vertical, 13)
-                .background(RoundedRectangle(cornerRadius: 11, style: .continuous).fill(Color.accentBlue.opacity(0.88)))
             }
-            .buttonStyle(.plain)
+            .buttonStyle(PrimaryButtonStyle())
             .keyboardShortcut(.defaultAction)
             .disabled(state.step == .speakers && selectedCount == 0)
-            .opacity(state.step == .speakers && selectedCount == 0 ? 0.45 : 1)
             HStack {
                 if state.step != .welcome {
                     Button("Back") { if !preview { state.goBack() } }
@@ -297,26 +291,17 @@ struct OnboardingView: View {
                 }
                 Spacer()
                 if state.step == .welcome {
-                    Text("No account needed").foregroundStyle(Color.paper35)
+                    Text("No account needed").foregroundStyle(Color.paper38)
                 } else if state.step != .ready {
                     Button("Skip for now") { if !preview { state.advance() } }
                 }
             }
-            .font(.bodySmall).foregroundStyle(Color.paper60).buttonStyle(.plain)
-            .frame(height: 15)
+            .font(.body13).foregroundStyle(Color.paper38).buttonStyle(SecondaryButtonStyle())
+            .frame(height: 18)
         }
     }
 
-    private var background: some View {
-        ZStack {
-            DarkGlassSurface(cornerRadius: DS.panelRadius, tintAlpha: 0.74, clear: false)
-            RoundedRectangle(cornerRadius: DS.panelRadius - 2, style: .continuous)
-                .inset(by: 3).fill(Color.field.opacity(0.94))
-            RadialGradient(colors: [Color.warmWhite.opacity(0.065), .clear], center: .topLeading, startRadius: 4, endRadius: 230)
-            RadialGradient(colors: [Color.accentBlue.opacity(0.05), .clear], center: .bottomTrailing, startRadius: 4, endRadius: 280)
-        }
-        .clipShape(RoundedRectangle(cornerRadius: DS.panelRadius, style: .continuous))
-    }
+    private var background: some View { Color.ink }
 
     private func revealExtension() {
         guard !preview else { return }
@@ -345,16 +330,19 @@ struct OnboardingView: View {
 struct AudioPermissionCard: View {
     var preview = false
     var icon: NSImage?
+    /// The app icon, fetched once — the card re-renders with every discovery
+    /// poll and NSWorkspace.icon(forFile:) is a Launch Services round trip.
+    private static let appIcon = NSWorkspace.shared.icon(forFile: Bundle.main.bundlePath)
     var body: some View {
         HStack(spacing: 12) {
-            Image(nsImage: icon ?? NSWorkspace.shared.icon(forFile: Bundle.main.bundlePath))
+            Image(nsImage: icon ?? Self.appIcon)
                 .resizable().frame(width: 40, height: 40)
             VStack(alignment: .leading, spacing: 4) {
-                Text("DALI").font(.bodyMedium).foregroundStyle(Color.paper)
-                Text("Drag into System Settings").font(.bodySmall).foregroundStyle(Color.paper60)
+                Text("DALI").font(.body13Medium).foregroundStyle(Color.paper)
+                Text("Drag into System Settings").font(.body13).foregroundStyle(Color.paper62)
             }
             Spacer(minLength: 0)
-            Image(systemName: "hand.draw").font(.system(size: 18)).foregroundStyle(Color.paper60)
+            Image(systemName: "hand.draw").font(.system(size: 18)).foregroundStyle(Color.paper62)
         }
         .padding(13).background(CardBackground())
         .onDrag {
@@ -382,7 +370,7 @@ final class AudioPermissionHelper {
         panel.isReleasedWhenClosed = false
         panel.appearance = NSAppearance(named: .darkAqua)
         panel.contentView = NSHostingView(rootView:
-            AudioPermissionCard().padding(14).background(Color.field).preferredColorScheme(.dark))
+            AudioPermissionCard().padding(14).background(Color.ink).preferredColorScheme(.dark))
         if let screen = NSScreen.main {
             panel.setFrameOrigin(NSPoint(x: screen.visibleFrame.midX - 178, y: screen.visibleFrame.minY + 50))
         }

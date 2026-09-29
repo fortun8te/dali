@@ -2,6 +2,17 @@ import XCTest
 @testable import BeamEngine
 
 final class RoomDelayPolicyTests: XCTestCase {
+    func testAutomaticModeUsesTheStableRoomBuffer() {
+        // The shipped room buffer is 500 ms (RoomDelayPolicy.automaticStartBufferMs,
+        // also the policy's floor); this test used to pin the older 700 ms value.
+        XCTAssertEqual(RoomDelayPolicy.automaticStartBufferMs, 500)
+        XCTAssertEqual(
+            RoomDelayPolicy.seconds(startBufferMs: RoomDelayPolicy.automaticStartBufferMs, trimMs: 0),
+            0.7,
+            accuracy: 0.0001
+        )
+    }
+
     func testBundledEngineSchedulingAndReceiverLatencyAreCountedOnce() {
         XCTAssertEqual(RoomDelayPolicy.seconds(startBufferMs: 700, trimMs: 0), 0.9, accuracy: 0.0001)
         XCTAssertEqual(RoomDelayPolicy.seconds(startBufferMs: 500, trimMs: 0), 0.7, accuracy: 0.0001)

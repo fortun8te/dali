@@ -29,8 +29,9 @@ public enum OutputReadiness {
         let deadline = clock.now.advanced(by: timeout)
         var missing = ids
         while !Task.isCancelled, clock.now < deadline {
-            // URLSession cooperates with cancellation, so a stalled request is
-            // also cut off at the deadline instead of adding its own timeout.
+            // The group is cancelled at the deadline, which only makes BeamAPI
+            // stop WAITING: the request itself is never aborted mid-serve (that
+            // is what crashes OwnTone), and its late reply is discarded.
             let outputs = await withTaskGroup(of: [Output]?.self) { group in
                 group.addTask { try? await query() }
                 group.addTask {
@@ -48,7 +49,9 @@ public enum OutputReadiness {
                 if missing.isEmpty { return [] }
             }
             guard !Task.isCancelled, clock.now < deadline else { break }
-            let wake = min(clock.now.advanced(by: pollInterval), deadline)
+            // Floor the interval: a query that fails instantly (engine down,
+            // connection refused) with a zero interval would spin the CPU.
+            let wake = min(clock.now.advanced(by: max(pollInterval, .milliseconds(10))), deadline)
             do { try await clock.sleep(until: wake) }
             catch { break }
         }

@@ -18,99 +18,126 @@ import Foundation
 /// continuous, music-correlated aliasing haze (~-25 dB near Nyquist); cubic
 /// drops that to ~-65 dB for a few extra multiplies — inaudible on music.
 ///
-/// Continuity across buffers is exact: the read position `pos` is carried in a
-/// single consistent coordinate (leftover position past this buffer's end), and
-/// the last TWO frames are carried as history so the cubic kernel keeps its full
-/// 4-point support at the seam. (The old version carried the position off by one
-/// full sample, re-reading ~1 sample per buffer = a periodic buzz.)
+/// SEAM EXACTNESS. Work happens on a virtual timeline W = [3 carried history
+/// frames][this buffer's n frames]. An output at position q needs W[floor(q)-1
+/// ... floor(q)+2], all real: we emit only while floor(q)+2 fits inside W, so the
+/// kernel NEVER reads past the end of the data (the old code clamped the 4th tap
+/// to the last frame, a small error injected once per buffer = a ~94 Hz buzz).
+/// The unconsumed tail stays in the 3-frame history and q carries over shifted
+/// by n, so the read position is continuous across buffers to the sub-sample.
 struct Varispeed {
-    private var prev1L = 0.0, prev1R = 0.0   // last frame of previous buffer  (index -1)
-    private var prev2L = 0.0, prev2R = 0.0   // second-to-last frame           (index -2)
-    private var havePrev = false
-    private var pos = 0.0   // fractional read position, measured from index -1 (the prev frame)
+    private var hist = [Double](repeating: 0, count: 6)   // 3 frames x (L,R): W[0..2]
+    private var haveHist = false
+    private var q = 3.0            // carried read position in W coordinates (>= 1)
+    private var interpolating = false   // q holds a pending fractional phase
+    private var out = [Int16]()
+
+    @inline(__always)
+    private static func clip16(_ v: Double) -> Int16 {
+        if v.isNaN { return 0 }
+        return Int16(max(-32768, min(32767, v.rounded())))
+    }
 
     /// Resample one interleaved-s16-stereo buffer by `ratio` (clamped near 1.0).
     /// At ratio == 1.0 EXACTLY this is a bit-perfect passthrough (history carry
     /// only) — the drift controller snaps sub-0.05% corrections to 1.0, so
     /// steady-state audio is never touched by the interpolator.
     mutating func process(_ input: Data, ratio: Double) -> Data {
-        let r = min(max(ratio, 0.90), 1.10)
-        let frameCount = input.count / 4
-        guard frameCount > 0 else { return input }
+        // NaN survives min/max (every comparison is false) and would reach
+        // Int(NaN) below, which traps. A non-finite command means "no correction".
+        let r = ratio.isFinite ? min(max(ratio, 0.90), 1.10) : 1.0
+        let n = input.count / 4
+        guard n > 0 else { return Data() }
 
         return input.withUnsafeBytes { raw -> Data in
             let inS = raw.bindMemory(to: Int16.self)
+
+            if !haveHist {
+                // No history yet: seed it with the first frame so the kernel sees
+                // a constant, not a jump from silence (which would ring).
+                let l = Double(inS[0]), rr = Double(inS[1])
+                for k in 0..<3 { hist[k * 2] = l; hist[k * 2 + 1] = rr }
+                haveHist = true
+                q = 3.0
+                interpolating = false
+            }
+
+            // W[j] channel c
+            func at(_ j: Int, _ c: Int) -> Double {
+                j < 3 ? hist[j * 2 + c] : Double(inS[(j - 3) * 2 + c])
+            }
+            // New history = last three frames of W (W' = W shifted by n).
+            func carryHistory() {
+                var nh = [Double](repeating: 0, count: 6)
+                for k in 0..<3 {
+                    nh[k * 2] = at(n + k, 0)
+                    nh[k * 2 + 1] = at(n + k, 1)
+                }
+                hist = nh
+            }
+
             if r == 1.0 {
-                // Passthrough: keep the carry history exact so the cubic kernel
-                // has its full 4-point support if a later buffer re-engages
-                // drift correction — but do not touch a single sample.
-                prev2L = Double(inS[max(0, frameCount - 2) * 2])
-                prev2R = Double(inS[max(0, frameCount - 2) * 2 + 1])
-                prev1L = Double(inS[(frameCount - 1) * 2])
-                prev1R = Double(inS[(frameCount - 1) * 2 + 1])
-                havePrev = true
-                pos = 0
-                return input
-            }
-            // Virtual input timeline: indices -2,-1 are the carried previous two
-            // frames, then 0..<frameCount are this buffer's frames. We read at a
-            // fractional position measured from index -1.
-            func sample(_ i: Int) -> (Double, Double) {
-                if i >= 0 {
-                    let idx = min(i, frameCount - 1)
-                    return (Double(inS[idx*2]), Double(inS[idx*2 + 1]))
+                // Passthrough: do not touch a single sample. If the previous buffer
+                // left a fractional phase pending, first release the (at most two)
+                // frames it was still holding back so none are skipped.
+                var result: Data
+                if interpolating {
+                    result = Data()
+                    let firstPending = Int(q.rounded(.up))
+                    if firstPending <= 2 {
+                        for j in max(firstPending, 0)...2 {
+                            var l = Self.clip16(hist[j * 2]), rr = Self.clip16(hist[j * 2 + 1])
+                            withUnsafeBytes(of: &l) { result.append(contentsOf: $0) }
+                            withUnsafeBytes(of: &rr) { result.append(contentsOf: $0) }
+                        }
+                    }
+                    result.append(raw.baseAddress!.assumingMemoryBound(to: UInt8.self), count: n * 4)
+                } else if input.count == n * 4 {
+                    result = input
+                } else {
+                    result = Data(input.prefix(n * 4))
                 }
-                if i == -1 { return (prev1L, prev1R) }
-                return (prev2L, prev2R)   // i <= -2
+                carryHistory()
+                q = 3.0
+                interpolating = false
+                return result
             }
 
-            var out = [Int16]()
-            out.reserveCapacity(Int(Double(frameCount) / r) + 4)
+            out.removeAll(keepingCapacity: true)
+            out.reserveCapacity(Int(Double(n) / r) + 8)
 
-            // Start position relative to index -1 (the prev frame). On the very
-            // first buffer there is no history, so begin at index 0.
-            var p = havePrev ? pos : 0.0
-            let lastReadable = Double(frameCount - 1)
+            let len = n + 3
+            var p = (q.isFinite && q >= 1 && q < Double(len) + 4) ? q : 3.0
             while true {
-                let base = floor(p)
-                let frac = p - base
-                let i = Int(base) - 1                     // shift: p=0 -> prev frame
-                if Double(i) >= lastReadable { break }    // need i and i+1 within this buffer
-                // Catmull-Rom over [i-1, i, i+1, i+2] at fraction frac.
-                let (y0l, y0r) = sample(i - 1)
-                let (y1l, y1r) = sample(i)
-                let (y2l, y2r) = sample(i + 1)
-                let (y3l, y3r) = sample(i + 2)
-                let t = frac, t2 = frac * frac, t3 = t2 * frac
-                func cr(_ y0: Double, _ y1: Double, _ y2: Double, _ y3: Double) -> Double {
-                    0.5 * ((2*y1)
-                         + (-y0 + y2) * t
-                         + (2*y0 - 5*y1 + 4*y2 - y3) * t2
-                         + (-y0 + 3*y1 - 3*y2 + y3) * t3)
+                let base = Int(p)                 // p finite and small: safe
+                if base + 2 > len - 1 { break }   // kernel would read past the data
+                let t = p - Double(base), t2 = t * t, t3 = t2 * t
+                for c in 0..<2 {
+                    let y0 = at(base - 1, c), y1 = at(base, c)
+                    let y2 = at(base + 1, c), y3 = at(base + 2, c)
+                    // Catmull-Rom over [base-1, base, base+1, base+2] at fraction t.
+                    let v = 0.5 * ((2 * y1)
+                                 + (-y0 + y2) * t
+                                 + (2 * y0 - 5 * y1 + 4 * y2 - y3) * t2
+                                 + (-y0 + 3 * y1 - 3 * y2 + y3) * t3)
+                    out.append(Self.clip16(v))
                 }
-                let l = cr(y0l, y1l, y2l, y3l)
-                let rr = cr(y0r, y1r, y2r, y3r)
-                out.append(Int16(max(-32768, min(32767, l.rounded()))))
-                out.append(Int16(max(-32768, min(32767, rr.rounded()))))
                 p += r
             }
 
-            // Carry: remember the last two real frames and the leftover position.
-            // Frame (frameCount-1) sits at p = frameCount in this coordinate and
-            // becomes index -1 next buffer (p' = 0), so the leftover is p - frameCount.
-            prev2L = Double(inS[max(0, frameCount - 2) * 2])
-            prev2R = Double(inS[max(0, frameCount - 2) * 2 + 1])
-            prev1L = Double(inS[(frameCount - 1) * 2])
-            prev1R = Double(inS[(frameCount - 1) * 2 + 1])
-            havePrev = true
-            pos = p - Double(frameCount)
-            if pos < 0 { pos = 0 }
+            // Carry: history shifts by n, so the read position does too. The loop
+            // exits with floor(p) >= n+1, hence the carried q is always >= 1.
+            carryHistory()
+            q = p - Double(n)
+            interpolating = true
             return out.withUnsafeBytes { Data($0) }
         }
     }
 
     mutating func reset() {
-        havePrev = false; pos = 0
-        prev1L = 0; prev1R = 0; prev2L = 0; prev2R = 0
+        haveHist = false
+        q = 3.0
+        interpolating = false
+        for k in 0..<hist.count { hist[k] = 0 }
     }
 }
