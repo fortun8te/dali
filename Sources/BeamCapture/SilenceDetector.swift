@@ -14,7 +14,9 @@ public struct SilenceDetector {
     /// Feed RMS level of a chunk plus its duration; returns total silent seconds.
     @discardableResult
     public mutating func feed(rmsDB: Double, duration: Double) -> Double {
-        if rmsDB < thresholdDB {
+        // `!(x >= t)` rather than `x < t`: a NaN level (bad upstream math) counts
+        // as silence instead of silently resetting the timer forever.
+        if !(rmsDB >= thresholdDB) {
             silentSeconds += duration
         } else {
             silentSeconds = 0

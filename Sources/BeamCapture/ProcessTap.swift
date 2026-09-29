@@ -1,11 +1,190 @@
 // BeamCapture — system audio capture via Core Audio process taps (macOS 14.4+).
 // Taps ALL processes' audio as a stereo mixdown, delivers Float32 buffers.
 // The Mac's own output keeps playing; the tap only observes.
+//
+// THREADING. The HAL calls our IOProc on its realtime IO thread, so the IOProc
+// (a plain C function, no block, no dispatch queue, no ARC) does nothing but
+// memcpy the tap's samples into a lock-free ring and return. A separate
+// non-realtime thread drains the ring and calls `onBuffer`. Everything that can
+// block, allocate or take a lock (conversion, resampling, FIFO, metering) lives
+// behind that hand-off, so no downstream stall can ever reach the audio callback.
 
 import Foundation
 import CoreAudio
 import AudioToolbox
 import AVFoundation
+import Synchronization
+
+// MARK: - realtime side
+
+/// State shared between the IOProc (producer) and the consumer thread. The IOProc
+/// reaches it through an unretained pointer, so it takes no retain/release traffic.
+final class TapContext: @unchecked Sendable {
+    let ring: AudioRing
+    /// AudioBuffers the tap contributes to the aggregate's input list. When the
+    /// aggregate is anchored to a device that ALSO has input streams (headset,
+    /// USB DAC with a mic, Studio Display) those come FIRST in the list and the
+    /// tap's streams come last — so we take the LAST `bufferCount` buffers.
+    let bufferCount: Int
+    let channelsPerBuffer: Int
+    let bytesPerFrame: Int
+    static let maxFrames = 1 << 16
+
+    let callbacks = Atomic<Int>(0)
+    let overruns = Atomic<Int>(0)
+    let layoutErrors = Atomic<Int>(0)
+
+    init(ring: AudioRing, bufferCount: Int, channelsPerBuffer: Int) {
+        self.ring = ring
+        self.bufferCount = bufferCount
+        self.channelsPerBuffer = channelsPerBuffer
+        self.bytesPerFrame = channelsPerBuffer * MemoryLayout<Float>.size
+    }
+
+    /// Record layout in the ring: [UInt32 frames][bufferCount x frames*bytesPerFrame].
+    /// REALTIME: no locks, no allocation, no syscalls, bounded work.
+    @inline(__always)
+    func deliver(_ list: UnsafePointer<AudioBufferList>) {
+        _ = callbacks.wrappingAdd(1, ordering: .relaxed)
+        let abl = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: list))
+        let n = abl.count
+        guard n >= bufferCount else { _ = layoutErrors.wrappingAdd(1, ordering: .relaxed); return }
+        let first = n - bufferCount
+        var frames = Int.max
+        for i in 0..<bufferCount {
+            let b = abl[first + i]
+            guard b.mData != nil, Int(b.mNumberChannels) == channelsPerBuffer else {
+                _ = layoutErrors.wrappingAdd(1, ordering: .relaxed); return
+            }
+            frames = min(frames, Int(b.mDataByteSize) / bytesPerFrame)
+        }
+        guard frames > 0, frames <= Self.maxFrames else { return }
+        let payload = frames * bytesPerFrame
+        let need = 4 + bufferCount * payload
+        guard ring.freeBytes() >= need else {
+            // Consumer is behind by seconds. Dropping the NEW record is the only
+            // legal move (only the consumer may advance tail); it is counted.
+            _ = overruns.wrappingAdd(1, ordering: .relaxed)
+            return
+        }
+        var f32 = UInt32(truncatingIfNeeded: frames)
+        withUnsafeBytes(of: &f32) { ring.copyIn($0.baseAddress!, count: 4, at: 0) }
+        var off = 4
+        for i in 0..<bufferCount {
+            ring.copyIn(UnsafeRawPointer(abl[first + i].mData!), count: payload, at: off)
+            off += payload
+        }
+        ring.commit(need)
+    }
+}
+
+/// The HAL's IO callback. Plain C function: no captures, no ARC, no locks.
+private func tapIOProc(_ device: AudioObjectID,
+                       _ now: UnsafePointer<AudioTimeStamp>,
+                       _ input: UnsafePointer<AudioBufferList>,
+                       _ inputTime: UnsafePointer<AudioTimeStamp>,
+                       _ output: UnsafeMutablePointer<AudioBufferList>,
+                       _ outputTime: UnsafePointer<AudioTimeStamp>,
+                       _ clientData: UnsafeMutableRawPointer?) -> OSStatus {
+    guard let clientData else { return noErr }
+    Unmanaged<TapContext>.fromOpaque(clientData)._withUnsafeGuaranteedRef { $0.deliver(input) }
+    return noErr
+}
+
+/// Non-realtime drain thread: ring -> AVAudioPCMBuffer -> onBuffer.
+final class TapConsumer: @unchecked Sendable {
+    private let ctx: TapContext
+    private let format: AVAudioFormat
+    private let handler: ((AVAudioPCMBuffer) -> Void)?
+    private let stopFlag = Atomic<Bool>(false)
+    private let finished = DispatchSemaphore(value: 0)
+    private var started = false
+
+    init(context: TapContext, format: AVAudioFormat, handler: ((AVAudioPCMBuffer) -> Void)?) {
+        ctx = context
+        self.format = format
+        self.handler = handler
+    }
+
+    func start() {
+        started = true
+        let t = Thread { [self] in
+            run()
+            finished.signal()
+        }
+        t.name = "beam.tap.consumer"
+        t.qualityOfService = .userInteractive
+        t.start()
+    }
+
+    func stopAndJoin() {
+        stopFlag.store(true, ordering: .relaxed)
+        if started { _ = finished.wait(timeout: .now() + 2) }
+        started = false
+    }
+
+    private func run() {
+        var capacity: AVAudioFrameCount = 4096
+        guard var pcm = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: capacity) else { return }
+        let ring = ctx.ring
+        let bytesPerFrame = ctx.bytesPerFrame
+        let perBuffer = ctx.channelsPerBuffer
+        while !stopFlag.load(ordering: .relaxed) {
+            while ring.readableBytes() >= 4 {
+                var f32: UInt32 = 0
+                ring.copyOut(&f32, count: 4, at: 0)
+                let frames = Int(f32)
+                let payload = frames * bytesPerFrame
+                guard frames > 0, frames <= TapContext.maxFrames,
+                      ring.readableBytes() >= 4 + ctx.bufferCount * payload else {
+                    // Impossible unless memory was corrupted: resync by discarding.
+                    ring.release(ring.readableBytes())
+                    break
+                }
+                if capacity < AVAudioFrameCount(frames) {
+                    capacity = AVAudioFrameCount(frames)
+                    guard let bigger = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: capacity) else {
+                        ring.release(4 + ctx.bufferCount * payload)
+                        continue
+                    }
+                    pcm = bigger
+                }
+                pcm.frameLength = AVAudioFrameCount(frames)
+                let dst = UnsafeMutableAudioBufferListPointer(pcm.mutableAudioBufferList)
+                var off = 4
+                var ok = dst.count >= ctx.bufferCount
+                if ok {
+                    for i in 0..<ctx.bufferCount {
+                        guard let m = dst[i].mData else { ok = false; break }
+                        ring.copyOut(m, count: payload, at: off)
+                        Self.sanitize(m.assumingMemoryBound(to: Float.self), frames * perBuffer)
+                        off += payload
+                    }
+                }
+                ring.release(4 + ctx.bufferCount * payload)
+                if ok { handler?(pcm) }
+            }
+            usleep(1500)
+        }
+    }
+
+    /// Clamp to [-1, 1], zero NaN and flush denormals/near-zero. Anything else
+    /// would reach the sample-rate converter (denormal arithmetic is slow) or
+    /// wrap/clip unpredictably in the s16 conversion (NaN -> arbitrary int).
+    @inline(__always)
+    private static func sanitize(_ p: UnsafeMutablePointer<Float>, _ n: Int) {
+        for i in 0..<n {
+            let v = p[i]
+            let a = abs(v)
+            if a >= 1e-20 && a <= 1.0 { continue }
+            if a < 1e-20 { p[i] = 0 }
+            else if a > 1.0 { p[i] = v > 0 ? 1.0 : -1.0 }   // +-inf lands here too
+            else { p[i] = 0 }                               // NaN: every comparison false
+        }
+    }
+}
+
+// MARK: - tap
 
 public final class ProcessTap {
     public struct TapError: Error, CustomStringConvertible {
@@ -17,7 +196,9 @@ public final class ProcessTap {
     private var tapID = AudioObjectID(kAudioObjectUnknown)
     private var aggregateID = AudioObjectID(kAudioObjectUnknown)
     private var ioProcID: AudioDeviceIOProcID?
-    private let queue = DispatchQueue(label: "beam.tap.io")
+    private var context: TapContext?
+    private var consumer: TapConsumer?
+    private let eventQueue = DispatchQueue(label: "beam.tap.events")
 
     /// Format the tap delivers (set after start()).
     public private(set) var tapFormat: AVAudioFormat?
@@ -27,8 +208,32 @@ public final class ProcessTap {
     /// stream start so a degraded session is visible in the flight log.
     public private(set) var clockAnchored = false
 
-    /// Called on the IO queue with each captured buffer.
+    /// Called on the consumer thread (NOT the realtime thread) with each captured
+    /// buffer. The buffer is reused: copy out, do not retain. Set before start().
     public var onBuffer: ((AVAudioPCMBuffer) -> Void)?
+
+    /// Fired once per start() on a private queue when the HAL reconfigured
+    /// underneath the tap in a way that makes it stale: default output device
+    /// changed (the aggregate's clock anchor), rate/format changed, the aggregate
+    /// died, or coreaudiod restarted. The owner should rebuild the tap.
+    public var onInvalidated: ((String) -> Void)?
+
+    /// IOProc invocations since start (proves the HAL is calling us).
+    public var callbackCount: Int { context?.callbacks.load(ordering: .relaxed) ?? 0 }
+    /// Records dropped because the consumer thread fell seconds behind.
+    public var overrunCount: Int { context?.overruns.load(ordering: .relaxed) ?? 0 }
+    /// Callbacks whose buffer layout did not match the tap's format.
+    public var layoutErrorCount: Int { context?.layoutErrors.load(ordering: .relaxed) ?? 0 }
+
+    private let stopping = Atomic<Bool>(false)
+    private let invalidated = Atomic<Bool>(false)
+    private var anchorUID: String?
+    private var startRate = 0.0
+    private var listeners: [(AudioObjectID, AudioObjectPropertyAddress, AudioObjectPropertyListenerBlock)] = []
+
+    private static let aggregateUIDPrefix = "com.dali.beam.tap."
+    private static let aggregateName = "Beam Tap Aggregate"
+    private static let liveAggregates = Mutex<Set<AudioObjectID>>([])
 
     public init() {}
 
@@ -40,6 +245,12 @@ public final class ProcessTap {
     /// muteLocal: true silences the tapped audio on the Mac's own speakers
     /// (the stream still gets it). With .process, only that app goes quiet locally.
     public func start(muteLocal: Bool = false, source: Source = .system) throws {
+        // A second start() on a live instance would orphan the first tap.
+        if tapID != kAudioObjectUnknown || aggregateID != kAudioObjectUnknown || ioProcID != nil {
+            stop()
+        }
+        stopping.store(false, ordering: .relaxed)
+        invalidated.store(false, ordering: .relaxed)
         // Every throw below happens AFTER at least one HAL object exists, and
         // those objects are process-global: an abandoned aggregate device stays
         // registered with coreaudiod until the machine reboots. Relying on
@@ -49,6 +260,9 @@ public final class ProcessTap {
         // every attempt. Unwind explicitly instead.
         var ok = false
         defer { if !ok { stop() } }
+
+        // Anything a previous run/crash left registered under our name.
+        Self.sweepStaleAggregates()
 
         let desc: CATapDescription
         switch source {
@@ -67,20 +281,6 @@ public final class ProcessTap {
         guard status == noErr else { throw TapError(stage: "create tap", status: status) }
         tapID = newTapID
 
-        // 2. Read the tap's stream format.
-        var asbd = AudioStreamBasicDescription()
-        var size = UInt32(MemoryLayout<AudioStreamBasicDescription>.size)
-        var addr = AudioObjectPropertyAddress(
-            mSelector: kAudioTapPropertyFormat,
-            mScope: kAudioObjectPropertyScopeGlobal,
-            mElement: kAudioObjectPropertyElementMain)
-        status = AudioObjectGetPropertyData(tapID, &addr, 0, nil, &size, &asbd)
-        guard status == noErr else { throw TapError(stage: "read tap format", status: status) }
-        guard let format = AVAudioFormat(streamDescription: &asbd) else {
-            throw TapError(stage: "wrap tap format", status: -1)
-        }
-        tapFormat = format
-
         // 3. Aggregate device carrying the tap, ANCHORED TO A REAL CLOCK.
         //
         // This used to be a tap-ONLY aggregate (tap list, no sub-devices). That
@@ -98,8 +298,10 @@ public final class ProcessTap {
         // becomes a contract the HAL enforces rather than an assumption we make.
         // We never render to it; it is present purely as the time source.
         var aggDesc: [String: Any] = [
-            kAudioAggregateDeviceNameKey: "Beam Tap Aggregate",
-            kAudioAggregateDeviceUIDKey: UUID().uuidString,
+            kAudioAggregateDeviceNameKey: Self.aggregateName,
+            // Our prefix lets sweepStaleAggregates() recognise (and remove) an
+            // aggregate a previous run left behind.
+            kAudioAggregateDeviceUIDKey: Self.aggregateUIDPrefix + UUID().uuidString,
             kAudioAggregateDeviceIsPrivateKey: true,     // required by TapAutoStart
             kAudioAggregateDeviceTapAutoStartKey: true,
             kAudioAggregateDeviceTapListKey: [
@@ -108,7 +310,8 @@ public final class ProcessTap {
             ],
         ]
         var anchored = false
-        if let clockUID = Self.defaultOutputDeviceUID() {
+        let clockUID = Self.defaultOutputDeviceUID()
+        if let clockUID {
             aggDesc[kAudioAggregateDeviceMainSubDeviceKey] = clockUID
             aggDesc[kAudioAggregateDeviceSubDeviceListKey] = [
                 [kAudioSubDeviceUIDKey: clockUID]
@@ -132,22 +335,183 @@ public final class ProcessTap {
         }
         guard status == noErr else { throw TapError(stage: "create aggregate", status: status) }
         clockAnchored = anchored
+        // The default output AT START, anchored or not: invalidation means "the
+        // default moved since we looked", so a session that could not anchor
+        // (e.g. default is an AirPlay route) does not re-fire on every event.
+        anchorUID = clockUID
         aggregateID = newAggID
+        Self.liveAggregates.withLock { _ = $0.insert(newAggID) }
+
+        // 2. Read the tap's stream format — AFTER the aggregate exists, so we see
+        // what the HAL settled on once the tap joined the aggregate's clock.
+        var asbd = AudioStreamBasicDescription()
+        var size = UInt32(MemoryLayout<AudioStreamBasicDescription>.size)
+        var addr = AudioObjectPropertyAddress(
+            mSelector: kAudioTapPropertyFormat,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain)
+        status = AudioObjectGetPropertyData(tapID, &addr, 0, nil, &size, &asbd)
+        guard status == noErr else { throw TapError(stage: "read tap format", status: status) }
+        guard let format = AVAudioFormat(streamDescription: &asbd) else {
+            throw TapError(stage: "wrap tap format", status: -1)
+        }
+        // The ring/consumer copy raw Float32; refuse anything else loudly rather
+        // than reinterpreting bytes.
+        guard format.commonFormat == .pcmFormatFloat32,
+              format.sampleRate.isFinite, format.sampleRate > 0,
+              (1...8).contains(Int(format.channelCount)) else {
+            throw TapError(stage: "unsupported tap format", status: -2)
+        }
+        tapFormat = format
+        startRate = Self.nominalRate(aggregateID)
 
         // 4. IO proc: input buffers on the aggregate are the tapped audio.
-        status = AudioDeviceCreateIOProcIDWithBlock(&ioProcID, aggregateID, queue) {
-            [weak self] _, inInputData, _, _, _ in
-            guard let self, let onBuffer = self.onBuffer, let fmt = self.tapFormat else { return }
-            let ablPointer = UnsafeMutablePointer(mutating: inInputData)
-            guard let pcm = AVAudioPCMBuffer(pcmFormat: fmt, bufferListNoCopy: ablPointer, deallocator: nil),
-                  pcm.frameLength > 0 else { return }
-            onBuffer(pcm)
-        }
+        let interleaved = format.isInterleaved
+        let ctx = TapContext(
+            ring: AudioRing(capacity: 1 << 21),          // 2 MiB ~ 5 s of 48 kHz stereo Float32
+            bufferCount: interleaved ? 1 : Int(format.channelCount),
+            channelsPerBuffer: interleaved ? Int(format.channelCount) : 1)
+        context = ctx
+        let cons = TapConsumer(context: ctx, format: format, handler: onBuffer)
+        consumer = cons
+
+        status = AudioDeviceCreateIOProcID(aggregateID, tapIOProc,
+                                           Unmanaged.passUnretained(ctx).toOpaque(), &ioProcID)
         guard status == noErr, ioProcID != nil else { throw TapError(stage: "create ioproc", status: status) }
 
+        cons.start()
+        installListeners()
         status = AudioDeviceStart(aggregateID, ioProcID)
         guard status == noErr else { throw TapError(stage: "start device", status: status) }
         ok = true
+    }
+
+    // MARK: HAL change listeners
+
+    private func installListeners() {
+        let sys = AudioObjectID(kAudioObjectSystemObject)
+        func add(_ obj: AudioObjectID, _ selector: AudioObjectPropertySelector, _ why: String) {
+            var addr = AudioObjectPropertyAddress(
+                mSelector: selector,
+                mScope: kAudioObjectPropertyScopeGlobal,
+                mElement: kAudioObjectPropertyElementMain)
+            let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
+                self?.evaluate(trigger: why)
+            }
+            if AudioObjectAddPropertyListenerBlock(obj, &addr, eventQueue, block) == noErr {
+                listeners.append((obj, addr, block))
+            }
+        }
+        add(sys, kAudioHardwarePropertyDefaultOutputDevice, "default_output_changed")
+        add(sys, kAudioHardwarePropertyServiceRestarted, "hal_restarted")
+        add(aggregateID, kAudioDevicePropertyNominalSampleRate, "rate_changed")
+        add(aggregateID, kAudioDevicePropertyDeviceIsAlive, "aggregate_dead")
+        add(tapID, kAudioTapPropertyFormat, "tap_format_changed")
+    }
+
+    private func removeListeners() {
+        for (obj, addr, block) in listeners {
+            var a = addr
+            AudioObjectRemovePropertyListenerBlock(obj, &a, eventQueue, block)
+        }
+        listeners.removeAll()
+    }
+
+    /// Runs on eventQueue. Re-checks ALL invalidation conditions (cheap) and
+    /// fires `onInvalidated` at most once per start().
+    private func evaluate(trigger: String) {
+        guard !stopping.load(ordering: .relaxed) else { return }
+        var reason: String?
+        if trigger == "hal_restarted" {
+            reason = trigger
+        } else if Self.deviceIsAlive(aggregateID) == false {
+            reason = "aggregate_dead"
+        } else if Self.defaultOutputDeviceUID() != anchorUID {
+            reason = "default_output_changed"
+        } else if startRate > 0, abs(Self.nominalRate(aggregateID) - startRate) > 0.5 {
+            reason = "rate_changed"
+        } else if let f = tapFormat, let now = Self.currentTapFormat(tapID),
+                  now.sampleRate != f.sampleRate || now.channelCount != f.channelCount {
+            reason = "tap_format_changed"
+        }
+        guard let reason else { return }
+        guard !invalidated.exchange(true, ordering: .relaxed) else { return }
+        onInvalidated?(reason)
+    }
+
+    // MARK: HAL helpers
+
+    private static func stringProperty(_ obj: AudioObjectID, _ selector: AudioObjectPropertySelector) -> String? {
+        var addr = AudioObjectPropertyAddress(
+            mSelector: selector,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain)
+        var value: Unmanaged<CFString>?
+        var size = UInt32(MemoryLayout<Unmanaged<CFString>?>.size)
+        let status = withUnsafeMutablePointer(to: &value) { ptr in
+            AudioObjectGetPropertyData(obj, &addr, 0, nil, &size, ptr)
+        }
+        guard status == noErr, let v = value else { return nil }
+        return v.takeRetainedValue() as String
+    }
+
+    private static func nominalRate(_ dev: AudioObjectID) -> Double {
+        var addr = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyNominalSampleRate,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain)
+        var rate = Float64(0)
+        var size = UInt32(MemoryLayout<Float64>.size)
+        guard AudioObjectGetPropertyData(dev, &addr, 0, nil, &size, &rate) == noErr,
+              rate.isFinite else { return 0 }
+        return rate
+    }
+
+    /// nil when the property can't be read (treated as "unknown", not "dead").
+    private static func deviceIsAlive(_ dev: AudioObjectID) -> Bool? {
+        var addr = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyDeviceIsAlive,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain)
+        var alive: UInt32 = 1
+        var size = UInt32(MemoryLayout<UInt32>.size)
+        guard AudioObjectGetPropertyData(dev, &addr, 0, nil, &size, &alive) == noErr else { return nil }
+        return alive != 0
+    }
+
+    private static func currentTapFormat(_ tap: AudioObjectID) -> AVAudioFormat? {
+        var asbd = AudioStreamBasicDescription()
+        var size = UInt32(MemoryLayout<AudioStreamBasicDescription>.size)
+        var addr = AudioObjectPropertyAddress(
+            mSelector: kAudioTapPropertyFormat,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain)
+        guard AudioObjectGetPropertyData(tap, &addr, 0, nil, &size, &asbd) == noErr else { return nil }
+        return AVAudioFormat(streamDescription: &asbd)
+    }
+
+    /// Destroy aggregate devices carrying our name/UID prefix that no live
+    /// ProcessTap in this process owns (left by a crashed/aborted earlier run).
+    private static func sweepStaleAggregates() {
+        var addr = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDevices,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain)
+        let sys = AudioObjectID(kAudioObjectSystemObject)
+        var size = UInt32(0)
+        guard AudioObjectGetPropertyDataSize(sys, &addr, 0, nil, &size) == noErr, size > 0 else { return }
+        var ids = [AudioObjectID](repeating: 0, count: Int(size) / MemoryLayout<AudioObjectID>.size)
+        guard AudioObjectGetPropertyData(sys, &addr, 0, nil, &size, &ids) == noErr else { return }
+        ids = Array(ids.prefix(Int(size) / MemoryLayout<AudioObjectID>.size))
+        let live = liveAggregates.withLock { $0 }
+        for id in ids where id != kAudioObjectUnknown && !live.contains(id) {
+            let uid = stringProperty(id, kAudioDevicePropertyDeviceUID) ?? ""
+            let name = stringProperty(id, kAudioObjectPropertyName) ?? ""
+            guard uid.hasPrefix(aggregateUIDPrefix) || name == aggregateName else { continue }
+            let st = AudioHardwareDestroyAggregateDevice(id)
+            FileHandle.standardError.write(Data(
+                "ProcessTap: removed stale aggregate device \(id) (status \(st))\n".utf8))
+        }
     }
 
     /// UID of the current default output device, used as the aggregate's time
@@ -163,15 +527,7 @@ public final class ProcessTap {
         guard AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject),
                                          &addr, 0, nil, &size, &device) == noErr,
               device != AudioObjectID(kAudioObjectUnknown) else { return nil }
-
-        addr.mSelector = kAudioDevicePropertyDeviceUID
-        var uid: CFString = "" as CFString
-        var uidSize = UInt32(MemoryLayout<CFString>.size)
-        let status = withUnsafeMutablePointer(to: &uid) { ptr in
-            AudioObjectGetPropertyData(device, &addr, 0, nil, &uidSize, ptr)
-        }
-        guard status == noErr else { return nil }
-        return uid as String
+        return stringProperty(device, kAudioDevicePropertyDeviceUID)
     }
 
     /// Translate a Unix pid to the Core Audio process object that taps want.
@@ -193,14 +549,24 @@ public final class ProcessTap {
         return obj
     }
 
+    /// Teardown order matters: listeners -> stop IOProc -> destroy IOProc (after
+    /// which the HAL can no longer touch `context`) -> join consumer -> destroy
+    /// aggregate -> destroy tap. Idempotent.
     public func stop() {
+        stopping.store(true, ordering: .relaxed)
+        removeListeners()
         if let proc = ioProcID, aggregateID != kAudioObjectUnknown {
             AudioDeviceStop(aggregateID, proc)
             AudioDeviceDestroyIOProcID(aggregateID, proc)
-            ioProcID = nil
         }
+        ioProcID = nil
+        consumer?.stopAndJoin()
+        consumer = nil
+        context = nil
         if aggregateID != kAudioObjectUnknown {
-            AudioHardwareDestroyAggregateDevice(aggregateID)
+            let id = aggregateID
+            AudioHardwareDestroyAggregateDevice(id)
+            Self.liveAggregates.withLock { _ = $0.remove(id) }
             aggregateID = AudioObjectID(kAudioObjectUnknown)
         }
         if tapID != kAudioObjectUnknown {

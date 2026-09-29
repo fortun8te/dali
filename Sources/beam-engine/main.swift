@@ -16,6 +16,25 @@ final class CLI: @unchecked Sendable {
     var selectNames: [String] = []
     var play = false
     var supervisor: EngineSupervisor?   // retained for the process lifetime
+    var signalSources: [DispatchSourceSignal] = []
+
+    /// Ctrl-C / SIGTERM must take the engine down with the CLI. Dying on the
+    /// default handler orphaned OwnTone, which then held UDP 319/320 and a
+    /// speaker session into the next run (see EngineSupervisor.reapEngines).
+    func installSignalHandlers() {
+        for sig in [SIGINT, SIGTERM] {
+            signal(sig, SIG_IGN)
+            let source = DispatchSource.makeSignalSource(signal: sig, queue: .main)
+            source.setEventHandler { [self] in
+                Task {
+                    await supervisor?.stop()
+                    exit(0)
+                }
+            }
+            source.resume()
+            signalSources.append(source)
+        }
+    }
 
     func run() async {
         let config = OwnToneConfig(rootDir: URL(fileURLWithPath: rootDir))
@@ -68,5 +87,6 @@ while let arg = args.popFirst() {
 }
 
 setvbuf(stdout, nil, _IOLBF, 0)
+cli.installSignalHandlers()
 Task { await cli.run() }
 RunLoop.main.run()

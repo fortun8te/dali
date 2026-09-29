@@ -3,6 +3,11 @@ import Foundation
 /// The bundled engine's nominal presentation delay, shared by video and the
 /// room animation. This is a scheduling estimate, not a microphone measurement.
 public enum RoomDelayPolicy {
+    /// Keep the AirPlay buffer at its supported low-latency setting. Browser
+    /// video follows the same measured room delay, so lowering this reduces
+    /// both audio and picture latency together while retaining some headroom.
+    public static let automaticStartBufferMs = 500
+
     // Keep these in step with the bundled airplay.c. This fork sends audio with
     // start_buffer_ms - 50 ms lead, while SETUP advertises latencyMin = 11025
     // samples at 44100 Hz (250 ms). The difference is 200 ms, not another full

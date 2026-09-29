@@ -1,147 +1,107 @@
 # DALI Video Sync
 
-Chrome companion for the DALI macOS app. It delays the picture to match the
-app's reported AirPlay audio delay. Your video's audio, playhead, playback
-speed, and player controls stay with the website.
+Chrome companion for the DALI macOS app. DALI plays the Mac's audio on the
+AirPlay speakers about 0.5 to 1 s late. This extension holds the video picture
+back by the same amount, so lips match again. The site's audio, playhead,
+speed and controls are left alone.
 
-## Install
+## Install or reload
 
-1. Open DALI's browser setup and reveal its Chrome extension folder.
-2. Open `chrome://extensions`, turn on **Developer mode**, choose **Load
-   unpacked**, and select that folder.
-3. Play a video while DALI streams to your speakers.
+1. Open `chrome://extensions` and turn on **Developer mode**.
+2. First install: choose **Load unpacked** and select this `chrome-extension`
+   folder, or the folder DALI reveals during browser setup.
+3. After an update: click the **reload** arrow on the *DALI Video Sync* card.
+   Open tabs pick up the new script by themselves. You don't need to refresh
+   them.
+4. To check the version: click **service worker** on the card. The console
+   prints `[DALI Video Sync] v1.2.1  build 2026-09-27.a`. While DALI runs,
+   `curl -s http://127.0.0.1:3697/` shows `"extensionVersion":"1.2.1"` within
+   30 s.
 
-For source installations, select this `chrome-extension` folder instead.
-Chrome 110 or later is required. There is no popup or toolbar setting to
-configure. The extension releases the picture when DALI is offline or idle.
+Chrome 120 or later is required. There are no settings. When DALI is off or
+idle, the extension does nothing to any page.
 
-## Updates
+## Version 1.2.1
 
-DALI's managed extension folder has a stable location. The app refreshes its
-files during startup and advertises the bundled extension version. Extension
-1.1.0 and later reloads itself once when it sees a newer version, then injects
-its content script into open tabs and embedded players. Matching and older
-versions do not trigger a reload. A saved attempt prevents repeated reloads
-when an extension was loaded from a different folder.
+Brief connection failures to DALI no longer drop video sync immediately.
+The extension keeps the last confirmed status for up to ten seconds; an explicit
+stop still takes effect immediately.
 
-**Upgrading an older extension needs one manual Reload in
-`chrome://extensions`.** Source installations also need Reload after changing
-files. The extension cannot silently install itself in Chrome, and automatic
-Chrome Web Store distribution requires a separate store publication.
+Instagram is excluded from picture delay. Reels and feed videos play normally,
+and their audio still goes through DALI. Other supported sites retain automatic sync.
 
-To check the active version, open the extension's **service worker** console
-from `chrome://extensions`. This release prints:
+## How sync works
 
-```
-[DALI Video Sync] v1.1.0  build 2026-09-13.a
-```
+**Why the picture is buffered.** DALI captures the Mac's audio, and that audio
+comes from the same `<video>` element. Seeking the element back, pausing it at
+the start or changing `playbackRate` would move its audio by the same amount.
+The room would still be late. So the extension draws a delayed copy of the
+frames on a `<canvas>` placed exactly over the video, and hides the real
+element (`visibility: hidden`, so the layout does not change). The element
+keeps playing and keeps making the sound.
 
-## Video support
+**Timing.** Each frame is stamped with its `requestVideoFrameCallback` display
+time. The frame nearest to `now − delayMs` is shown. The error stays within
+half a frame (±17 ms at 30 fps). Frames are timed one by one, so the error
+cannot build up.
 
-| Player | Behavior covered by regression tests |
-| --- | --- |
-| YouTube and Shorts | Normal playback, buffering, seeking, reused ad/video elements, feed changes, cached-page return |
-| TikTok | Visible feed selection, swiping past an older playing video, replacing the video element |
-| Instagram Reels | Visible feed selection, muted previews, changing the source on a reused video element |
-| Other HTML video players | Standard video elements, embedded frames, open shadow-root discovery, source and layout changes |
+**VOD.** On play, seek or a new source, the first frame is held until its
+audio reaches the room. If sync starts mid-video, the delay eases in at half
+speed. Pause, end, seek, tab switch, PiP and navigation hand the real video
+back in the same tick.
 
-These are tests of actual extension code against controlled browser and media
-fixtures. They do not certify every layout or every account variant on the
-live platforms. Platform changes can require a new compatibility test and fix.
+**Live (Twitch, YouTube Live, HLS/DASH).** It works the same way. Nothing
+seeks, so there is no live edge to fight and no extra rebuffering. When the
+player adjusts itself by less than 250 ms, sync holds. During stalls the
+buffered picture plays out as the room plays out its audio, then waits. Ads,
+source changes and quality switches only change which frames arrive. The
+regression suite checks a minute of live playback with nudges, a 3 s stall and
+a quality switch. The error stays at ±17 ms, and at most 40 ms on a frame that
+failed to decode.
 
-Protected DRM video, closed shadow roots, native picture-in-picture windows,
-and fullscreen modes that expose only the video element cannot use the canvas
-overlay. In those cases the original player remains visible and undelayed.
-YouTube's normal fullscreen player container can contain the overlay.
+**Delay changes.** The service worker reads DALI's beacon about once per
+second while it is streaming, and every 2.5 s while it is idle. A shorter
+delay applies at once. A longer one eases in without freezing the picture.
 
-The delay comes from DALI's stable configured buffer, engine scheduling
-allowance, and saved timing trim. Receiver-specific latency and network conditions can still
-need in-room calibration. A clean browser test cannot prove speaker lip-sync.
+**Every site.** The content script runs in all frames, including
+about:blank, blob: and srcdoc frames. It finds videos added later
+(MutationObserver, Navigation API, a 4 s sweep) and videos inside open shadow
+roots, where it also listens for media events. When a page has several videos,
+it picks the visible one that is playing and audible, preferring the larger
+one, with hysteresis.
 
-## What changed in 1.1.0
-
-- Feed selection uses the visible part of each player. Offscreen and CSS-hidden
-  clips no longer keep sync attached to the previous item.
-- Scrolling and nested feed containers trigger selection changes promptly and
-  release old frame buffers.
-- The presenter consumes a frame as soon as it reaches the delay target. It no
-  longer waits an extra frame because of the following frame's timestamp.
-- New builds replace old active scripts. Duplicate injections preserve the
-  current pipeline. Browser startup and extension updates reinject open tabs.
-- Cached pages stay suspended while earlier asynchronous requests finish, then
-  resume when the page returns.
-- Cleanup preserves the video's original inline visibility, and discards
-  outstanding decoded frames safely during teardown.
-- The beacon client accepts the original protocol and version 1 additions,
-  leaves video alone for incompatible versions, and bounds the entire response
-  read. Failed app commands are reported as failures.
-- Pause-tail requests require an audible, visible video owned by sync. Muted
-  previews, unsynced videos, vanished tabs, and navigation cannot begin a cut.
-  Other playing browser frames also prevent a cut.
-
-A pause-tail request affects DALI's captured room audio. The extension cannot
-identify audio playing in an unrelated native Mac app. DALI expires these
-requests after the reported delay plus a short margin, with an independent
-app-side timeout as a backstop.
-
-## Privacy and permissions
-
-The extension has no external service, account, analytics, or remote code. It
-reads video frames locally and sends playback state, tab title, host, and an
-optional page thumbnail URL to the local DALI app. It does not upload the
-frames. Local storage contains optional timing trims, a debug setting, and the
-latest managed-update attempt.
-
-Broad HTTP/HTTPS host access is needed to operate across video platforms and
-embedded players. The scripting permission restores already-open pages after
-updates. The only extension network client addresses `127.0.0.1:3697`.
-Requests carry `X-DALI-Client: chrome-extension`; the app must reject ordinary
-web origins and unauthorized preflights. This header is a browser origin
-boundary, not a secret credential against other software on the Mac.
+**Limits.** In these cases the page plays undelayed, as it would without the
+extension: DRM/EME video (Netflix, Prime, Disney+, and similar sites), closed
+shadow roots, and a `<video>` element that itself goes fullscreen or into
+picture-in-picture. YouTube and Twitch fullscreen their player container, and
+sync works there.
 
 ## Local app contract
 
 ```
-GET http://127.0.0.1:3697/
+GET http://127.0.0.1:3697/?t=<ms>&v=<version>&b=<build>
 {"app":"DALI","protocolVersion":1,"streaming":true,"delayMs":900,
- "extensionVersion":"1.1.0"}
+ "extensionVersion":"1.2.1","extensionBuild":"2026-09-23.a",
+ "bundledExtensionVersion":""}
 ```
 
-Replies without `protocolVersion` remain compatible with version 1. The app
-must advertise `extensionVersion` only after its managed extension export is
-ready. `GET /cut`, `GET /resume`, and `GET /now?d=<encoded-json>` remain the
-control endpoints. Status requests share a 750 ms cache; pages with media poll
-about once per second. The request timeout covers response-body reading too.
+- Every request carries `v`/`b`, and the app echoes the running extension as
+  `extensionVersion`. This field is empty after 70 s of silence. The worker
+  checks in every 30 s by alarm, even when no video is open.
+- `bundledExtensionVersion` is the version in DALI's managed folder. 1.2+
+  reloads itself once when this is newer than its manifest.
+- Controls are `/cut`, `/resume` (the pause tail, decided across all tabs in
+  the worker) and `/now?d=<json>` (the now-playing line, up to 1000 encoded
+  chars).
 
-## Verify a release
-
-From the repository root, with Node 20 or later:
+## Verify
 
 ```sh
-node --test --test-reporter=spec chrome-extension/tools/harness/regressions.mjs
+node --test chrome-extension/tools/harness/regressions.mjs
 ```
 
-The suite runs the shipped `content.js`, `background.js`, and `beacon.js` with
-deterministic clocks, media objects, and extension APIs. It tests frame-age
-selection at several delays, playback and navigation recovery, updates,
-protocol compatibility, memory release, and cross-tab pause handling. It needs
-no dependencies, Chrome profile, network connection, or speakers.
-
-`tools/harness/index.html` is a separate visual fixture with a synthetic
-frame-number video. `?real=1` keeps Chrome's native frame callbacks. Its older
-full-suite driver includes exploratory scenarios and optional live-beacon
-reads. Use the deterministic suite as the release gate, then perform browser
-and in-room checks before claiming platform and speaker compatibility.
-
-## Version 1.2.1
-
-- Browser status requests tolerate brief scheduling delays and retain the last confirmed app status for up to ten seconds after connection failures. Explicit stop replies still take effect immediately.
-- Capture supports up to 60 fps within the memory budget and uses frame timestamps to avoid dropping frames because callbacks arrive unevenly.
-- The activity list excludes paused, muted, ended, and unready media while retaining buffering intent for audio-control decisions.
-- Instagram feed videos and Reels play without picture delay. Playback reports remain active so an unrelated paused tab cannot silence their audio.
-- Build identity: `2026-09-27.a`. Includes the current extension check-in and recovery fixes.
-
-Verification: 60 automated regression checks. Live YouTube verification is recorded separately from physical speaker lip-sync, which cannot be established from browser telemetry alone.
+This runs the shipped scripts with deterministic clocks and stub media. It
+needs no Chrome, network or speakers. Check lip sync in the room afterwards.
 
 ## Version 1.2.2
 

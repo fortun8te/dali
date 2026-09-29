@@ -21,8 +21,11 @@ final class Runner: @unchecked Sendable {
     }
 
     func start() throws {
+        // Runs on the tap's consumer thread (never the realtime IO thread).
         tap.onBuffer = { [self] buffer in
-            if converter == nil { converter = FormatConverter(from: buffer.format) }
+            if converter == nil || !(converter!.accepts(buffer.format)) {
+                converter = FormatConverter(from: buffer.format)
+            }
             guard let data = converter?.convert(buffer) else { return }
             fifo.write(data)
             lock.lock()
@@ -61,7 +64,9 @@ var args = ArraySlice(CommandLine.arguments.dropFirst())
 while let arg = args.popFirst() {
     switch arg {
     case "--fifo": if let v = args.popFirst() { fifoPath = NSString(string: v).expandingTildeInPath }
-    case "--seconds": if let v = args.popFirst() { seconds = Double(v) }
+    case "--seconds":
+        // NaN/inf/negative would make the DispatchTime arithmetic below trap.
+        if let v = args.popFirst(), let d = Double(v), d.isFinite, d >= 0 { seconds = d }
     default:
         FileHandle.standardError.write("unknown arg \(arg)\n".data(using: .utf8)!)
         exit(2)
@@ -78,14 +83,20 @@ do {
 }
 print("beam-capture: tapping system audio -> \(fifoPath)")
 
+// SIGINT and SIGTERM both tear the tap down cleanly (a killed process would
+// otherwise leave its aggregate device registered until coreaudiod reaps it).
 signal(SIGINT, SIG_IGN)
+signal(SIGTERM, SIG_IGN)
 let sigint = DispatchSource.makeSignalSource(signal: SIGINT, queue: .main)
-sigint.setEventHandler {
-    print("\nstopping")
-    runner.stop()
-    exit(0)
+let sigterm = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)
+for src in [sigint, sigterm] {
+    src.setEventHandler {
+        print("\nstopping")
+        runner.stop()
+        exit(0)
+    }
+    src.resume()
 }
-sigint.resume()
 
 if let s = seconds {
     DispatchQueue.main.asyncAfter(deadline: .now() + s) {

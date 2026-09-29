@@ -239,7 +239,9 @@ final class VideoModeState {
     /// Re-read the device list and reconcile our flag with reality. Cheap
     /// enough to call on every appearance of the settings pane.
     func refresh() {
-        wiredDevice = WiredOutput.firstMatching()
+        // @Observable notifies on every set, equal or not.
+        let found = WiredOutput.firstMatching()
+        if found != wiredDevice { wiredDevice = found }
 
         // We only claim to be in video mode if the wired amp is present *and*
         // it is genuinely the system default right now. The user can change
@@ -254,8 +256,23 @@ final class VideoModeState {
     }
 
     fileprivate func setActive(_ on: Bool) {
-        isActive = on
+        if isActive != on { isActive = on }
         UserDefaults.standard.set(on, forKey: Self.activeKey)
+    }
+
+    /// Plugging in one USB device fires the device-list listener several times
+    /// in a burst (aggregate/virtual devices appear one by one), and every
+    /// refresh walks the whole HAL device list on the main thread. Coalesce.
+    private var refreshPending = false
+    fileprivate func scheduleRefresh() {
+        guard !refreshPending else { return }
+        refreshPending = true
+        Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(250))
+            guard let self else { return }
+            self.refreshPending = false
+            self.refresh()
+        }
     }
 
     fileprivate func rememberPrevious(_ uid: String?) { previousOutputUID = uid }
@@ -263,7 +280,7 @@ final class VideoModeState {
     fileprivate func forgetPrevious() { previousOutputUID = nil }
 
     fileprivate func fail(_ message: String) { lastError = message }
-    fileprivate func clearError() { lastError = nil }
+    fileprivate func clearError() { if lastError != nil { lastError = nil } }
 
     /// Wake up when a device is plugged in or pulled out, so the control
     /// enables itself the moment the USB-C cable goes in.
@@ -275,7 +292,7 @@ final class VideoModeState {
         AudioObjectAddPropertyListenerBlock(
             AudioObjectID(kAudioObjectSystemObject), &addr, DispatchQueue.main
         ) { _, _ in
-            Task { @MainActor in VideoModeState.shared.refresh() }
+            Task { @MainActor in VideoModeState.shared.scheduleRefresh() }
         }
     }
 }

@@ -14,8 +14,9 @@ enum ExtensionInstaller {
     }
 
     static var installURL: URL {
-        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("DALI/ChromeExtension", isDirectory: true)
+        let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+            ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support")
+        return support.appendingPathComponent("DALI/ChromeExtension", isDirectory: true)
     }
 
     static var bundledURL: URL? {
@@ -47,6 +48,14 @@ enum ExtensionInstaller {
 
         let parent = destination.deletingLastPathComponent()
         try fm.createDirectory(at: parent, withIntermediateDirectories: true)
+        // A crash or force-quit mid-copy leaves its staging folder behind and
+        // nothing else ever removes it. Anything this old cannot be in use.
+        if let leftovers = try? fm.contentsOfDirectory(at: parent, includingPropertiesForKeys: [.contentModificationDateKey]) {
+            for url in leftovers where url.lastPathComponent.hasPrefix(".ChromeExtension-") {
+                let modified = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
+                if modified.map({ Date().timeIntervalSince($0) > 3600 }) ?? true { try? fm.removeItem(at: url) }
+            }
+        }
         let staged = parent.appendingPathComponent(".ChromeExtension-\(UUID().uuidString)", isDirectory: true)
         try fm.createDirectory(at: staged, withIntermediateDirectories: false)
         defer { try? fm.removeItem(at: staged) }

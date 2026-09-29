@@ -54,8 +54,8 @@
   // Bump BUILD on every edit. The service worker prints version + build on
   // startup (chrome://extensions -> "service worker"); that line is the only
   // way to confirm which code Chrome actually has loaded.
-  const VERSION = '1.2.2';
-  const BUILD = '2026-09-27.b';
+  const VERSION = '1.2.3';
+  const BUILD = '2026-09-29.a';
 
   if (typeof chrome === 'undefined' || !chrome.runtime) return;
 
@@ -331,6 +331,20 @@
     return out;
   }
 
+  // The walk above visits EVERY element on the page. One tick used to run it
+  // four or five times over (findBestVideo, both playstate questions, the LIVE
+  // check, the health check) — a few ms each on a heavy page, every second, in
+  // every frame. Within a single synchronous tick the DOM cannot change under
+  // us, so the tick asks once and shares the answer. Outside a tick (events,
+  // mutations, the harness) every caller still gets a fresh walk.
+  let inTick = false;
+  let tickVideos = null;
+  function sceneVideos() {
+    if (!inTick) return allVideos();
+    if (!tickVideos) tickVideos = allVideos();
+    return tickVideos;
+  }
+
   // Media events do not cross a shadow boundary (they are not composed), and a
   // MutationObserver on the document does not see inside one either. So every
   // open root we find gets the same capture listeners and observer as the
@@ -354,21 +368,42 @@
     S.shadowWatch.push([root, mo]);
   }
 
+  function unwatchShadowRoot(root, mo) {
+    try {
+      for (const t of MEDIA_EVENTS) root.removeEventListener(t, onMediaEvent, true);
+      root.removeEventListener('encrypted', onEncrypted, true);
+    } catch (e) { /* ignore */ }
+    if (mo) { try { mo.disconnect(); } catch (e) { /* ignore */ } }
+  }
+
   function unwatchShadowRoots() {
-    for (const [root, mo] of S.shadowWatch) {
-      try {
-        for (const t of MEDIA_EVENTS) root.removeEventListener(t, onMediaEvent, true);
-        root.removeEventListener('encrypted', onEncrypted, true);
-      } catch (e) { /* ignore */ }
-      if (mo) { try { mo.disconnect(); } catch (e) { /* ignore */ } }
-    }
+    for (const [root, mo] of S.shadowWatch) unwatchShadowRoot(root, mo);
     S.shadowWatch = [];
     S.watchedRoots = new WeakSet();
   }
 
+  // A component that owns a shadow root gets created and thrown away as a feed
+  // scrolls. `S.shadowWatch` holds each root (and its MutationObserver) by a
+  // strong reference, so every root ever seen — with its whole detached
+  // subtree — stayed alive for the life of the tab. Let go of the ones whose
+  // host has left the document; a root that comes back is simply watched again.
+  function pruneShadowRoots() {
+    if (!S.shadowWatch.length) return;
+    const keep = [];
+    for (const entry of S.shadowWatch) {
+      const root = entry[0];
+      let attached = false;
+      try { attached = !!(root.host && root.host.isConnected); } catch (e) { /* treat as gone */ }
+      if (attached) { keep.push(entry); continue; }
+      unwatchShadowRoot(root, entry[1]);
+      S.watchedRoots.delete(root);
+    }
+    S.shadowWatch = keep;
+  }
+
   function findBestVideo() {
     let best = null, bestScore = 0, bestArea = 0;
-    const vids = allVideos();
+    const vids = sceneVideos();
     for (const v of vids) {
       const score = scoreVideo(v);
       if (score > bestScore) {
@@ -1448,7 +1483,7 @@
   // in another tab could cut the room while it was audibly playing. The delay
   // pipeline still only ever attaches to <video>; this is a separate question.
   function allMedia() {
-    const out = allVideos();
+    const out = sceneVideos().slice();
     try {
       for (const a of document.querySelectorAll('audio')) out.push(a);
     } catch (e) { /* detached */ }
@@ -1482,22 +1517,34 @@
     if (!extensionAlive()) { teardownAll('context invalidated'); return; }
     S.lastTickAt = performance.now();
     pollBeacon(false);
-    reportPlaystate(false);
-    healthTick();
+    inTick = true;
+    tickVideos = null;
+    try {
+      reportPlaystate(false);
+      healthTick();
+    } finally {
+      inTick = false;
+      tickVideos = null;
+    }
+    pruneShadowRoots();
   }
 
+  // The rAF twin of the interval exists to keep a pipeline that is presenting
+  // frames from depending on a throttled timer. With nothing presenting, an
+  // rAF callback every 16 ms buys nothing and keeps the tab producing frames
+  // — a paused YouTube tab used to cost a permanent 60 Hz wake-up.
   function rafTick() {
     S.tickRaf = 0;
-    if (!S.ticking) return;
+    if (!S.ticking || !S.pipeline) return;
     if (performance.now() - S.lastTickAt >= POLL_MS) tick();
-    if (S.ticking) S.tickRaf = requestAnimationFrame(rafTick);
+    if (S.ticking && S.pipeline) S.tickRaf = requestAnimationFrame(rafTick);
   }
 
   function startTicking() {
     if (S.ticking) return;
     S.ticking = true;
     S.tickTimer = setInterval(tick, POLL_MS);
-    S.tickRaf = requestAnimationFrame(rafTick);
+    if (S.pipeline) S.tickRaf = requestAnimationFrame(rafTick);
     pollBeacon(true);
   }
 
@@ -1614,6 +1661,7 @@
     if (p.attach()) {
       S.pipeline = p;
       openPort();
+      if (S.ticking && !S.tickRaf) S.tickRaf = requestAnimationFrame(rafTick);
       S.reason = (target.paused || target.ended) ? 'ready' : 'starting';
       log('attaching to', target.videoWidth + 'x' + target.videoHeight, '@', location.hostname);
     } else {
@@ -1714,9 +1762,16 @@
     // Capture-phase scroll also sees nested Reels/Shorts feed containers.
     // Release an invisible source now; debounce selection during the swipe.
     const p = S.pipeline;
-    if (p && !p.detached && scoreVideo(p.video) === 0) detachPipeline();
+    // scoreVideo() reads geometry and computed style, which forces layout; a
+    // scroll fires at display rate, so look at most every 60 ms.
+    const now = performance.now();
+    if (p && !p.detached && now - lastScrollCheckAt >= 60) {
+      lastScrollCheckAt = now;
+      if (scoreVideo(p.video) === 0) detachPipeline();
+    }
     scheduleEvaluate();
   }
+  let lastScrollCheckAt = 0;
 
   function onVisibilityChange() {
     if (!pageVisible()) {
@@ -1763,6 +1818,7 @@
   function discover() {
     if (S.dead || S.suspended || S.ticking || !pageVisible()) return;
     if (allVideos().length) scheduleEvaluate();
+    pruneShadowRoots();
   }
 
   function mutationTouchesVideo(mutations) {
