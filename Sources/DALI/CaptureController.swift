@@ -72,6 +72,9 @@ final class CaptureController: @unchecked Sendable {
     // the old per-buffer loop that steered off pendingBytes, which is blind to
     // OwnTone's internal buffers and so pinned the ratio at its floor forever.
     private var targetRatio = 1.0
+    /// The ratio actually handed to the resampler: `targetRatio` approached at no
+    /// more than `driftSlewPerSec`, per buffer, so no caller can ever step it.
+    private var appliedRatio = 1.0
     private var lastRatio = 1.0
     private var bytesWritten = 0
     private static let bytesPerSecond = 44_100 * 2 * 2   // s16le, 2ch
@@ -102,6 +105,13 @@ final class CaptureController: @unchecked Sendable {
     // Varispeed take its bit-perfect passthrough branch, so a machine whose
     // engine tick happens to be honest never resamples at all.
     static let driftDeadzone = 0.0002
+    // Hard slew rail on the ratio itself, in ratio units per second of AUDIO. The
+    // refill controller already slews its command (0.25% over 8 s = 0.0003/s);
+    // this is the last line of defence that keeps ANY change continuous — a
+    // cut back to exactly 1.0 after a stream restart takes 0.0025/0.0005 = 5 s
+    // instead of stepping 4 cents at once. At rest (target 1.0) it is inert and
+    // the resampler stays on its bit-exact passthrough branch.
+    static let driftSlewPerSec = 0.0005
 
     // Byte-weighted accounting of the correction we ACTUALLY applied this
     // interval. The commanded ratio is not the applied ratio: the silence
@@ -500,7 +510,16 @@ final class CaptureController: @unchecked Sendable {
             // clock. The ratio is set once/sec by the flight loop from OwnTone's
             // REAL drain + playback clock (setTargetRatio), so it tracks the actual
             // hidden backlog instead of the always-zero app-side pending buffer.
-            self.lock.lock(); let rawRatio = self.targetRatio; self.lock.unlock()
+            self.lock.lock()
+            let dtBuf = min(max(Double(buffer.frameLength) / max(buffer.format.sampleRate, 1), 0), 0.25)
+            let maxStep = Self.driftSlewPerSec * dtBuf
+            if self.appliedRatio < self.targetRatio {
+                self.appliedRatio = min(self.appliedRatio + maxStep, self.targetRatio)
+            } else if self.appliedRatio > self.targetRatio {
+                self.appliedRatio = max(self.appliedRatio - maxStep, self.targetRatio)
+            }
+            let rawRatio = self.appliedRatio
+            self.lock.unlock()
             // Bit-transparency deadzone (see driftDeadzone): sub-200 ppm
             // corrections snap to exactly 1.0 so the varispeed takes its
             // bit-perfect passthrough branch and never resamples audio it
@@ -768,6 +787,7 @@ final class CaptureController: @unchecked Sendable {
         feedingSilence = false
         bytesWritten = 0
         targetRatio = 1.0
+        appliedRatio = 1.0
         lastRatio = 1.0
         corrByteSum = 0; corrByteTot = 0; silenceBytesAcc = 0; tapRebuildAcc = 0
         lastMetricsMono = Self.monoNow()
