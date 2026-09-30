@@ -226,7 +226,7 @@ final class DALIStore {
             "chrome": roomChrome.pillLabel.isEmpty ? phaseLabel : roomChrome.pillLabel.lowercased(),
             "mac_volume": systemVolume.isFinite ? Int(systemVolume * 100) : 0,
             "backlog_ms": Int(Double(st.pending ?? 0) / 176.4),
-            "rate_ppm": Int(driftCorr * 1_000_000),
+            "rate_ppm": Int(-refill.eps * 1_000_000),
             "rate_hold": driftFreeze.isEmpty ? "none" : driftFreeze,
             "dropped_30s": dropDelta,
             "clock_anchored": capture.isClockAnchored,
@@ -387,6 +387,24 @@ final class DALIStore {
     /// rate-limit prose so a harmless control oscillation cannot flood the log.
     private var debtCapActive = false
     private var debtCapLastLogAt = Date.distantPast
+
+    // ---- REFILL CONTROLLER (the only thing that touches the ratio now) ------
+    // One-sided, slew-limited, budgeted stretch that gives back read-ahead the
+    // engine has lost (slow wear + step drops). Everything above (the retired
+    // closed loop) is kept only for its validity gates and fill bookkeeping; its
+    // commanded correction is discarded every tick. Design and limits: see
+    // `RefillController` in BeamCapture/Varispeed.swift.
+    private var refill = RefillController()
+    /// Seconds left in the post-volume-change settle window (the engine's player
+    /// thread stalls on RTSP volume writes and its progress clock lies afterwards).
+    private var refillVolHoldSec = 0.0
+    private var refillVolSig = ""
+    /// Fill (seconds) to assume at the NEXT anchor instead of the start buffer.
+    /// Set only when the anchor is dropped for a bad progress reading with the
+    /// stream itself untouched, so a real deficit is not forgiven by re-anchoring.
+    private var anchorCarryFill: Double?
+    /// The fill the current anchor was opened at (start buffer, or the carry).
+    private var fillBaseSec = 0.0
 
     /// ±0.5% authority. Enforced again inside CaptureController.setTargetRatio.
     private static let driftRail = CaptureController.driftRail
@@ -634,7 +652,13 @@ final class DALIStore {
         // varispeed to +0.6% overproduction, and ~228s in the growing backlog hit
         // the FIFOWriter drop cap — the always-at-~4-minutes glitch.)
         let startBufferSec = Double(config.startBufferMs) / 1000.0
-        let written = f.written
+        // TIMING FIX. `f.written` was sampled BEFORE the player-state request, but
+        // item_progress_ms is read somewhere INSIDE it, so every fill sample was
+        // short by the request latency (a 1.3 s API stall read as ~1 s of missing
+        // buffer). Sample the byte counter again after the reply and use the
+        // midpoint of the round trip. (Slow replies are rejected outright below.)
+        let writtenAfterAPI = capture.totalWritten
+        let written = f.written + max(0, writtenAfterAPI - f.written) / 2
         var trueFillSec: Double? = nil
         var fillRaw: Double? = nil
         // Set when the anchor was actually dropped below, so the drift gate can
@@ -647,14 +671,27 @@ final class DALIStore {
             if let pa = progressAnchorMs, let wa = writtenAnchor {
                 let renderedBytes = Double(pm - pa) / 1000.0 * 176_400.0
                 let writtenBytes = Double(written - wa)
-                let fill = startBufferSec + (writtenBytes - renderedBytes) / 176_400.0   // seconds, absolute
+                let fill = fillBaseSec + (writtenBytes - renderedBytes) / 176_400.0   // seconds, absolute
                 fillRaw = fill
                 // EMA smooth (progress clock is coarse, 1s granularity).
                 trueFillEMA = trueFillEMA == 0 ? fill : trueFillEMA * 0.6 + fill * 0.4
                 trueFillSec = trueFillEMA
             } else {
                 progressAnchorMs = pm; writtenAnchor = written      // first lock
+                // Fresh engine stream: the backlog at the anchor IS the start
+                // buffer. After a bad-progress re-anchor on a live stream it is
+                // whatever we last measured (see anchorCarryFill).
+                fillBaseSec = anchorCarryFill ?? startBufferSec
+                anchorCarryFill = nil
             }
+        } else if ps == nil {
+            // The engine simply did not ANSWER (API hang, backoff, resume or
+            // speaker recovery in flight — "busy"). That says nothing about the
+            // playback clock, and the anchor is delta-based so a gap in polling
+            // cannot invalidate it. It used to count as a non-play strike, so any
+            // 3 s API stall (every RTSP volume write) dropped the anchor and
+            // re-assumed a full start buffer: a real deficit was forgiven and the
+            // fill read 0.50 again. Do nothing; the gates below hold the loop.
         } else {
             // A transient non-"play" poll (rebuffer blip) must NOT re-anchor:
             // re-anchoring re-hides the accumulated backlog, the controller
@@ -690,10 +727,22 @@ final class DALIStore {
             // FIFOWriter discarded audio: `written` no longer equals what we
             // produced, so every byte-difference downstream of here is wrong.
             freeze = "drop"; hard = true
+        } else if writtenDelta < 0 {
+            // The byte counter went BACKWARDS: capture swapped in a fresh
+            // FIFOWriter, so the anchor is in the old counter's coordinates and
+            // every fill number derived from it (hugely negative, typically) is
+            // fiction. Drop the anchor and start again from a clean one.
+            freeze = "writereset"; hard = true
+            progressAnchorMs = nil; writtenAnchor = nil; trueFillEMA = 0; fillSlow = nil
+            trueFillSec = nil; fillRaw = nil
         } else if playerState != "play" {
             freeze = "notplaying"; hard = reAnchored
         } else if apiHang || progressMs == nil {
             freeze = "apihang"
+        } else if apiMs > 250 {
+            // The progress clock was read at an unknown moment inside a slow round
+            // trip, so this sample is uncertain by up to half the latency. Reject it.
+            freeze = "apislow"
         } else if trueFillSec == nil || fillRaw == nil {
             // No anchor yet (or it was just dropped): there is no fill to steer
             // on, and the stale smoothed value must not survive into the next
@@ -726,6 +775,11 @@ final class DALIStore {
             freeze = "filljump"
             if fillJumpStrikes >= 3 {
                 hard = true
+                // The progress clock jumped (stall catch-up, counter reset); the
+                // stream itself was not restarted, so the buffer we measured
+                // before the jump is still our best belief. Re-anchor ON it, not
+                // on a fresh start buffer, or a real deficit is forgiven here.
+                anchorCarryFill = min(max(s, -1.0), 3.0)
                 progressAnchorMs = nil; writtenAnchor = nil; trueFillEMA = 0; fillSlow = nil
                 fillJumpStrikes = 0
             }
@@ -850,6 +904,11 @@ final class DALIStore {
         if !freeze.isEmpty {
             slopeAnchorAge = 0; slopeAnchorCorr = 0; slopeAnchorFill = fillSlow ?? targetFill
         }
+        // The retired loop's command is never applied (see the refill controller
+        // below). Zero it HERE so the watchdog that follows cannot see a phantom
+        // "filling" run, trip on a fill drop it did not cause, and hard-freeze the
+        // real controller (NOFEEDBACK -> 30 s lockout) exactly when fill is low.
+        driftCorr = 0
 
         // 5. NO-FEEDBACK WATCHDOG — the structural guarantee against the old
         //    failure mode. If we have been correcting in one direction for 90 s
@@ -1024,20 +1083,49 @@ final class DALIStore {
         // older rate matcher used the coarse item-progress counter and was
         // repeatedly fooled into removing audio at +0.5%. That made both
         // speakers fall progressively behind together until they appeared to
-        // go out. Keep the capture bit-transparent; the engine owns pacing.
+        // go out. So the retired loop's command is discarded (zeroed here every
+        // tick) and the capture stays bit-transparent (ratio exactly 1.0) except
+        // while the refill controller below is giving back lost read-ahead.
         driftCorr = 0
         rateInt = 0
         errInt = 0
         netDrainSec = 0
-        freeze = "engineclock"
-        driftFreeze = freeze
-        capture.setTargetRatio(1.0)
+
+        // ---- REFILL CONTROLLER ---------------------------------------------
+        // The engine's read-ahead starts at the start buffer, wears down ~0.01-0.02 s
+        // per 10 min and takes sudden 0.1-0.6 s step drops (player-thread stalls
+        // that catch up by reading ahead). It never recovers on its own, and once
+        // it is under ~0.1 s any jitter is an audible underrun. So: when the
+        // smoothed fill sits well under target, ADD a little audio (ratio <= 1
+        // by at most 0.25%, slewed over 8 s each way, exactly 1.0 otherwise) until
+        // it is back. One-sided (never removes audio), budgeted, and frozen by
+        // every invalid-measurement gate above. It integrates nothing and learns
+        // nothing, so it cannot become the old loop. Details: RefillController.
+        //
+        // The measurement is also distrusted for 15 s after any volume change or
+        // push (RTSP volume writes stall the engine's player thread and its
+        // progress clock then jumps) and after a fade.
+        let volSig = speakers.filter { $0.enabled }.map { "\(effectiveVolume($0))" }.joined(separator: "-")
+        if (!refillVolSig.isEmpty && volSig != refillVolSig) || pushInFlight || fading {
+            refillVolHoldSec = 15
+        }
+        refillVolSig = volSig
+        let refillHold = freeze.isEmpty ? (refillVolHoldSec > 0 ? "volume" : "") : freeze
+        refillVolHoldSec = max(0, refillVolHoldSec - dt)
+        if let ev = refill.update(dt: dt, target: targetFill, fillSlow: fillSlow,
+                                  holdReason: refillHold, hard: hard) {
+            logRefillEvent(ev, slow: fillSlow, target: targetFill)
+        }
+        capture.setTargetRatio(1.0 - refill.eps)
+        freeze = refillHold.isEmpty ? "engineclock" : refillHold
+        driftFreeze = refillHold.isEmpty ? "refill:\(refill.label)" : refillHold
 
         // ---- Logging --------------------------------------------------------
         let driftPct = String(format: "%+.2f", f.appliedCorr * 100)
         let fillStr = trueFillSec.map { String(format: "%.2fs", $0) } ?? "?"
         let slowStr = fillSlow.map { String(format: "%.2fs", $0) } ?? "?"
-        let corrStr = String(format: "%+.2f", driftCorr * 100)
+        // corr = what the refill controller commanded (negative = filling/stretch).
+        let corrStr = String(format: "%+.2f", -refill.eps * 100)
         let skewStr = String(format: "%+.0f", lastSlopePpm)
         let atRail = abs(driftCorr) >= Self.driftRail - 1e-9
         let flags = [
@@ -1097,7 +1185,45 @@ final class DALIStore {
         let hold = freeze.isEmpty ? "" : " hold=\(freeze)"
         applyRoomDelay()
         syncBeacon.publish(streaming: phase == .streaming, delaySeconds: roomDelaySec)
-        Self.flog("fill=\(fillStr) slow=\(slowStr) corr=\(corrStr)% drift=\(driftPct)% skew=\(skewStr)ppm debt=\(String(format: "%+.2f", netDrainSec))s\(hold) write=\(writtenPct)% produce=\(producedPct)% appBuf=\(appBufSec)s bufs=\(f.bufCount) maxgap=\(Int(f.maxGapMs))ms inRate=\(Int(f.inRate)) prog=\(progressMs.map(String.init) ?? "?")ms macVol=\(systemVolume.isFinite ? Int(systemVolume*100) : 0) | \(spkInfo)\(flags.isEmpty ? "" : "  <<< \(flags)")")
+        Self.flog("fill=\(fillStr) slow=\(slowStr) corr=\(corrStr)% drift=\(driftPct)% skew=\(skewStr)ppm debt=\(String(format: "%+.2f", netDrainSec))s\(hold) rm=\(refill.label) tgt=\(String(format: "%.2f", targetFill))s bud=\(String(format: "%.2f", refill.bucketUsed))s write=\(writtenPct)% produce=\(producedPct)% appBuf=\(appBufSec)s bufs=\(f.bufCount) maxgap=\(Int(f.maxGapMs))ms inRate=\(Int(f.inRate)) prog=\(progressMs.map(String.init) ?? "?")ms macVol=\(systemVolume.isFinite ? Int(systemVolume*100) : 0) | \(spkInfo)\(flags.isEmpty ? "" : "  <<< \(flags)")")
+    }
+
+    /// Every refill-controller state change goes to the flight log, the debug log
+    /// and the AI event stream, so a future "why did the pitch move / why is the
+    /// buffer low" is answerable from the record alone.
+    private func logRefillEvent(_ ev: RefillController.Event, slow: Double?, target: Double) {
+        let slowS = slow.map { String(format: "%.2f", $0) } ?? "?"
+        let tgtS = String(format: "%.2f", target)
+        let budS = String(format: "%.2f", refill.bucketUsed)
+        let sessS = String(format: "%.2f", refill.sessionAdded)
+        var name = "", level = "info", msg = "", extra: [String: Any] = [:]
+        switch ev {
+        case .started(let fill, _):
+            name = "refill_start"
+            msg = "refill START: slow fill \(String(format: "%.2f", fill))s vs target \(tgtS)s — stretching by at most +\(String(format: "%.2f", refill.cfg.capEps * 100))% (\(Int(refill.cfg.rampInSec))s ramp, budget \(budS)/\(String(format: "%.2f", refill.cfg.bucketSec))s)"
+        case .easing(let reason, let fill, let added):
+            name = "refill_ease"
+            level = (reason == "noeffect" || reason == "session_cap") ? "warn" : "info"
+            msg = "refill EASE OUT (\(reason)): slow fill \(String(format: "%.2f", fill))s target \(tgtS)s, added \(String(format: "%.2f", added))s this episode"
+            extra = ["reason": reason, "added_s": String(format: "%.2f", added)]
+        case .finished(let reason, let backoff, let added):
+            name = "refill_end"
+            level = backoff > 0 ? "warn" : "info"
+            msg = "refill END (\(reason)): back at ratio 1.0, added \(String(format: "%.2f", added))s, slow fill \(slowS)s target \(tgtS)s"
+                + (backoff > 0 ? " — fill did not improve, backing off \(Int(backoff))s" : "")
+            extra = ["reason": reason, "added_s": String(format: "%.2f", added), "backoff_s": Int(backoff)]
+        case .blocked(let reason):
+            name = "refill_blocked"
+            level = "warn"
+            msg = "refill BLOCKED (\(reason)): slow fill \(slowS)s is under target \(tgtS)s but the \(budS)s budget is spent — waiting for it to leak"
+            extra = ["reason": reason]
+        }
+        dlog(msg)
+        Self.flog("=== \(msg) | session_added=\(sessS)s")
+        var fields: [String: Any] = ["slow_s": slowS, "target_s": tgtS, "budget_used_s": budS,
+                                     "session_added_s": sessS, "state": refill.label]
+        for (k, v) in extra { fields[k] = v }
+        aiEvent(name, level: level, fields: fields)
     }
 
     /// Run one engine API read to completion regardless of what happens to the
@@ -2421,7 +2547,7 @@ final class DALIStore {
                 do {
                     // Join quietly. Reading readiness before restoring volume
                     // avoids reporting a selected-but-disconnected device live.
-                    try await api.setVolume(outputID: sp.id, volume: 0)
+                    try await writeVolume(sp.id, 0)
                     guard streamIsCurrent(generation) else { return }
                     try await api.setSelected(outputID: sp.id, selected: true)
                     guard streamIsCurrent(generation) else { return }
@@ -2570,6 +2696,15 @@ final class DALIStore {
                 let snapshot = sessionSpeakers()
                     .map { ($0.id, $0.offsetMs) }
                 for (id, ms) in snapshot where lastSentOffset[id] != ms {
+                    // During playback an offset is only ever written at session
+                    // start (resetOffsetCache clears this stamp); there is no
+                    // user offset control any more. Anything else — an engine reading that
+                    // disagrees with the model on every 3 s poll — is throttled
+                    // to one attempt per 20 s per speaker instead of a PUT per
+                    // poll; the next poll retries.
+                    if let last = lastOffsetWriteAt[id], Date().timeIntervalSince(last) < 20,
+                       phase == .streaming { continue }
+                    lastOffsetWriteAt[id] = Date()
                     do {
                         try await api.setOffset(outputID: id, offsetMs: ms)
                         lastSentOffset[id] = ms
@@ -2586,7 +2721,7 @@ final class DALIStore {
 
     /// Forget what we believe the engine holds — after a restart or a new
     /// session its output ids and stored offsets may not match ours.
-    func resetOffsetCache() { lastSentOffset.removeAll() }
+    func resetOffsetCache() { lastSentOffset.removeAll(); lastOffsetWriteAt.removeAll() }
 
     /// INSTANT CUT-OFF.
     ///
@@ -2764,7 +2899,13 @@ final class DALIStore {
         // still waiting on AirPlay. One task per flip queued stale mute commands
         // behind newer restores. Share the slider's coalescing lane, which reads
         // the CURRENT target immediately before each write.
-        forceVolumeResync()
+        // Do NOT invalidate the sent-volume cache here (forceVolumeResync did):
+        // that re-sent a value the engine already held on every flip — 569
+        // CUT/restore pairs in the log, each up to four redundant PUTs. The
+        // target crossing zero is already treated as urgent by the push lane,
+        // and a flip that reverts before the pass runs sends nothing at all.
+        prioritizeManualVolumeChange()
+        scheduleVolumePush()
     }
 
     /// The rail itself, run from the level loop (~15 Hz) while streaming. Cheap:
@@ -2827,6 +2968,68 @@ final class DALIStore {
     // and always ends on the latest values. Concurrent pushes used to race,
     // letting a stale high volume land after a newer low one (loud spikes).
     private var pushInFlight = false
+
+    // ENGINE WRITE BUDGET. Every volume / offset / select PUT becomes an RTSP
+    // SET_PARAMETER on OwnTone's single command/player thread. Flight-log
+    // evidence (2026-09-28..30, ~67 h): 7 of 18 sudden 0.1-0.9 s read-ahead
+    // step drops sat within -6..+3 s of a speaker volume write, against ~5 %
+    // of stream time being that close to a write; bursts averaged 6-7 writes
+    // (max 75) because Mac volume keys / slider drags / mute flips each became
+    // their own PUT. So: leading-edge immediate, then at most one write pass
+    // per `volumeMinSpacing`, latest target wins.
+    /// Minimum gap between two volume write passes to the engine. Mute/unmute
+    /// (a target crossing zero), forced resyncs and the resume fade ignore it —
+    /// the instant cut-off and the pop-free fade are worth their writes.
+    private static let volumeMinSpacing: TimeInterval = 1.5
+    /// When the last volume PUT (any speaker, any path) finished, and per output.
+    private var lastVolumeWriteAt = Date.distantPast
+    private var volumeWriteDoneAt: [String: Date] = [:]
+    /// Newest engine-reported volume per output and when that poll STARTED, so a
+    /// reading is only trusted if no write finished after it was requested.
+    private var engineVolumeSeen: [String: (volume: Int, polledAt: Date)] = [:]
+    /// Drift-resend governor: at most once per cool-down and three tries per
+    /// episode (reset as soon as the engine agrees again).
+    private var driftResendAt: [String: Date] = [:]
+    private var driftResendCount: [String: Int] = [:]
+    private var healthPollDeferrals = 0
+    private var lastWriteReportAt = Date()
+    private var lastWriteReportTotal = 0
+    private var lastOffsetWriteAt: [String: Date] = [:]
+
+    /// The single door for volume PUTs from this file: stamps completion time so
+    /// polls can tell whether an engine reading predates our last write.
+    private func writeVolume(_ id: String, _ volume: Int) async throws {
+        defer {
+            let now = Date()
+            lastVolumeWriteAt = now
+            volumeWriteDoneAt[id] = now
+        }
+        try await api.setVolume(outputID: id, volume: volume)
+    }
+
+    /// Writes per minute to the engine, by kind — published so the next flight
+    /// log can be lined up against glitches. Called from the 3 s health tick.
+    private func reportEngineWrites() {
+        let now = Date()
+        guard now.timeIntervalSince(lastWriteReportAt) >= 60 else { return }
+        let total = api.totalWrites
+        let delta = total - lastWriteReportTotal
+        let perMin = Double(delta) / max(now.timeIntervalSince(lastWriteReportAt) / 60, 0.01)
+        lastWriteReportAt = now
+        lastWriteReportTotal = total
+        engineWritesPerMin = perMin
+        guard delta > 0 else { return }
+        let kinds = api.recentWrites(window: 60)
+        dlog(String(format: "engine writes last 60s: %d (%@)", delta,
+                    kinds.sorted { $0.key < $1.key }.map { "\($0.key)=\($0.value)" }.joined(separator: " ")))
+        aiEvent("engine_writes", fields: ["per_min": Int(perMin.rounded()), "total_60s": delta,
+                                          "volume": kinds["volume"] ?? 0, "offset": kinds["offset"] ?? 0,
+                                          "select": kinds["select"] ?? 0, "player": kinds["player"] ?? 0])
+    }
+    /// Engine writes per minute over the last report window (0 until first report).
+    /// Public so the flight-recorder line can append it: `w/min=\(engineWritesPerMin)`.
+    private(set) var engineWritesPerMin: Double = 0
+
     private var volumePushTask: Task<Void, Never>?
     private var volumePushGeneration = 0
     private var pushAgain = false
@@ -2915,7 +3118,7 @@ final class DALIStore {
         }
         speakers.indices.filter { speakers[$0].id == sp.id }.forEach { speakers[$0].health = .connecting }
         // Silence first so a mid-rejoin device never blasts at its own default.
-        try? await api.setVolume(outputID: sp.id, volume: 0)
+        try? await writeVolume(sp.id, 0)
         guard streamIsCurrent(generation) else { return }
         lastSentVolumes[sp.id] = 0
         try? await api.setSelected(outputID: sp.id, selected: false)
@@ -2943,14 +3146,14 @@ final class DALIStore {
         // command storm and one ignored receiver reply can block OwnTone's
         // global command lane.
         volumeFailUntil[sp.id] = nil
-        try? await api.setVolume(outputID: sp.id, volume: 0)
+        try? await writeVolume(sp.id, 0)
         guard streamIsCurrent(generation) else { return }
         try? await Task.sleep(nanoseconds: 180_000_000)
         guard streamIsCurrent(generation),
               let current = speakers.first(where: { $0.id == sp.id }) else { return }
         let target = min(effectiveVolume(current), Int(volumeLimit.rounded()))
         do {
-            try await api.setVolume(outputID: sp.id, volume: target)
+            try await writeVolume(sp.id, target)
             guard streamIsCurrent(generation) else { return }
             lastSentVolumes[sp.id] = target
         } catch {
@@ -2993,6 +3196,35 @@ final class DALIStore {
         scheduleVolumePush()
     }
 
+    /// True when a pending volume change must not wait out the spacing window:
+    /// a forced resync, a target crossing zero (mute / cut / unmute — the
+    /// instant cut-off must stay instant), or a speaker whose engine value we
+    /// do not know at all.
+    private func volumeWriteIsUrgent() -> Bool {
+        if forceVolumePush { return true }
+        let ceiling = Int(volumeLimit.rounded())
+        for sp in sessionSpeakers()
+        where (!sp.enabled || sp.health == .live) && !speakerRecoveryInFlight.contains(sp.id) {
+            guard let prev = lastSentVolumes[sp.id] else {
+                // Unknown engine value: send at once — unless it just failed and
+                // is cooling off (the loop would only skip it again).
+                if let until = volumeFailUntil[sp.id], until > Date() { continue }
+                return true
+            }
+            let v = min(effectiveVolume(sp), ceiling)
+            if v != prev, (v == 0) != (prev == 0) { return true }
+        }
+        return false
+    }
+
+    private func awaitVolumeWriteSlot(generation: Int) async {
+        while !Task.isCancelled, phase == .streaming, generation == volumePushGeneration {
+            let gap = Self.volumeMinSpacing - Date().timeIntervalSince(lastVolumeWriteAt)
+            if gap <= 0 || volumeWriteIsUrgent() { return }
+            try? await Task.sleep(nanoseconds: UInt64(min(gap, 0.25) * 1_000_000_000))
+        }
+    }
+
     private func cancelVolumePush() {
         volumePushGeneration += 1
         volumePushTask?.cancel()
@@ -3017,6 +3249,13 @@ final class DALIStore {
                 }
             }
             repeat {
+                guard !Task.isCancelled, phase == .streaming,
+                      generation == volumePushGeneration else { return }
+                // Leading edge is immediate; a follow-up pass waits out the
+                // spacing window (unless a mute/unmute/forced resync is pending)
+                // and then reads the CURRENT targets — latest wins, so a burst of
+                // key presses or a slider drag lands as 1-2 writes, not a ramp.
+                await awaitVolumeWriteSlot(generation: generation)
                 guard !Task.isCancelled, phase == .streaming,
                       generation == volumePushGeneration else { return }
                 pushAgain = false
@@ -3046,10 +3285,18 @@ final class DALIStore {
                     // Quantize routine updates: ±1 chatter from Mac-volume float
                     // rounding spammed RTSP and killed the PowerNode. Forced
                     // resync (live recovery / fade / cut) always sends exact.
-                    if !force, let prev, abs(prev - v) < 2 { continue }
+                    if !force, let prev, abs(prev - v) < 2, (v == 0) == (prev == 0) { continue }
                     if prev == v { continue }
+                    // The engine already holds what we want (fresh poll, taken
+                    // after our last write to it, within ±1): nothing to send.
+                    if !force, let seen = engineVolumeSeen[id], abs(seen.volume - v) <= 1,
+                       seen.polledAt > (volumeWriteDoneAt[id] ?? .distantPast),
+                       Date().timeIntervalSince(seen.polledAt) < 10 {
+                        lastSentVolumes[id] = v
+                        continue
+                    }
                     do {
-                        try await api.setVolume(outputID: id, volume: v)
+                        try await writeVolume(id, v)
                         guard !Task.isCancelled, phase == .streaming,
                               generation == volumePushGeneration else { return }
                         lastSentVolumes[id] = v
@@ -3102,7 +3349,7 @@ final class DALIStore {
                   generation == streamGeneration else { return }
             let target = min(effectiveVolume(sp), Int(volumeLimit.rounded()))
             do {
-                try await api.setVolume(outputID: sp.id, volume: target)
+                try await writeVolume(sp.id, target)
                 guard !Task.isCancelled, phase == .streaming,
                       generation == streamGeneration else { return }
                 lastSentVolumes[sp.id] = target
@@ -3178,7 +3425,7 @@ final class DALIStore {
         // placeholder id the engine has never heard of.
         for id in ids {
             guard streamIsCurrent(generation) else { return }
-            try? await api.setVolume(outputID: id, volume: 0)
+            try? await writeVolume(id, 0)
         }
         guard streamIsCurrent(generation) else { return }
         try? await Task.sleep(nanoseconds: 1_200_000_000)
@@ -3272,6 +3519,16 @@ final class DALIStore {
         // integral gets rebuilt by accident.
         netDrainSec = 0; debtCapActive = false; debtCapLastLogAt = Date.distantPast
         driftFreeze = "reanchor"
+        // New engine stream: the buffer we were healing no longer exists, and the
+        // next anchor really is a fresh start buffer (no carried fill).
+        anchorCarryFill = nil
+        refillVolHoldSec = 15; refillVolSig = ""
+        if refill.mode != .idle || refill.eps > 0 {
+            dlog(String(format: "refill RESET: engine stream restarted while %@ (eps %.3f%%) — ratio back to 1.0",
+                        refill.label, refill.eps * 100))
+            aiEvent("refill_reset", level: "info", fields: ["state": refill.label])
+        }
+        refill.reset()
         capture.setTargetRatio(1.0)
     }
 
@@ -3419,6 +3676,10 @@ final class DALIStore {
         // Stale echo entries from a previous session would suppress the first
         // volume reconciliation of this one (review finding L6).
         lastReconciledEcho.removeAll()
+        engineVolumeSeen.removeAll()
+        driftResendAt.removeAll(); driftResendCount.removeAll()
+        healthPollDeferrals = 0
+        lastWriteReportAt = Date(); lastWriteReportTotal = api.totalWrites
         resumeFailStreak = 0; resumeCooldownUntil = .distantPast
         healthTask = Task {
             while !Task.isCancelled && phase == .streaming {
@@ -3475,6 +3736,26 @@ final class DALIStore {
                 // so polling now only manufactures "not playing" / "speaker
                 // down" strikes against work that is already in progress.
                 if resumeInFlight { continue }
+                reportEngineWrites()
+                // Do not stack read polls on top of a volume write (in flight,
+                // waiting out its spacing window, or finished < 2 s ago): the
+                // GETs share OwnTone's single HTTP/command thread with the
+                // RTSP SET_PARAMETER, and a poll answered mid-write is also a
+                // stale reading (it produced the "drift engine=18 want=0"
+                // resends). Bounded: at most two ticks (~6 s) are skipped in a
+                // row so wedge detection is delayed, never disabled.
+                if (pushInFlight || Date().timeIntervalSince(lastVolumeWriteAt) < 2),
+                   healthPollDeferrals < 2 {
+                    healthPollDeferrals += 1
+                    continue
+                }
+                healthPollDeferrals = 0
+                // What each speaker SHOULD be at when this poll goes out; a
+                // reading is only evidence of drift if that did not move
+                // while the request was in flight.
+                let pollStartedAt = Date()
+                let wantAtPoll = Dictionary(speakers.map { ($0.id, effectiveVolume($0)) },
+                                            uniquingKeysWith: { a, _ in a })
                 guard let st = try? await api.playerState() else {
                     guard !Task.isCancelled else { break }
                     await noteEngineAPIFailure("player")
@@ -3536,6 +3817,7 @@ final class DALIStore {
                 guard !Task.isCancelled, phase == .streaming else { break }
                 apiDeadStrikes = 0; apiDeadSince = nil
                 applyDiscoveredSpeakers(outs)
+                for o in outs { engineVolumeSeen[o.id] = (o.volume, pollStartedAt) }
 
                 for i in speakers.indices where speakers[i].enabled {
                     guard speakers[i].available else { continue }
@@ -3608,22 +3890,44 @@ final class DALIStore {
                 for sp in speakers where sp.enabled && sp.health == .live
                     && !speakerRecoveryInFlight.contains(sp.id) {
                     if let until = volumeFailUntil[sp.id], until > Date() { continue }
-                    if let o = outs.first(where: { $0.id == sp.id }),
-                       abs(o.volume - effectiveVolume(sp)) > 12 {
-                        // Correct once per DISTINCT echoed value. If the engine
-                        // persistently reports a value >12 from intent (its dB
-                        // curve vs our volumeLimit clamp), re-nil-ing the cache
-                        // every 3s dripped a setVolume command at that device
-                        // forever, which can itself destabilize it.
-                        if lastReconciledEcho[sp.id] != o.volume {
-                            lastReconciledEcho[sp.id] = o.volume
-                            if lastSentVolumes[sp.id] != nil {
-                                dlog("\(sp.name) volume drift engine=\(o.volume) want=\(effectiveVolume(sp)) -> resend")
-                            }
-                            lastSentVolumes[sp.id] = nil
-                            forceVolumePush = true
-                        }
+                    guard let o = outs.first(where: { $0.id == sp.id }) else { continue }
+                    let want = effectiveVolume(sp)
+                    // ROOT CAUSE of "drift engine=18 want=0" / "engine=25 want=38"
+                    // (274 lines, gaps of exactly one or two Mac-volume steps):
+                    // the reading is STALE. The poll's GET is queued on the same
+                    // lane as our writes, so it can be answered with the value
+                    // from before a write that has since been sent (or from
+                    // before a key press moved the target) — then compared with
+                    // the NEWER want. That is not drift, and "correcting" it
+                    // re-sent a value the engine already held. Only a reading
+                    // that no write and no target change overlapped counts.
+                    let settled = !pushInFlight && !fading
+                        && wantAtPoll[sp.id] == want
+                        && lastVolumeWriteAt.addingTimeInterval(2) <= pollStartedAt
+                        && lastRecoveryActivityAt < pollStartedAt
+                        && Date().timeIntervalSince(pollStartedAt) < 6
+                    guard settled else { continue }
+                    guard abs(o.volume - want) > 12 else {
+                        driftResendCount[sp.id] = nil     // engine agrees again: new episode next time
+                        continue
                     }
+                    // Correct once per DISTINCT echoed value. If the engine
+                    // persistently reports a value >12 from intent (its dB
+                    // curve vs our volumeLimit clamp), re-nil-ing the cache
+                    // every 3s dripped a setVolume command at that device
+                    // forever, which can itself destabilize it. On top of that:
+                    // 30 s cool-down and three tries per episode.
+                    guard lastReconciledEcho[sp.id] != o.volume,
+                          Date().timeIntervalSince(driftResendAt[sp.id] ?? .distantPast) >= 30,
+                          (driftResendCount[sp.id] ?? 0) < 3 else { continue }
+                    lastReconciledEcho[sp.id] = o.volume
+                    driftResendAt[sp.id] = Date()
+                    driftResendCount[sp.id, default: 0] += 1
+                    if lastSentVolumes[sp.id] != nil {
+                        dlog("\(sp.name) volume drift engine=\(o.volume) want=\(want) -> resend (try \(driftResendCount[sp.id] ?? 0)/3)")
+                    }
+                    lastSentVolumes[sp.id] = nil
+                    forceVolumePush = true
                 }
                 if sessionSpeakers().contains(where: {
                     $0.health == .live

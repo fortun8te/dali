@@ -133,12 +133,21 @@ final class ReplySlot: @unchecked Sendable {
 
 /// One serial lane per engine port; see the block comment above.
 final class RequestLane: @unchecked Sendable {
-    struct Op { let request: URLRequest; let slot: ReplySlot }
+    /// `coalesceKey`: a write that says "set X to V" is made obsolete by a later
+    /// "set X to W". While the older one is still queued (not yet on the wire) it
+    /// is dropped and its caller told "done" — latest target wins, and a stalled
+    /// engine never receives a backlog of values nobody wants any more.
+    struct Op { let request: URLRequest; let slot: ReplySlot; var coalesceKey: String? = nil; var writeKind: String? = nil }
     private struct State {
         var queue: [Op] = []
         var busy = false
         var notBefore = Date.distantPast
         var wakePending = false
+        /// Every state-changing request that actually reached the wire, so the
+        /// app can publish "engine writes per minute" (each volume / offset /
+        /// select is an RTSP SET_PARAMETER on OwnTone's shared player thread).
+        var writes: [(at: Date, kind: String)] = []
+        var totalWrites = 0
     }
 
     private static let registry = OSAllocatedUnfairLock(initialState: [Int: RequestLane]())
@@ -176,11 +185,39 @@ final class RequestLane: @unchecked Sendable {
     }
 
     func enqueue(_ op: Op) {
-        state.withLock { s in
+        let superseded: [ReplySlot] = state.withLock { s in
             s.queue.removeAll { $0.slot.isResolved }     // callers that gave up
+            var dropped: [ReplySlot] = []
+            if let key = op.coalesceKey {
+                dropped = s.queue.filter { $0.coalesceKey == key }.map(\.slot)
+                s.queue.removeAll { $0.coalesceKey == key }
+            }
             s.queue.append(op)
+            return dropped
         }
+        // Outside the lock: resolving resumes a continuation.
+        for slot in superseded { slot.resolve(.success(Data())) }
         pump()
+    }
+
+    /// Writes that went on the wire in the last `window` seconds, by kind.
+    func recentWrites(window: TimeInterval) -> [String: Int] {
+        let cutoff = Date().addingTimeInterval(-window)
+        return state.withLock { s in
+            s.writes.removeAll { $0.at < Date().addingTimeInterval(-600) }
+            var out: [String: Int] = [:]
+            for w in s.writes where w.at >= cutoff { out[w.kind, default: 0] += 1 }
+            return out
+        }
+    }
+
+    var totalWrites: Int { state.withLock { $0.totalWrites } }
+
+    private func noteWrite(kind: String) {
+        state.withLock { s in
+            s.writes.append((Date(), kind))
+            s.totalWrites += 1
+        }
     }
 
     /// Keep the lane quiet for `seconds` (right after an engine spawn, while its
@@ -232,6 +269,7 @@ final class RequestLane: @unchecked Sendable {
         // closes the socket cleanly, never mid-serve. Loopback: connect is free.
         let session = URLSession(configuration: config)
         defer { session.finishTasksAndInvalidate() }
+        if let kind = op.writeKind { noteWrite(kind: kind) }
         do {
             let (data, resp) = try await session.data(for: op.request)
             guard let http = resp as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
@@ -294,7 +332,7 @@ public struct BeamAPI: Sendable {
     // MARK: requests
 
     private func request(_ method: String, _ path: String, body: Data? = nil,
-                         deadline: TimeInterval? = nil) async throws -> Data {
+                         deadline: TimeInterval? = nil, coalesceKey: String? = nil) async throws -> Data {
         try Task.checkCancellation()
         // Split the query manually: appendingPathComponent would escape "?".
         var comps = URLComponents(url: baseURL, resolvingAgainstBaseURL: false)!
@@ -318,7 +356,10 @@ public struct BeamAPI: Sendable {
             slot.resolve(.failure(BeamAPIError(what: "\(method) \(path) no reply in \(Int(limit))s")))
         }
         defer { timer.cancel() }
-        lane.enqueue(RequestLane.Op(request: req, slot: slot))
+        // Anything but a GET changes engine state; count it under a coarse kind.
+        let kind: String? = method == "GET" ? nil : (coalesceKey?.split(separator: ":").first.map(String.init)
+            ?? (path.hasPrefix("/api/outputs") ? "select" : "player"))
+        lane.enqueue(RequestLane.Op(request: req, slot: slot, coalesceKey: coalesceKey, writeKind: kind))
         // Cancelling THIS task only stops the wait; the lane keeps (or drops,
         // if not yet written) the request itself.
         return try await withTaskCancellationHandler {
@@ -350,9 +391,16 @@ public struct BeamAPI: Sendable {
         _ = try await request("PUT", "/api/outputs/\(outputID)", body: body)
     }
 
+    /// Engine write counts by kind ("volume", "offset", "select", "player") over
+    /// the last `window` seconds — each one is an RTSP command on OwnTone's shared
+    /// player thread, so this is the number to watch when audio glitches.
+    public func recentWrites(window: TimeInterval = 60) -> [String: Int] { lane.recentWrites(window: window) }
+    public var totalWrites: Int { lane.totalWrites }
+
     public func setVolume(outputID: String, volume: Int) async throws {
         let body = try JSONSerialization.data(withJSONObject: ["volume": max(0, min(100, volume))])
-        _ = try await request("PUT", "/api/outputs/\(outputID)", body: body)
+        _ = try await request("PUT", "/api/outputs/\(outputID)", body: body,
+                              coalesceKey: "volume:\(outputID)")
     }
 
     /// Per-speaker playback offset in milliseconds (positive = this speaker
@@ -363,7 +411,8 @@ public struct BeamAPI: Sendable {
     /// line — beyond ~100ms something else is wrong.
     public func setOffset(outputID: String, offsetMs: Int) async throws {
         let body = try JSONSerialization.data(withJSONObject: ["offset_ms": max(-250, min(250, offsetMs))])
-        _ = try await request("PUT", "/api/outputs/\(outputID)", body: body)
+        _ = try await request("PUT", "/api/outputs/\(outputID)", body: body,
+                              coalesceKey: "offset:\(outputID)")
     }
 
     public func setMasterVolume(_ volume: Int) async throws {

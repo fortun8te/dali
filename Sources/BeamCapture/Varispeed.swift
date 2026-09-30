@@ -151,3 +151,204 @@ struct Varispeed {
         for k in 0..<hist.count { hist[k] = 0 }
     }
 }
+
+/// SELF-HEALING REFILL CONTROLLER — the one-sided, low-authority replacement for
+/// the retired closed-loop rate matcher.
+///
+/// WHY. With the varispeed pinned at 1.0 the engine's read-ahead ("fill") starts
+/// at the start buffer, wears down ~0.01-0.02 s per 10 min, and takes sudden
+/// 0.1-0.3 s step drops (engine stalls on RTSP volume writes catch up by reading
+/// ahead). Nothing ever gives the depth back, so after a few hours any jitter is
+/// an underrun. The old matcher fought the engine's own pacing in BOTH directions
+/// and its damage (phantom fill ramps, lockouts, drains into a suspend) was worse
+/// than the disease. This controller is deliberately the opposite:
+///
+///  * ONE-SIDED. It only ever STRETCHES (ratio < 1, more output frames than
+///    input, i.e. it ADDS audio). Fill above target => it does nothing. It can
+///    never remove audio, so it cannot starve the engine (no read_deficit debt).
+///  * DEAD BAND + HYSTERESIS. Arms only when the (already smoothed) fill sits
+///    more than `bandSec` under target for `persistSec`, and stands down once
+///    fill is within `exitBandSec` of target. Hysteresis is 0.07 s wide, so it
+///    cannot chatter around a threshold.
+///  * LOW AUTHORITY, SLEW-LIMITED. eps (= 1 - ratio) is capped at 0.25 % (~4
+///    cents) and moves at capEps/rampSec per second: >= 8 s in, >= 8 s out, no
+///    steps, no warble. Step-drops are therefore healed slowly, never chased.
+///  * HARD BUDGET. A leaky bucket of ADDED AUDIO (0.6 s per rolling 10 min), a
+///    per-session ceiling, and a "did it work?" check: if 60 s of stretching did
+///    not lift fill by `noEffectGainSec` the measurement (or the plant) is not
+///    what we think, so stop and back off 10 min (doubling, up to 80 min).
+///  * FREEZES ON BAD DATA. Any invalid-measurement reason from the flight loop
+///    holds eps for at most `holdMaxSec` (a soft blip), or eases out at once when
+///    the pipeline itself was discontinuous (`hard`). Nothing is learned or
+///    integrated, so there is nothing to wind up.
+///
+/// The sign convention matches the plant: fill' = +eps while stretching.
+struct RefillController {
+    struct Config {
+        var bandSec = 0.10          // arm when smoothed fill < target - band
+        var exitBandSec = 0.03      // stand down when smoothed fill >= target - exitBand
+        var capEps = 0.0025         // hard authority: 0.25 % ~ 4.3 cents of pitch
+        var rampInSec = 8.0         // time to slew 0 -> capEps (>= 5 s required)
+        var rampOutSec = 8.0        // time to slew capEps -> 0
+        var settleSec = 15.0        // continuous valid seconds required before arming
+        var persistSec = 15.0       // deficit must persist this long (valid seconds)
+        var noEffectAfterSec = 60.0 // active seconds before judging "did fill improve"
+        var noEffectGainSec = 0.03  // required improvement (expected ~0.09 s)
+        var backoffSec = 600.0      // base back-off after a no-effect trip (doubles, max x8)
+        var bucketSec = 0.6         // budget: seconds of audio we may add per window
+        var bucketWindowSec = 600.0
+        var sessionCapSec = 3.0     // absolute ceiling per session
+        var holdMaxSec = 20.0       // how long a soft invalid reading may hold eps
+        var pGain = 0.025           // eps per second of deficit (cap reached at 0.10 s)
+        var floorEps = 0.0006       // minimum useful stretch while healing
+        var maxStepSec = 2.0        // dt clamp so a late tick cannot jump the slew
+    }
+
+    enum Mode: String { case idle, stretching, easing }
+    enum Event {
+        case started(fill: Double, target: Double)
+        case easing(reason: String, fill: Double, addedSec: Double)
+        case finished(reason: String, backoffSec: Double, addedSec: Double)
+        case blocked(reason: String)
+    }
+
+    var cfg = Config()
+    private(set) var mode = Mode.idle
+    /// Current stretch fraction, >= 0. The commanded varispeed ratio is 1 - eps.
+    private(set) var eps = 0.0
+    private(set) var validSec = 0.0
+    private var lowSec = 0.0
+    private var activeSec = 0.0
+    private var invalidSec = 0.0
+    private var startFill = 0.0
+    /// Lowest smoothed fill seen this episode. The smoothing lags a step drop by ~20 s,
+    /// so `startFill` can still be ABOVE the true level; gain is judged from the trough.
+    private var minFill = 0.0
+    private var episodeAdded = 0.0
+    private var easeReason = ""
+    private var pendingBackoff = 0.0
+    private(set) var backoffLeft = 0.0
+    private var noEffectStreak = 0
+    private(set) var bucketUsed = 0.0
+    private(set) var sessionAdded = 0.0
+    private var disabled = false
+    private var blockedLogged = false
+
+    /// Short state for logs and health: idle / arming / stretching / easing / backoff.
+    var label: String {
+        switch mode {
+        case .stretching: return "stretching"
+        case .easing: return "easing"
+        case .idle:
+            if disabled { return "disabled" }
+            if backoffLeft > 0 { return "backoff" }
+            return lowSec > 0 ? "arming" : "idle"
+        }
+    }
+
+    /// Back to a bit-exact 1.0 with a clean slate (new stream / engine restart).
+    /// The capture side slew-limits the actual ratio, so this never steps audio.
+    mutating func reset() {
+        let c = cfg
+        self = RefillController()
+        cfg = c
+    }
+
+    /// One tick (~1 s). `fillSlow` is the smoothed end-to-end fill in seconds;
+    /// `holdReason` is non-empty whenever the measurement is not trustworthy;
+    /// `hard` marks a pipeline discontinuity (eases out immediately).
+    @discardableResult
+    mutating func update(dt rawDt: Double, target: Double, fillSlow: Double?,
+                         holdReason: String, hard: Bool) -> Event? {
+        let dt = min(max(rawDt.isFinite ? rawDt : 1.0, 0.05), cfg.maxStepSec)
+        bucketUsed = max(0, bucketUsed - cfg.bucketSec / cfg.bucketWindowSec * dt)
+        if backoffLeft > 0 { backoffLeft = max(0, backoffLeft - dt) }
+        var event: Event?
+        let fs = fillSlow.flatMap { $0.isFinite ? $0 : nil }
+        let valid = holdReason.isEmpty && fs != nil && target.isFinite
+
+        if !valid {
+            validSec = 0; lowSec = 0
+            if mode == .stretching {
+                invalidSec += dt
+                if hard || invalidSec > cfg.holdMaxSec {
+                    event = beginEasing("hold:" + (holdReason.isEmpty ? "noanchor" : holdReason),
+                                        fill: fs ?? startFill)
+                }
+            }
+        } else if let fs {
+            invalidSec = 0
+            validSec += dt
+            let deficit = target - fs
+            switch mode {
+            case .idle:
+                if !disabled, backoffLeft <= 0, validSec >= cfg.settleSec, deficit > cfg.bandSec {
+                    lowSec += dt
+                    if lowSec >= cfg.persistSec {
+                        if bucketUsed >= cfg.bucketSec {
+                            // Stay armed but do nothing; say so once, not every second.
+                            if !blockedLogged { blockedLogged = true; event = .blocked(reason: "budget") }
+                        } else {
+                            mode = .stretching
+                            activeSec = 0; lowSec = 0; startFill = fs; minFill = fs; episodeAdded = 0
+                            blockedLogged = false
+                            event = .started(fill: fs, target: target)
+                        }
+                    }
+                } else {
+                    lowSec = 0
+                    if deficit <= cfg.bandSec { blockedLogged = false }
+                }
+            case .stretching:
+                activeSec += dt
+                minFill = min(minFill, fs)
+                if deficit <= cfg.exitBandSec {
+                    noEffectStreak = 0
+                    event = beginEasing("healed", fill: fs)
+                } else if bucketUsed >= cfg.bucketSec {
+                    event = beginEasing("budget", fill: fs)
+                } else if sessionAdded >= cfg.sessionCapSec {
+                    disabled = true
+                    event = beginEasing("session_cap", fill: fs)
+                } else if activeSec >= cfg.noEffectAfterSec, fs - minFill < cfg.noEffectGainSec {
+                    noEffectStreak += 1
+                    pendingBackoff = cfg.backoffSec * Double(1 << min(noEffectStreak - 1, 3))
+                    event = beginEasing("noeffect", fill: fs)
+                }
+            case .easing:
+                break
+            }
+        }
+
+        // Slew. Up only while stretching on a valid reading; held on a soft
+        // invalid reading; otherwise down. Never a step.
+        let slewIn = cfg.capEps / cfg.rampInSec * dt
+        let slewOut = cfg.capEps / cfg.rampOutSec * dt
+        if mode == .stretching {
+            if valid, let fs {
+                let want = min(cfg.capEps, max(cfg.floorEps, cfg.pGain * max(target - fs, 0)))
+                if eps < want { eps = min(want, eps + slewIn) }
+                else { eps = max(want, eps - slewOut) }
+            }
+            // else: hold eps unchanged
+        } else {
+            eps = max(0, eps - slewOut)
+            if mode == .easing, eps == 0 {
+                mode = .idle
+                if pendingBackoff > 0 { backoffLeft = pendingBackoff }
+                event = .finished(reason: easeReason, backoffSec: pendingBackoff, addedSec: episodeAdded)
+                pendingBackoff = 0
+                lowSec = 0
+            }
+        }
+        let added = eps * dt
+        bucketUsed += added; sessionAdded += added; episodeAdded += added
+        return event
+    }
+
+    private mutating func beginEasing(_ reason: String, fill: Double) -> Event {
+        mode = .easing
+        easeReason = reason
+        return .easing(reason: reason, fill: fill, addedSec: episodeAdded)
+    }
+}

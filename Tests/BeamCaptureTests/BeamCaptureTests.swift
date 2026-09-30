@@ -157,4 +157,111 @@ final class BeamCaptureTests: XCTestCase {
         let inp = ramp(frames: 1000)
         XCTAssertEqual(vs.process(inp, ratio: 1.0), inp)
     }
+
+    // MARK: RefillController
+
+    /// Closed-loop harness: plant fill' = +eps, measurement = the same 20 s EMA the
+    /// flight loop uses, controller fed once per second.
+    private func runRefill(_ rc: inout RefillController, seconds: Int, realFill: inout Double,
+                           slow: inout Double, respond: Bool = true,
+                           drop: (Int) -> Double = { _ in 0 },
+                           hold: (Int) -> String = { _ in "" }) -> (maxEps: Double, maxSlew: Double, events: [RefillController.Event]) {
+        var maxEps = 0.0, maxSlew = 0.0, prev = rc.eps
+        var events: [RefillController.Event] = []
+        for t in 0..<seconds {
+            realFill += drop(t)
+            slow += (1 - exp(-1.0 / 20.0)) * (realFill - slow)
+            let h = hold(t)
+            if let e = rc.update(dt: 1, target: 0.5, fillSlow: slow, holdReason: h, hard: false) { events.append(e) }
+            if respond { realFill += rc.eps }
+            maxEps = max(maxEps, rc.eps); maxSlew = max(maxSlew, abs(rc.eps - prev)); prev = rc.eps
+        }
+        return (maxEps, maxSlew, events)
+    }
+
+    func testRefillIdleIsExactlyZeroAtTargetOrAbove() {
+        var rc = RefillController()
+        var real = 0.5, slow = 0.5
+        var r = runRefill(&rc, seconds: 600, realFill: &real, slow: &slow)
+        XCTAssertEqual(rc.eps, 0); XCTAssertEqual(r.maxEps, 0); XCTAssertTrue(r.events.isEmpty)
+        // A buffer that is too FULL is never touched (one-sided).
+        real = 1.6; slow = 1.6
+        r = runRefill(&rc, seconds: 600, realFill: &real, slow: &slow)
+        XCTAssertEqual(r.maxEps, 0); XCTAssertEqual(rc.mode, .idle)
+        // Inside the dead band: still nothing.
+        real = 0.42; slow = 0.42
+        r = runRefill(&rc, seconds: 600, realFill: &real, slow: &slow)
+        XCTAssertEqual(r.maxEps, 0)
+    }
+
+    func testRefillHealsStepDropSlowlyAndReturnsToExactUnity() {
+        var rc = RefillController()
+        var real = 0.5, slow = 0.5
+        // A 0.25 s step drop at t = 60 s, then 20 minutes to recover.
+        let r = runRefill(&rc, seconds: 1200, realFill: &real, slow: &slow,
+                          drop: { $0 == 60 ? -0.25 : 0 })
+        XCTAssertLessThanOrEqual(r.maxEps, 0.0025 + 1e-12)          // 0.25 % authority cap
+        XCTAssertGreaterThan(r.maxEps, 0.0020)                        // and it does use it
+        XCTAssertLessThanOrEqual(r.maxSlew, 0.0025 / 8 + 1e-9)        // >= 8 s ramp, no steps
+        XCTAssertEqual(rc.eps, 0)                                     // exactly 1.0 again
+        XCTAssertEqual(rc.mode, .idle)
+        XCTAssertEqual(real, 0.5, accuracy: 0.06)                     // healed, little overshoot
+        XCTAssertLessThan(rc.sessionAdded, 0.4)
+        var started = 0, ended = 0
+        for e in r.events { if case .started = e { started += 1 }; if case .finished = e { ended += 1 } }
+        XCTAssertEqual(started, 1); XCTAssertEqual(ended, 1)          // no chatter
+    }
+
+    func testRefillNoEffectStopsAndBacksOff() {
+        var rc = RefillController()
+        var real = 0.3, slow = 0.3
+        // The plant ignores us (or the measurement lies): give up after ~60 s of
+        // stretching, stay at 1.0 for the whole back-off.
+        let r = runRefill(&rc, seconds: 500, realFill: &real, slow: &slow, respond: false)
+        var noEffect = false
+        for e in r.events { if case .finished(let reason, let backoff, _) = e, reason == "noeffect", backoff >= 600 { noEffect = true } }
+        XCTAssertTrue(noEffect)
+        XCTAssertEqual(rc.eps, 0)
+        XCTAssertEqual(rc.label, "backoff")
+        XCTAssertLessThan(rc.sessionAdded, 0.30)
+    }
+
+    func testRefillBudgetBoundsAddedAudioWhateverTheMeasurementSays() {
+        var rc = RefillController()
+        // Worst case: the measurement is pinned far below target forever (and the
+        // "plant" is assumed to respond), for 10 hours. Added audio stays bounded.
+        for _ in 0..<36_000 {
+            rc.update(dt: 1, target: 0.5, fillSlow: 0.0, holdReason: "", hard: false)
+        }
+        XCTAssertLessThanOrEqual(rc.sessionAdded, rc.cfg.sessionCapSec + 0.01)
+        XCTAssertEqual(rc.mode, .idle)
+        XCTAssertEqual(rc.eps, 0)
+    }
+
+    func testRefillHoldsOnSoftInvalidAndEasesOnHardWithoutSteps() {
+        var rc = RefillController()
+        var real = 0.3, slow = 0.3
+        _ = runRefill(&rc, seconds: 80, realFill: &real, slow: &slow)
+        XCTAssertEqual(rc.mode, .stretching)
+        let e0 = rc.eps
+        XCTAssertGreaterThan(e0, 0.001)
+        // Soft invalid reading: eps is held, not dropped and not raised.
+        rc.update(dt: 1, target: 0.5, fillSlow: 0.3, holdReason: "apislow", hard: false)
+        XCTAssertEqual(rc.eps, e0, accuracy: 1e-12)
+        // Hard discontinuity: eases out at the slew rate, never a step.
+        rc.update(dt: 1, target: 0.5, fillSlow: nil, holdReason: "taprebuild", hard: true)
+        XCTAssertEqual(rc.mode, .easing)
+        XCTAssertGreaterThanOrEqual(rc.eps, e0 - 0.0025 / 8 - 1e-12)
+        for _ in 0..<12 { rc.update(dt: 1, target: 0.5, fillSlow: nil, holdReason: "noanchor", hard: true) }
+        XCTAssertEqual(rc.eps, 0); XCTAssertEqual(rc.mode, .idle)
+    }
+
+    func testRefillDoesNotArmInsideSettleWindow() {
+        var rc = RefillController()
+        // Volume hold right up to second 20: no stretch may start before 15 valid s.
+        for t in 0..<34 {
+            rc.update(dt: 1, target: 0.5, fillSlow: 0.2, holdReason: t < 20 ? "volume" : "", hard: false)
+            XCTAssertEqual(rc.eps, 0, "t=\(t)")
+        }
+    }
 }
