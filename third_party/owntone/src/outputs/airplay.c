@@ -2127,7 +2127,7 @@ packet_send(struct airplay_session *session, struct rtp_packet *pkt)
                                  + now.tv_nsec - session->send_blocked_since.tv_nsec;
               // Well inside the 700ms presentation buffer. Persistent failure
               // still takes the normal reconnect path rather than going silent.
-              if (elapsed_ns >= 0 && elapsed_ns < 250000000)
+              if (elapsed_ns >= 0 && elapsed_ns < 1500000000)
                 return -1;
             }
         }
