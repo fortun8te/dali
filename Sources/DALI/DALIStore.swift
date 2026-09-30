@@ -1426,13 +1426,14 @@ final class DALIStore {
         guard recoveryGeneration == streamGeneration else { return }
         await stopSpotify()
         guard recoveryGeneration == streamGeneration else { return }
+        lastTeardownAt = Date()
         try? await Task.sleep(nanoseconds: 1_000_000_000)
         guard recoveryGeneration == streamGeneration,
               phase == .starting else { return }
 
         phase = .idle
         captureWatchdogInFlight = false
-        startStream()
+        startStream(reason: "capture recovery")
     }
 
     /// If the automatic room restart also fails, stop claiming the room is live
@@ -1811,6 +1812,7 @@ final class DALIStore {
     private func bootEngine() async {
         do {
             try await supervisor.start()
+            lastEngineStartAt = Date()
             ptpDegraded = await supervisor.ptpAvailable == false
             if ptpDegraded { dlog("PTP degraded — front/back sync may drift (NTP-only)") }
             await refreshSpeakers()
@@ -1853,6 +1855,18 @@ final class DALIStore {
             dlog("engine restart ignored: one already in flight")
             return
         }
+        // A restart is a deliberate, disruptive act (kills the engine and, if
+        // streaming, rebuilds the room). It used to also run in the middle of a
+        // start, killing it. It is logged here because it was silent: the
+        // pause -> SIGTERM -> relaunch -> second "stream started" sequence in the
+        // logs was this function.
+        guard phase != .starting else {
+            dlog("engine restart ignored: a start is in progress")
+            return
+        }
+        dlog("engine restart requested (phase \(phase == .streaming ? "streaming" : "idle/error"))")
+        aiEvent("engine_restart", level: "warn", fields: ["phase": phase == .streaming ? "streaming" : "other"])
+        lastTeardownAt = Date()
         engineRestartInFlight = true
         let resumeMirror = phase == .streaming && !playerMode
         streamGeneration += 1
@@ -1888,11 +1902,14 @@ final class DALIStore {
             guard generation == streamGeneration else { return }
             do {
                 try await supervisor.restart()
+                lastEngineStartAt = Date()
                 guard generation == streamGeneration else { return }
                 await refreshSpeakers()
                 guard generation == streamGeneration else { return }
                 phase = .idle
-                if resumeMirror { startStream() }
+                // startStream waits for engineRestartInFlight; release it first.
+                engineRestartInFlight = false
+                if resumeMirror { startStream(reason: "engine restart") }
             } catch {
                 guard generation == streamGeneration else { return }
                 phase = .error("The audio engine could not restart.\n\(error)")
@@ -2004,6 +2021,83 @@ final class DALIStore {
     /// already failed cleanly.
     private var streamGeneration = 0
 
+    /// When the room was last torn down (stop, capture-recovery restart, engine
+    /// restart, failed start). A new start waits out the speakers' own teardown
+    /// of that session (`settleAfterTeardown`) instead of racing it.
+    private var lastTeardownAt = Date.distantPast
+    /// When the engine process last came up. A fresh engine has no mDNS view and
+    /// no sessions yet; selecting outputs into that gap is what failed BOTH
+    /// speakers at once (owntone.log: 5 of 6 "failed to activate" episodes on
+    /// 2026-09-30 came 3-37 s after an engine (re)start, none after a plain
+    /// stop -> start on a running engine).
+    private var lastEngineStartAt = Date.distantPast
+
+    /// Wait until the speakers have let go of the previous session: at least
+    /// `minSettle` s after the teardown was issued, then until the engine
+    /// reports none of this room's outputs connected/streaming (bounded).
+    private func settleAfterTeardown(gen: Int) async {
+        let minSettle = 2.5, maxWait = 6.0
+        let sinceTeardown = Date().timeIntervalSince(lastTeardownAt)
+        let sinceEngine = Date().timeIntervalSince(lastEngineStartAt)
+        let floor = max(sinceTeardown < 30 ? minSettle - sinceTeardown : 0,
+                        sinceEngine < 30 ? 3.0 - sinceEngine : 0)
+        if floor > 0 { try? await Task.sleep(nanoseconds: UInt64(floor * 1_000_000_000)) }
+        guard sinceTeardown < 30 else { return }
+        let names = Set(sessionSpeakers().map(\.name))
+        let deadline = Date().addingTimeInterval(maxWait)
+        while Date() < deadline, phase == .starting, gen == streamGeneration {
+            guard let outs = try? await api.outputs() else { break }
+            let busy = outs.filter { names.contains($0.name) && ($0.streaming == true || $0.connected == true) }
+            if busy.isEmpty { return }
+            try? await Task.sleep(nanoseconds: 300_000_000)
+        }
+        if phase == .starting, gen == streamGeneration {
+            dlog("start settle: previous session still reported after \(Int(maxWait)) s; proceeding")
+        }
+    }
+
+    /// Activation check for a start: per speaker, connected-or-streaming (AP2
+    /// often stays connected-only while carrying audio). Retries re-assert the
+    /// FULL output list, which keeps the shared AirPlay 2 session intact; a
+    /// per-member deselect is the last resort and both are re-added after it.
+    /// Returns nil when the start was superseded.
+    private func verifyStartupActivation(chosen: [RoomSpeaker], gen: Int) async -> Set<String>? {
+        let all = chosen.map(\.id)
+        func current() -> Bool { phase == .starting && gen == streamGeneration }
+        func names(_ m: Set<String>) -> String {
+            chosen.filter { m.contains($0.id) }.map(\.name).joined(separator: ", ")
+        }
+        var missing = await awaitOutputsReady(ids: Set(all), timeoutMs: 6_000)
+        guard current() else { return nil }
+        for (attempt, backoffMs, waitMs) in [(1, 0, 8_000), (2, 2_000, 10_000)] where !missing.isEmpty {
+            dlog("startup speakers not ready: \(names(missing)) -> re-assert full output list (try \(attempt))")
+            aiEvent("startup_speaker_retry", level: "warn",
+                    fields: ["attempt": attempt, "speakers": names(missing), "mode": "reassert"])
+            if backoffMs > 0 {
+                try? await Task.sleep(nanoseconds: UInt64(backoffMs) * 1_000_000)
+                guard current() else { return nil }
+            }
+            try? await api.setOutputs(ids: all)
+            missing = await awaitOutputsReady(ids: missing, timeoutMs: waitMs)
+            guard current() else { return nil }
+        }
+        if !missing.isEmpty {
+            dlog("startup speakers still not ready: \(names(missing)) -> last resort: per-member rejoin, then re-add both")
+            aiEvent("startup_speaker_retry", level: "warn",
+                    fields: ["attempt": 3, "speakers": names(missing), "mode": "hard"])
+            for sp in chosen where missing.contains(sp.id) {
+                guard current() else { return nil }
+                try? await api.setSelected(outputID: sp.id, selected: false)
+            }
+            try? await Task.sleep(nanoseconds: 1_500_000_000)
+            guard current() else { return nil }
+            try? await api.setOutputs(ids: all)
+            missing = await awaitOutputsReady(ids: missing, timeoutMs: 10_000)
+            guard current() else { return nil }
+        }
+        return missing
+    }
+
     func toggleStream() {
         phase.isOn ? stopStream() : startStream()
     }
@@ -2017,13 +2111,21 @@ final class DALIStore {
         phase = .idle
         dlog("retry after error")
         switch mode {
-        case .mirror: startStream()
+        case .mirror: startStream(reason: "retry after error")
         case .player: shuffleAll()
         }
     }
 
-    func startStream() {
-        guard !phase.isOn else { return }
+    /// Single-flight and idempotent: a start while `.starting`/`.streaming` is a
+    /// no-op (the phase flips synchronously on the main actor, so two callers
+    /// can never both pass this guard). `reason` names the caller in the log so
+    /// an unexpected second start is attributable.
+    func startStream(reason: String = "user") {
+        guard !phase.isOn else {
+            dlog("start ignored (\(reason)): already \(phase == .streaming ? "streaming" : "starting")")
+            return
+        }
+        dlog("start requested (\(reason))")
         sessionMembership.reset()
         streamGeneration += 1
         let gen = streamGeneration
@@ -2043,12 +2145,35 @@ final class DALIStore {
         networkSettleTask?.cancel(); networkSettleTask = nil
         Task { @MainActor in
             do {
-                if await !api.isUp() { try await supervisor.start() }
+                // An engine restart owns the engine until it finishes.
+                while engineRestartInFlight, phase == .starting, gen == streamGeneration {
+                    try? await Task.sleep(nanoseconds: 250_000_000)
+                }
+                guard phase == .starting, gen == streamGeneration else { return }
+                if await !api.isUp() {
+                    try await supervisor.start()
+                    lastEngineStartAt = Date()
+                }
                 ptpDegraded = await supervisor.ptpAvailable == false
                 if ptpDegraded { dlog("PTP degraded at stream start — will show NEEDS YOU") }
                 guard phase == .starting, gen == streamGeneration else { return }
+                // The previous session (and a fresh engine) must settle before
+                // the same speakers are selected again.
+                await settleAfterTeardown(gen: gen)
+                guard phase == .starting, gen == streamGeneration else { return }
                 resolveSavedSource()
                 await refreshSpeakers()
+                // A fresh engine has not discovered the speakers yet.
+                if Date().timeIntervalSince(lastEngineStartAt) < 30 {
+                    var tries = 0
+                    while tries < 8, phase == .starting, gen == streamGeneration,
+                          sessionSpeakers().contains(where: { $0.enabled && !$0.available }) {
+                        tries += 1
+                        try? await Task.sleep(nanoseconds: 750_000_000)
+                        await refreshSpeakers()
+                    }
+                    guard phase == .starting, gen == streamGeneration else { return }
+                }
                 // Select the whole session set (front/back always, enabled extras)
                 // so toggling a pair member later only mutes it, never changes the
                 // group, preserving sync.
@@ -2146,54 +2271,28 @@ final class DALIStore {
                     return
                 }
                 // Do not trust `selected`: OwnTone persists that preference even
-                // when the actual AirPlay session is stopped or failed. Wait for
-                // connected OR streaming (AirPlay 2 often stays connected-only).
-                // Soft re-assert first; hard deselect/select at most ONCE — AP2
-                // shared sessions die when any member is deselected.
-                // First wait 6 s (was 15 s). Healthy starts are ready in ~1-3 s
-                // (182 stop->"stream started" restarts: 171 took <=4 s end to
-                // end), and when they are NOT, the soft re-select is what fixes
-                // it — immediately: 00:13:53 and 19:32:41 went "not ready ->
-                // soft re-select -> stream started" within 1 s, after sitting
-                // silent through the full 15 s first (at 00:13:27 the user gave
-                // up and hit stop 5 s after it). The soft wait grows 8 -> 12 s
-                // so a slow-but-progressing connect keeps the same total budget.
-                var missing = await awaitOutputsReady(ids: Set(chosen.map(\.id)), timeoutMs: 6_000)
-                guard phase == .starting, gen == streamGeneration else { return }
+                // when the actual AirPlay session is stopped or failed. Activation
+                // is verified per speaker and retried gently (full output list
+                // re-asserted, partner untouched); see verifyStartupActivation.
+                guard let missing = await verifyStartupActivation(chosen: chosen, gen: gen) else { return }
                 if !missing.isEmpty {
                     let names = chosen.filter { missing.contains($0.id) }.map(\.name).joined(separator: ", ")
-                    dlog("startup speakers not ready: \(names) -> soft re-select")
-                    aiEvent("startup_speaker_retry", level: "warn", fields: ["attempt": 1, "speakers": names, "mode": "soft"])
-                    try? await api.setOutputs(ids: chosen.map(\.id))
-                    missing = await awaitOutputsReady(ids: missing, timeoutMs: 12_000)
-                }
-                guard phase == .starting, gen == streamGeneration else { return }
-                if !missing.isEmpty {
-                    let names = chosen.filter { missing.contains($0.id) }.map(\.name).joined(separator: ", ")
-                    dlog("startup speakers still not ready: \(names) -> one hard rejoin")
-                    aiEvent("startup_speaker_retry", level: "warn", fields: ["attempt": 2, "speakers": names, "mode": "hard"])
-                    for sp in chosen where missing.contains(sp.id) {
-                        guard phase == .starting, gen == streamGeneration else { return }
-                        try? await api.setSelected(outputID: sp.id, selected: false)
+                    guard missing.count < chosen.count else {
+                        capture.stop()
+                        lastTeardownAt = Date()
+                        try? await api.stop()
+                        guard gen == streamGeneration else { return }
+                        markHealth(of: chosen.map(\.id), .off)
+                        throw BeamAPIError(what: "Speakers did not connect: \(names)")
                     }
-                    try? await Task.sleep(nanoseconds: 750_000_000)
-                    guard phase == .starting, gen == streamGeneration else { return }
-                    for sp in chosen where missing.contains(sp.id) {
-                        guard phase == .starting, gen == streamGeneration else { return }
-                        try? await api.setSelected(outputID: sp.id, selected: true)
-                    }
-                    missing = await awaitOutputsReady(ids: missing, timeoutMs: 12_000)
-                }
-                guard phase == .starting, gen == streamGeneration else { return }
-                guard missing.isEmpty else {
-                    let names = chosen.filter { missing.contains($0.id) }.map(\.name).joined(separator: ", ")
-                    capture.stop()
-                    try? await api.stop()
-                    guard gen == streamGeneration else { return }
-                    markHealth(of: chosen.map(\.id), .off)
-                    throw BeamAPIError(what: "Speakers did not connect: \(names)")
+                    // One speaker is playing: keep it playing. The other stays
+                    // visible as `.trouble` and the health loop keeps rejoining it
+                    // with backoff (never abandoned, never tearing the partner down).
+                    dlog("stream starting with \(names) not yet connected -> health loop keeps rejoining it")
+                    aiEvent("start_partial", level: "warn", fields: ["missing": names])
                 }
                 markHealth(of: chosen.map(\.id), .live)
+                markHealth(of: Array(missing), .trouble)
                 // Output ids are session-scoped, so the engine's stored offsets
                 // do not necessarily follow a new session — re-assert zero.
                 resetOffsetCache()
@@ -2207,6 +2306,7 @@ final class DALIStore {
             } catch let e as ProcessTap.TapError {
                 guard gen == streamGeneration else { return }
                 capture.stop()
+                lastTeardownAt = Date()
                 try? await api.stop()
                 guard gen == streamGeneration else { return }
                 await supervisor.setResumePlayback(false)
@@ -2216,6 +2316,7 @@ final class DALIStore {
             } catch {
                 guard gen == streamGeneration else { return }
                 capture.stop()
+                lastTeardownAt = Date()
                 try? await api.stop()
                 guard gen == streamGeneration else { return }
                 await supervisor.setResumePlayback(false)
@@ -2230,6 +2331,7 @@ final class DALIStore {
     }
 
     func stopStream() {
+        lastTeardownAt = Date()
         streamGeneration += 1
         let generation = streamGeneration
         captureWatchdogInFlight = false
@@ -3125,11 +3227,22 @@ final class DALIStore {
         try? await writeVolume(sp.id, 0)
         guard streamIsCurrent(generation) else { return }
         lastSentVolumes[sp.id] = 0
-        try? await api.setSelected(outputID: sp.id, selected: false)
-        guard streamIsCurrent(generation) else { return }
-        try? await Task.sleep(nanoseconds: 750_000_000)
-        guard streamIsCurrent(generation) else { return }
-        try? await api.setSelected(outputID: sp.id, selected: true)
+        // GENTLE FIRST. Re-asserting the whole output list keeps the shared
+        // AirPlay 2 session (a per-member deselect can take the PARTNER down
+        // with it: the "it plays one or the other" failure). Only after two
+        // gentle failures is this one member hard-cycled, and then both are
+        // re-added together.
+        let sessionIDs = sessionSpeakers().filter(\.available).map(\.id)
+        if fails < 2 {
+            try? await api.setOutputs(ids: sessionIDs)
+        } else {
+            dlog("\(sp.name) gentle re-assert failed \(fails)x -> per-member rejoin")
+            try? await api.setSelected(outputID: sp.id, selected: false)
+            guard streamIsCurrent(generation) else { return }
+            try? await Task.sleep(nanoseconds: 750_000_000)
+            guard streamIsCurrent(generation) else { return }
+            try? await api.setOutputs(ids: sessionIDs)
+        }
         guard streamIsCurrent(generation) else { return }
         let missing = await awaitOutputsReady(ids: Set([sp.id]), timeoutMs: 8_000)
         guard streamIsCurrent(generation) else { return }
@@ -3138,12 +3251,12 @@ final class DALIStore {
             let nextFails = fails + 1
             recoveryFailCounts[sp.id] = nextFails
             // Back off harder each failure so we don't thrash-kill the partner.
-            let cooldown: TimeInterval = nextFails >= 5 ? 300 : nextFails >= 3 ? 60 : 20
+            let cooldown: TimeInterval = nextFails >= 5 ? 300 : nextFails >= 3 ? 60 : nextFails == 1 ? 10 : 20
             recoveryCooldownUntil[sp.id] = Date().addingTimeInterval(cooldown)
             aiEvent("speaker_rejoin_failed", level: "error", fields: [
                 "speaker": sp.name, "fails": nextFails, "cooldown_s": Int(cooldown)
             ])
-            dlog("\(sp.name) hard rejoin failed (x\(nextFails)); cooldown \(Int(cooldown))s")
+            dlog("\(sp.name) rejoin failed (x\(nextFails)); cooldown \(Int(cooldown))s")
             return
         }
         // Restore the bounded target with one command. Multi-step fades were a
@@ -3175,7 +3288,7 @@ final class DALIStore {
             speakers[$0].health = speakers[$0].enabled ? .live : .off
         }
         aiEvent("speaker_rejoin_ok", fields: ["speaker": sp.name])
-        dlog("\(sp.name) hard rejoin succeeded")
+        dlog("\(sp.name) rejoin succeeded")
         speakerRecoveryInFlight.remove(sp.id)
         // Mac/slider may have moved while we owned volume during recovery.
         guard let latest = speakers.first(where: { $0.id == sp.id }) else { return }
@@ -3351,6 +3464,9 @@ final class DALIStore {
         for sp in sessionSpeakers() {
             guard !Task.isCancelled, phase == .streaming,
                   generation == streamGeneration else { return }
+            // A speaker that never connected is the health loop's to recover;
+            // a volume write into a dead session only stalls the engine lane.
+            if sp.health == .trouble { continue }
             let target = min(effectiveVolume(sp), Int(volumeLimit.rounded()))
             do {
                 try await writeVolume(sp.id, target)
@@ -3857,14 +3973,15 @@ final class DALIStore {
                         // "ignored" volume while the Sonos kept tracking.
                         let strikes = (troubleStrikes[id] ?? 0) + 1
                         troubleStrikes[id] = strikes
-                        if strikes >= 3 {
+                        // Two consecutive misses (~6 s) = this speaker is down while
+                        // its partner may be playing: show it (.trouble) and start
+                        // the gentle rejoin. The rejoin never deselects the partner.
+                        if strikes >= 2 {
                             if speakers[i].health != .trouble {
-                                dlog("\(speakers[i].name) dropped (3 strikes) -> rejoining")
+                                dlog("\(speakers[i].name) dropped (2 strikes, ~6 s) -> rejoining gently")
                                 aiEvent("speaker_rejoin", level: "warn", fields: ["speaker": speakers[i].name])
                             }
                             speakers[i].health = .trouble
-                        } else if strikes >= 2, speakers[i].health == .live {
-                            speakers[i].health = .connecting
                         }
                     }
                 }
@@ -4001,7 +4118,7 @@ final class DALIStore {
                 // Player mode has no capture stream to restart; starting one
                 // here would begin mirroring the Mac under a player-mode UI.
                 guard !self.playerMode else { return }
-                self.startStream()
+                self.startStream(reason: "wake")
             }
         }
     }
