@@ -1143,7 +1143,7 @@ index 4290b75..a4fdafc 100644
 +                                 + now.tv_nsec - session->send_blocked_since.tv_nsec;
 +              // Well inside the 700ms presentation buffer. Persistent failure
 +              // still takes the normal reconnect path rather than going silent.
-+              if (elapsed_ns >= 0 && elapsed_ns < 250000000)
++              if (elapsed_ns >= 0 && elapsed_ns < 1500000000)
 +                return -1;
 +            }
 +        }
