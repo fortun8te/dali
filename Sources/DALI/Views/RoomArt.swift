@@ -2,7 +2,7 @@
 // GraphicsContext: no state, no clocks. RoomCanvas decides what is drawn when
 // (and what is cached); this file only knows how things look.
 //
-// The plan is Michael's actual room seen from above: desk and monitor at the
+// The plan is the actual room seen from above: desk and monitor at the
 // top with the DALI Opticon 2s either side, the listener in the middle, the
 // Sonos Era 100s in the back corners. Footprints are the real products'
 // (Opticon 2 MK2 195 × 297 mm, Era 100 120 × 130.5 mm).
