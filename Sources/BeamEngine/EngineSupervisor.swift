@@ -778,7 +778,12 @@ public actor EngineSupervisor {
         intentionalStop = true
         // Best-effort courtesy so speakers are not left mid-stream; short deadline
         // because a wedged engine must not delay its own shutdown.
-        if process != nil { try? await api.pause(deadline: 2) }
+        // Only pause a player that is actually playing: pausing a stopped or
+        // already-paused OwnTone answers HTTP 500 ("web: Error pausing playback",
+        // seen before every engine restart in owntone.log) for no benefit.
+        if process != nil, let st = try? await api.playerState(deadline: 2), st.state == "play" {
+            try? await api.pause(deadline: 2)
+        }
         stopEpoch += 1
         intentionalStop = true
         stopProcess(kind: .stop)

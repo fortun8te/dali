@@ -442,8 +442,8 @@ public struct BeamAPI: Sendable {
         _ = try await request("PUT", "/api/player/stop")
     }
 
-    public func playerState() async throws -> PlayerState {
-        try JSONDecoder().decode(PlayerState.self, from: try await request("GET", "/api/player"))
+    public func playerState(deadline: TimeInterval? = nil) async throws -> PlayerState {
+        try JSONDecoder().decode(PlayerState.self, from: try await request("GET", "/api/player", deadline: deadline))
     }
 
     public func rescan() async throws {
