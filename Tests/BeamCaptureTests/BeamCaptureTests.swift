@@ -128,4 +128,33 @@ final class BeamCaptureTests: XCTestCase {
         // 50 buffers of 940 frames at ratio 1.01 -> ~ (50*940)/1.01 frames, no crash
         XCTAssertEqual(Double(total), Double(50 * 940) / 1.01, accuracy: 60)
     }
+
+    func testQuantizeSilenceClipRoundAndDither() {
+        var rng: UInt32 = 1
+        var dst = [Int16](repeating: 7, count: 4)
+        let zeros: [Float] = [0, 0, 0, 0]
+        zeros.withUnsafeBufferPointer { s in dst.withUnsafeMutableBufferPointer {
+            FormatConverter.quantize(s, into: $0, rng: &rng) } }
+        XCTAssertEqual(dst, [0, 0, 0, 0])
+
+        let loud: [Float] = [2.0, -2.0, .nan, 0.5]
+        loud.withUnsafeBufferPointer { s in dst.withUnsafeMutableBufferPointer {
+            FormatConverter.quantize(s, into: $0, rng: &rng) } }
+        XCTAssertEqual(dst[0], 32767); XCTAssertEqual(dst[1], -32768); XCTAssertEqual(dst[2], 0)
+        XCTAssertEqual(Double(dst[3]), 16384, accuracy: 1)
+
+        // Constant sub-LSB signal: dither must average back to it (truncation would give 0).
+        var big = [Int16](repeating: 0, count: 20000)
+        let sig = [Float](repeating: 0.25 / 32768, count: 20000)
+        sig.withUnsafeBufferPointer { s in big.withUnsafeMutableBufferPointer {
+            FormatConverter.quantize(s, into: $0, rng: &rng) } }
+        let mean = Double(big.reduce(0) { $0 + Int($1) }) / 20000
+        XCTAssertEqual(mean, 0.25, accuracy: 0.05)
+    }
+
+    func testVarispeedUnityIsBitExact() {
+        var vs = Varispeed()
+        let inp = ramp(frames: 1000)
+        XCTAssertEqual(vs.process(inp, ratio: 1.0), inp)
+    }
 }

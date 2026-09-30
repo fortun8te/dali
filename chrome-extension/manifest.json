@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "DALI Video Sync",
-  "version": "1.2.3",
+  "version": "1.2.4",
   "description": "Delays supported in-page video to match audio streamed to AirPlay speakers by DALI. Instagram plays normally. No settings.",
   "minimum_chrome_version": "120",
   "permissions": [

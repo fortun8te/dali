@@ -31,6 +31,8 @@ struct Varispeed {
     private var q = 3.0            // carried read position in W coordinates (>= 1)
     private var interpolating = false   // q holds a pending fractional phase
     private var out = [Int16]()
+    private var nh = [Double](repeating: 0, count: 6)   // scratch for carryHistory
+    private var rng: UInt32 = 0x2545F491                // xorshift32 dither state
 
     @inline(__always)
     private static func clip16(_ v: Double) -> Int16 {
@@ -68,12 +70,11 @@ struct Varispeed {
             }
             // New history = last three frames of W (W' = W shifted by n).
             func carryHistory() {
-                var nh = [Double](repeating: 0, count: 6)
                 for k in 0..<3 {
                     nh[k * 2] = at(n + k, 0)
                     nh[k * 2 + 1] = at(n + k, 1)
                 }
-                hist = nh
+                swap(&hist, &nh)
             }
 
             if r == 1.0 {
@@ -120,7 +121,16 @@ struct Varispeed {
                                  + (-y0 + y2) * t
                                  + (2 * y0 - 5 * y1 + 4 * y2 - y3) * t2
                                  + (-y0 + 3 * y1 - 3 * y2 + y3) * t3)
-                    out.append(Self.clip16(v))
+                    // TPDF dither (+-1 LSB) before rounding, since this stage
+                    // requantises to s16. Digital silence (all taps 0) stays 0.
+                    var d = 0.0
+                    if y0 != 0 || y1 != 0 || y2 != 0 || y3 != 0 {
+                        rng ^= rng << 13; rng ^= rng >> 17; rng ^= rng << 5
+                        let a = Double(rng) * (1.0 / 4294967296.0)
+                        rng ^= rng << 13; rng ^= rng >> 17; rng ^= rng << 5
+                        d = a + Double(rng) * (1.0 / 4294967296.0) - 1.0
+                    }
+                    out.append(Self.clip16(v + d))
                 }
                 p += r
             }

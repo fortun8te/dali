@@ -150,3 +150,7 @@ Preserves browser presentation timestamps when a decoded-frame callback arrives 
 ## Version 1.2.3
 
 Efficiency and reliability pass. The content script does one DOM walk per tick instead of four or five, prunes detached shadow roots, runs its frame tick only while a picture pipeline exists and throttles scroll geometry reads. The service worker backs its offline beacon retries off to 4 s and stops its sweep timer when idle. All 61 regression checks pass. Build: `2026-09-29.a`.
+
+## Version 1.2.4
+
+YouTube and live-stream hardening. A shorter delay (for example 600 to 540 ms) now glides in instead of jumping the picture forward. A playing video whose playhead freezes for 4 s (offline or ended live stream) is released to the real picture, and a fresh delay is taken when frames resume. Source swaps, ads and seeks always restart with a full delay, even when the first frame takes longer than 1.2 s. YouTube route changes no longer cut a video that keeps playing (miniplayer). A video already in picture-in-picture or fullscreen is never hidden behind the canvas. Frame timestamps are wall-clock, so the 1.05x live catch-up needs no correction. Verified only by the simulated harness, not on real YouTube. Build: `2026-09-30.a`.
