@@ -3109,7 +3109,9 @@ final class DALIStore {
         guard sp.available, streamIsCurrent(generation), !speakerRecoveryInFlight.contains(sp.id) else { return }
         if let until = recoveryCooldownUntil[sp.id], until > Date() { return }
         let fails = recoveryFailCounts[sp.id] ?? 0
-        guard fails < 4 else { return }   // stop hammering; leave .trouble for the user
+        // Never give up for good: a speaker abandoned after a few failures stayed
+        // silent until the user restarted the stream. Failures back off instead
+        // (20 s, 60 s, then every 5 min) so a dead speaker cannot thrash the engine.
         speakerRecoveryInFlight.insert(sp.id)
         lastRecoveryActivityAt = Date()
         defer {
@@ -3136,7 +3138,7 @@ final class DALIStore {
             let nextFails = fails + 1
             recoveryFailCounts[sp.id] = nextFails
             // Back off harder each failure so we don't thrash-kill the partner.
-            let cooldown: TimeInterval = nextFails >= 3 ? 60 : 20
+            let cooldown: TimeInterval = nextFails >= 5 ? 300 : nextFails >= 3 ? 60 : 20
             recoveryCooldownUntil[sp.id] = Date().addingTimeInterval(cooldown)
             aiEvent("speaker_rejoin_failed", level: "error", fields: [
                 "speaker": sp.name, "fails": nextFails, "cooldown_s": Int(cooldown)
@@ -3909,7 +3911,7 @@ final class DALIStore {
                         && lastRecoveryActivityAt < pollStartedAt
                         && Date().timeIntervalSince(pollStartedAt) < 6
                     guard settled else { continue }
-                    guard abs(o.volume - want) > 12 else {
+                    guard abs(o.volume - want) > 7 else {
                         driftResendCount[sp.id] = nil     // engine agrees again: new episode next time
                         continue
                     }
