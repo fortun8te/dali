@@ -54,8 +54,8 @@
   // Bump BUILD on every edit. The service worker prints version + build on
   // startup (chrome://extensions -> "service worker"); that line is the only
   // way to confirm which code Chrome actually has loaded.
-  const VERSION = '1.2.3';
-  const BUILD = '2026-09-29.a';
+  const VERSION = '1.2.4';
+  const BUILD = '2026-09-30.a';
 
   if (typeof chrome === 'undefined' || !chrome.runtime) return;
 
@@ -138,6 +138,14 @@
   // this on a live stream is not a user seek and must not tear the delay down,
   // or the player and the extension fight each other forever.
   const LIVE_SEEK_EPSILON_MS = 250;
+  // Armed and "playing" but the playhead has not moved for this long: a stalled
+  // or offline live stream (Twitch/Kick offline, YouTube stream ended without a
+  // pause event). The canvas would sit on a frozen frame, so hand the real
+  // video back; a fresh delay is taken when frames resume.
+  const STALL_RELEASE_MS = 4000;
+  // A SHORTER delay glides in at this rate (ms of delay per ms), the mirror of
+  // the ramp-in: the picture runs 1.5x for a moment instead of jumping ahead.
+  const GLIDE_DOWN_RATE = 0.5;
 
   const CANVAS_CLASS = 'dali-sync-overlay';
   const HIDDEN_ATTR = 'data-dali-sync-hidden';
@@ -517,6 +525,9 @@
       this.drawSuspended = false;
       this.detached = false;
       this.armed = false;     // video hidden + canvas authoritative
+      this.freshPending = false; // next arm() follows a source/seek/stall discontinuity
+      this.frozenTime = -1;
+      this.frozenSince = 0;
       // Ramp state: `eff` is the delay actually being presented with, which
       // walks up to activeDelayMs() at `rampRate` ms per ms instead of jumping.
       this.eff = 0;
@@ -668,6 +679,10 @@
       if (this.armed || this.detached) return;
       const v = this.video;
       if (v.paused || v.ended || v.seeking) return;
+      // A video in picture-in-picture or fullscreen by itself sits above
+      // anything we draw: never hide it behind a canvas nobody can see.
+      if (document.pictureInPictureElement === v ||
+          (document.fullscreenElement || document.webkitFullscreenElement) === v) return;
       // Picture is about to come back, so the room must too. Reported before the
       // handover rather than after, because the audio has a pipeline's worth of
       // head start on the first frame we are about to show. `true` forces the
@@ -704,7 +719,14 @@
       // 1/RAMP_FACTOR speed until it has fallen the full delay behind. No
       // freeze, no jump, no black, and the video element is never touched.
       const target = activeDelayMs();
-      if (freshlyStarted(v)) {
+      // freshPending outlives FRESH_MS: a YouTube ad or a live seek can take
+      // longer than that to produce its first frame, and the audio starts
+      // with that frame, so it is still a fresh start.
+      const fresh = freshlyStarted(v) || this.freshPending;
+      this.freshPending = false;
+      this.frozenTime = -1;
+      this.frozenSince = 0;
+      if (fresh) {
         this.eff = target;
         this.rampRate = 0;
         this.ramped = false;
@@ -731,7 +753,8 @@
       const dt = Math.max(0, now - this.effAt);
       this.effAt = now;
       if (this.eff > target) {
-        this.eff = target;
+        // Delay shortened (roomDelay 600 -> 540, trim drag): glide, don't jump.
+        this.eff = Math.max(target, this.eff - dt * GLIDE_DOWN_RATE);
       } else if (this.eff < target) {
         // The app's delay moved up (measurement step, trim drag) after the
         // picture was already running: ease into it in slow motion rather
@@ -767,6 +790,10 @@
     cutOut(why) {
       if (this.detached) return;
       const wasArmed = this.armed;
+      // Audio restarts from a new point after these; the next arm is fresh.
+      if (why === 'emptied' || why === 'loadstart' || why === 'seek' || why === 'stalled') {
+        this.freshPending = true;
+      }
       this.flush(false);
       this.disarm();
       this.drawSuspended = true;
@@ -1110,6 +1137,22 @@
     // a frozen canvas over a hidden video. Returns true if it healed.
     watchdog(now) {
       const v = this.video;
+      // Frozen playhead while "playing" (offline / ended live stream): release.
+      // Buffering is not exempt on purpose: the real video is frozen too, so
+      // handing it back costs nothing and can never leave a stale canvas.
+      if (this.armed && !v.paused && !v.ended && !v.seeking) {
+        if (v.currentTime !== this.frozenTime) {
+          this.frozenTime = v.currentTime;
+          this.frozenSince = 0;
+        } else if (!this.frozenSince) {
+          this.frozenSince = now;
+        } else if (now - this.frozenSince > STALL_RELEASE_MS) {
+          this.cutOut('stalled');
+          return true;
+        }
+      } else {
+        this.frozenSince = 0;
+      }
       if (!this.armed || v.paused || v.ended || v.seeking || v.readyState < 3) {
         this.stallSince = 0;
         this.lastMediaTime = v.currentTime;
@@ -1792,9 +1835,12 @@
   }
 
   function onSpaNavigate() {
-    // YouTube SPA navigation: same or swapped <video>. The old picture is gone,
-    // so drop it in the same tick rather than playing it out over the new page.
-    if (S.pipeline && !S.pipeline.detached) S.pipeline.cutOut('navigate');
+    // YouTube SPA navigation. Do NOT cut here: a real source change already
+    // fires emptied/loadstart on the element (which cut and mark the restart),
+    // while a video that keeps playing across the route change (miniplayer,
+    // theater/watch swap) has no audio discontinuity. Cutting on
+    // yt-navigate-finish also fired AFTER the new video had armed and threw
+    // that fresh pipeline away, re-arming it in slow motion.
     scheduleEvaluate();
   }
 

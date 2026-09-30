@@ -964,3 +964,89 @@ test('early and late decoded callbacks preserve 60fps cadence and presentation t
   assert.ok(Math.abs(p.sourceFrameInterval - 1000 / 60) < 0.01);
   assert.ok(Math.max(...errors) <= 1000 / 120 + 0.1, 'presentation follows decoded frame time within half a frame');
 });
+
+// --- 1.2.4: YouTube and live hardening --------------------------------------
+
+test('a shorter delay glides down instead of jumping the picture forward', async () => {
+  const c = content();
+  await settle();
+  c.media('play');
+  const p = c.api.S.pipeline;
+  await runFrames(c, 2000);
+  assert.equal(Math.round(p.eff), 900);
+  c.api.applyStatus({ running: true, streaming: true, delayMs: 840 });
+  await runFrames(c, 33);
+  assert.ok(p.eff > 840 && p.eff < 900, 'eff moves gradually, got ' + p.eff);
+  await runFrames(c, 300);
+  assert.equal(Math.round(p.eff), 840);
+  assert.equal(p.armed, true);
+});
+
+test('a live stream that stops advancing is released to the real picture, then re-armed fresh', async () => {
+  const c = content({ host: 'www.twitch.tv' });
+  c.video.duration = Infinity;
+  await settle();
+  c.media('play');
+  const p = c.api.S.pipeline;
+  await runFrames(c, 2000);
+  assert.equal(p.armed, true);
+  await runFrames(c, 5000, { advance: false });   // offline: not paused, playhead frozen
+  assert.equal(p.armed, false);
+  assert.equal(c.video.style.visibility, '');
+  assert.equal(c.api.S.pipeline, p, 'released, not torn down');
+  await runFrames(c, 1000);                        // stream returns
+  assert.equal(p.armed, true);
+  assert.equal(Math.round(p.eff), 900, 'a returning stream takes the full delay, not a slow-motion ramp');
+});
+
+test('a source swap whose first frame is slow still takes a full delay', async () => {
+  const c = content();
+  await settle();
+  c.media('play');
+  const p = c.api.S.pipeline;
+  await runFrames(c, 2000);
+  c.media('emptied'); c.media('loadstart');
+  assert.equal(p.armed, false);
+  await c.clock.advance(3000);                     // ad loads slowly, beyond FRESH_MS
+  await runFrames(c, 200);
+  assert.equal(p.armed, true);
+  assert.equal(Math.round(p.eff), 900);
+});
+
+test('YouTube route change does not cut a video that keeps playing', async () => {
+  const c = content();
+  await settle();
+  c.media('play');
+  const p = c.api.S.pipeline;
+  await runFrames(c, 2000);
+  c.window.dispatch('yt-navigate-start');
+  c.window.dispatch('yt-navigate-finish');
+  assert.equal(p.armed, true);
+  assert.equal(c.video.style.visibility, 'hidden');
+  await c.clock.advance(300);
+  assert.equal(c.api.S.pipeline, p);
+});
+
+test('a video in picture-in-picture is never hidden behind the canvas', async () => {
+  const c = content();
+  await settle();
+  const p = c.api.S.pipeline;   // exists before evaluate() notices PiP
+  c.document.pictureInPictureElement = c.video;
+  c.media('play');
+  for (let i = 0; i < 15; i++) { c.video.currentTime += 0.033; await c.clock.advance(33); p.capture(); await settle(); }
+  assert.equal(p.armed, false);
+  assert.equal(c.video.style.visibility, '');
+});
+
+test('1.05x live catch-up does not change the wall-clock delay', async () => {
+  const c = content({ host: 'www.youtube.com' });
+  c.video.duration = 5000;
+  await settle();
+  c.media('play');
+  const p = c.api.S.pipeline;
+  await runFrames(c, 1500);
+  c.video.playbackRate = 1.05;
+  const errs = await runFrames(c, 3000);
+  assert.ok(Math.max(...errs.map(Math.abs)) <= 40);
+  assert.equal(p.armed, true);
+});

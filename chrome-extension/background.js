@@ -36,7 +36,7 @@ importScripts('beacon.js');
 
 // Bump BUILD on every edit — it is what tells you whether Chrome is running
 // the code you just wrote. Keep it in step with the same constant in content.js.
-const BUILD = '2026-09-29.a';
+const BUILD = '2026-09-30.a';
 
 // Stamp every request with who we are, so the app can show that the extension
 // is really running (its beacon echoes this back as `extensionVersion`).
