@@ -2980,7 +2980,9 @@ final class DALIStore {
     /// Minimum gap between two volume write passes to the engine. Mute/unmute
     /// (a target crossing zero), forced resyncs and the resume fade ignore it —
     /// the instant cut-off and the pop-free fade are worth their writes.
-    private static let volumeMinSpacing: TimeInterval = 1.5
+    /// 0.5 s: 1.5 s felt like a laggy, stepped volume; the 200 ms key-repeat
+    /// debounce above already stops the chatter that dropped the front receiver.
+    private static let volumeMinSpacing: TimeInterval = 0.5
     /// When the last volume PUT (any speaker, any path) finished, and per output.
     private var lastVolumeWriteAt = Date.distantPast
     private var volumeWriteDoneAt: [String: Date] = [:]
@@ -3221,7 +3223,7 @@ final class DALIStore {
         while !Task.isCancelled, phase == .streaming, generation == volumePushGeneration {
             let gap = Self.volumeMinSpacing - Date().timeIntervalSince(lastVolumeWriteAt)
             if gap <= 0 || volumeWriteIsUrgent() { return }
-            try? await Task.sleep(nanoseconds: UInt64(min(gap, 0.25) * 1_000_000_000))
+            try? await Task.sleep(nanoseconds: UInt64(min(gap, 0.1) * 1_000_000_000))
         }
     }
 
