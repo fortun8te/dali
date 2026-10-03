@@ -21,6 +21,7 @@ public actor SpotifySupervisor {
     private let lifecycle = EngineLifecycleGate()
     private var startTask: Task<Void, Error>?
     private var stopEpoch = 0
+    private var startIntent = 0
     var shutdownEpoch: Int { stopEpoch }
     public private(set) var state: State = .stopped
     public var onStateChange: (@Sendable (State) -> Void)?
@@ -33,6 +34,7 @@ public actor SpotifySupervisor {
     private let bitrate: Int
     private let binaryOverride: URL?
     private let reap: @Sendable (String) -> Bool
+    private let terminate: @Sendable (Process, TimeInterval) async -> Bool
 
     public init(deviceName: String = "DALI",
                 pipePath: URL,
@@ -44,16 +46,21 @@ public actor SpotifySupervisor {
         self.bitrate = bitrate
         self.binaryOverride = nil
         self.reap = Self.reapStale
+        self.terminate = { await ManagedChildTermination.stop($0, graceSeconds: $1) }
     }
 
     /// Tests own a disposable receiver and never sweep real Spotify processes.
-    init(binary: URL, pipePath: URL, cacheDir: URL) {
+    init(binary: URL, pipePath: URL, cacheDir: URL,
+         terminate: @escaping @Sendable (Process, TimeInterval) async -> Bool = {
+             await ManagedChildTermination.stop($0, graceSeconds: $1)
+         }) {
         self.deviceName = "DALI test"
         self.pipePath = pipePath
         self.cacheDir = cacheDir
         self.bitrate = 320
         self.binaryOverride = binary
         self.reap = { _ in true }
+        self.terminate = terminate
     }
 
     public func setStateHandler(_ h: @escaping @Sendable (State) -> Void) { onStateChange = h }
@@ -140,6 +147,7 @@ public actor SpotifySupervisor {
     private var generation = 0
 
     public func start() async throws {
+        startIntent += 1
         let epoch = stopEpoch
         while true {
             let task: Task<Void, Error>
@@ -266,7 +274,7 @@ public actor SpotifySupervisor {
         startTask?.cancel()
         await lifecycle.acquire()
         if let child = process {
-            let exited = await ManagedChildTermination.stop(child, graceSeconds: 2)
+            let exited = await terminate(child, 2)
             if exited {
                 if process === child { process = nil }
             } else {
@@ -275,6 +283,18 @@ public actor SpotifySupervisor {
         }
         if epoch == stopEpoch, process == nil { transition(.stopped) }
         await lifecycle.release()
+    }
+
+    /// True conservatively while any exact child handle remains owned. A failed
+    /// termination retains this handle, so another producer must not open its FIFO.
+    public var hasActiveProducer: Bool { process != nil }
+
+    /// An explicit handoff barrier. A concurrent new start also makes the proof
+    /// false, even if its child has not yet reached the spawn step.
+    public func stopConfirmed() async -> Bool {
+        let intent = startIntent
+        await stop()
+        return process == nil && state == .stopped && intent == startIntent
     }
 
     public var isLibrespotAvailable: Bool { resolveBinary() != nil }

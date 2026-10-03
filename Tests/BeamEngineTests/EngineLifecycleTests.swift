@@ -301,4 +301,60 @@ final class EngineLifecycleTests: XCTestCase {
         XCTAssertEqual(child.terminationStatus, SIGKILL)
     }
 
+    func testSpotifyFailedTeardownCannotConfirmSafeProducerHandoff() async throws {
+        let fixture = try ChildFixture.make(binaryName: "librespot")
+        defer { fixture.cleanup() }
+        try FileManager.default.createDirectory(at: fixture.config.etcDir, withIntermediateDirectories: true)
+        let supervisor = SpotifySupervisor(binary: fixture.binary,
+            pipePath: fixture.config.confFile, cacheDir: fixture.root.appendingPathComponent("cache"),
+            terminate: { _, _ in false })
+        try await supervisor.start()
+        let result = await supervisor.stopConfirmed()
+        let active = await supervisor.hasActiveProducer
+        XCTAssertFalse(result)
+        XCTAssertTrue(active)
+        XCTAssertNotNil(fixture.pid)
+        let state = await supervisor.state
+        guard case .failed = state else { return XCTFail("unverified teardown did not report failure") }
+        // Dispose only this isolated fixture, then a fresh barrier may confirm
+        // the terminated child. No live receiver or personal FIFO is involved.
+        kill(try XCTUnwrap(fixture.pid), SIGKILL)
+        try await eventually { !(await supervisor.hasActiveProducer) }
+        let confirmedAfterExit = await supervisor.stopConfirmed()
+        XCTAssertTrue(confirmedAfterExit)
+    }
+
+    func testSpotifyConfirmedStopWaitsForGracefulExit() async throws {
+        let fixture = try ChildFixture.make(binaryName: "librespot")
+        defer { fixture.cleanup() }
+        try FileManager.default.createDirectory(at: fixture.config.etcDir, withIntermediateDirectories: true)
+        let supervisor = SpotifySupervisor(binary: fixture.binary,
+            pipePath: fixture.config.confFile, cacheDir: fixture.root.appendingPathComponent("cache"))
+        try await supervisor.start()
+        let confirmed = await supervisor.stopConfirmed()
+        XCTAssertTrue(confirmed)
+        let active = await supervisor.hasActiveProducer
+        XCTAssertFalse(active)
+        XCTAssertNil(fixture.pid)
+        XCTAssertEqual(fixture.events.map { $0.split(separator: " ")[0] }, ["start", "stop"])
+    }
+
+    func testSpotifyNewStartDuringStopInvalidatesHandoffProof() async throws {
+        let fixture = try ChildFixture.make(binaryName: "librespot")
+        defer { fixture.cleanup() }
+        try FileManager.default.createDirectory(at: fixture.config.etcDir, withIntermediateDirectories: true)
+        let supervisor = SpotifySupervisor(binary: fixture.binary,
+            pipePath: fixture.config.confFile, cacheDir: fixture.root.appendingPathComponent("cache"))
+        try await supervisor.start()
+        let stopping = Task { await supervisor.stopConfirmed() }
+        try await eventually { await supervisor.shutdownEpoch == 1 }
+        let starting = Task { try await supervisor.start() }
+        let proof = await stopping.value
+        XCTAssertFalse(proof)
+        try await starting.value
+        let confirmed = await supervisor.stopConfirmed()
+        XCTAssertTrue(confirmed)
+        XCTAssertNil(fixture.pid)
+    }
+
 }
