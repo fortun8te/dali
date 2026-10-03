@@ -1045,7 +1045,7 @@ final class DALIStore {
     private var discoveryTask: Task<Void, Never>?
 
     func refreshSpeakers() async {
-        guard !Self.isPreview else { return }
+        guard backendEnabled, !Self.isPreview else { return }
         // Join a discovery already running instead of returning at once: boot
         // discovery is slow, and a Play pressed during it used to read the still
         // EMPTY speaker list and fail with "Choose at least one speaker".
@@ -1067,7 +1067,8 @@ final class DALIStore {
         await task.value
     }
 
-    private func applyDiscoveredSpeakers(_ outputs: [Output]) {
+    /// Shared discovery application also used by the offline app fixture.
+    func applyDiscoveredSpeakers(_ outputs: [Output]) {
         let preferences = SpeakerPreferences(defaults: preferences)
         var list: [RoomSpeaker] = []
         let host = hostName()
@@ -1678,6 +1679,11 @@ final class DALIStore {
         guard phase == .streaming else { return }
         let sp = speakers[idx]
         if enabling && !alreadyJoined {
+            guard backendEnabled else {
+                speakers[idx].health = .connecting
+                scheduleVolumePush()
+                return
+            }
             sessionMembership.retain(sp.name)
             speakers[idx].health = .connecting
             let generation = streamGeneration
