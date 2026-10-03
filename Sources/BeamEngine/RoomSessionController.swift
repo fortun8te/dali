@@ -140,8 +140,12 @@ public final class RoomSessionController {
     /// stop waits for the old request to drain and cleanup to finish first.
     /// nil means the transaction was superseded and must not change UI state.
     public func start(using dependencies: Dependencies) async throws -> Result? {
-        if state == .starting, let task = startupTask { return try await task.value }
         if state == .streaming { return activeResult }
+        // A facade task can be scheduled before Stop and reach this method
+        // after the replacement request. It must neither claim the lane nor
+        // join a current startup using its obsolete admission context.
+        guard !Task.isCancelled, dependencies.isCurrent() else { return nil }
+        if state == .starting, let task = startupTask { return try await task.value }
         generation += 1
         let epoch = generation
         let previousCleanup = cleanupTask

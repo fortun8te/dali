@@ -194,6 +194,66 @@ final class RoomSessionControllerTests: XCTestCase {
         await controller.invalidateAndStop().value
     }
 
+    func testObsoleteScheduledStartCannotClaimReplacementStartup() async throws {
+        let obsolete = Fixture()
+        obsolete.current = false
+        let current = Fixture()
+        let gate = Gate()
+        current.prepareGate = gate
+        defer { gate.release() }
+        let controller = current.makeController()
+        var oldCompleted = false
+        let oldStart = Task {
+            let result = try await controller.start(using: obsolete.dependencies)
+            oldCompleted = true
+            return result
+        }
+        let newStart = Task { try await controller.start(using: current.dependencies) }
+        try await eventually { oldCompleted }
+        let oldResult = try await oldStart.value
+        XCTAssertNil(oldResult)
+        XCTAssertTrue(obsolete.calls.isEmpty)
+        try await eventually { gate.isWaiting }
+        gate.release()
+        let newResult = try await newStart.value
+        XCTAssertEqual(newResult?.readyIDs, ["front", "back"])
+        XCTAssertEqual(current.captures, 1)
+        XCTAssertEqual(controller.state, .streaming)
+        await controller.invalidateAndStop().value
+    }
+
+    func testObsoleteCallerCannotJoinAnAlreadyPendingCurrentStart() async throws {
+        let current = Fixture()
+        let gate = Gate()
+        current.prepareGate = gate
+        let controller = current.makeController()
+        let start = Task { try await controller.start(using: current.dependencies) }
+        try await eventually { gate.isWaiting }
+        defer { gate.release() }
+        let obsolete = Fixture()
+        obsolete.current = false
+        var obsoleteCompleted = false
+        let obsoleteTask = Task {
+            let result = try await controller.start(using: obsolete.dependencies)
+            obsoleteCompleted = true
+            return result
+        }
+        try await eventually { obsoleteCompleted }
+        let result = try await obsoleteTask.value
+        XCTAssertNil(result, "Obsolete caller must return without sharing the pending task")
+        XCTAssertTrue(obsolete.calls.isEmpty)
+        XCTAssertEqual(controller.state, .starting)
+        gate.release()
+        let currentResult = try await start.value
+        XCTAssertEqual(currentResult?.readyIDs, ["front", "back"])
+        // The facade's admission predicate describes starting. Once the room
+        // is already running, repeated start remains an idempotent result read.
+        current.current = false
+        let cached = try await controller.start(using: current.dependencies)
+        XCTAssertEqual(cached, currentResult)
+        await controller.invalidateAndStop().value
+    }
+
     func testStopDuringSelectionRejectsLateReplyAndBlocksReplacement() async throws {
         let old = Fixture()
         let selection = Gate()
