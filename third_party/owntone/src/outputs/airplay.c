@@ -24,6 +24,7 @@
 #include <stdint.h>
 #include <inttypes.h>
 #include <math.h>
+#include <ctype.h>
 #include <errno.h>
 #include <sys/types.h>
 #include <sys/socket.h>
@@ -286,6 +287,7 @@ struct airplay_session
   bool supports_encryption;
 
   struct event *deferredev;
+  bool volume_failure_pending;
 
   int reqs_in_flight;
   int cseq;
@@ -1404,9 +1406,14 @@ session_failure(struct airplay_session *session)
 static void
 volume_command_failure(struct airplay_session *session)
 {
+  struct output_device *device = outputs_device_get(session->device_id);
+
+  if (device && device->session == session)
+    device->volume_control_failed = true;
+
   DPRINTF(E_WARN, L_AIRPLAY,
-    "AI event=volume_control_timeout_ignored device='%s' state=streaming\n",
-    session->devname);
+    "AI event=volume_control_failed device='%s' state=%s action=retain_media\n",
+    session->devname, session->state == AIRPLAY_STATE_STREAMING ? "streaming" : "connected");
   session_status(session);
 }
 
@@ -1414,6 +1421,13 @@ static void
 deferred_session_failure_cb(int fd, short what, void *arg)
 {
   struct airplay_session *session = arg;
+
+  if (session->volume_failure_pending)
+    {
+      session->volume_failure_pending = false;
+      volume_command_failure(session);
+      return;
+    }
 
   DPRINTF(E_DBG, L_AIRPLAY, "Cleaning up failed session (deferred) on device '%s'\n", session->devname);
   session_failure(session);
@@ -1424,9 +1438,27 @@ deferred_session_failure(struct airplay_session *session)
 {
   struct timeval tv;
 
+  session->volume_failure_pending = false;
   if (session->state != AIRPLAY_STATE_AUTH)
     session->state = AIRPLAY_STATE_FAILED;
 
+  evutil_timerclear(&tv);
+  evtimer_add(session->deferredev, &tv);
+}
+
+// An immediate RTSP enqueue/connect failure happens before the player command
+// has registered its pending callback. Complete on the next event-loop turn,
+// just as a timeout does, while retaining the media session.
+static void
+deferred_volume_failure(struct airplay_session *session)
+{
+  struct timeval tv;
+
+  // A delivery failure already owns this timer and must win.
+  if (session->state == AIRPLAY_STATE_FAILED || session->state == AIRPLAY_STATE_AUTH)
+    return;
+
+  session->volume_failure_pending = true;
   evutil_timerclear(&tv);
   evtimer_add(session->deferredev, &tv);
 }
@@ -1931,10 +1963,10 @@ airplay_volume_from_pct(int volume, const char *name)
   max_volume = volume_max_get(name);
 
   /* RAOP volume
-   *  -144.0 is off (not really used since we have no concept of muted/off)
-   *  0 - 100 maps to -30.0 - 0 (if no max_volume set)
+   *  0 percent is protocol mute (-144.0), so disabled/cut speakers are silent.
+   *  1 - 100 maps to just above -30.0 through 0 (if no max_volume set)
    */
-  if (volume >= 0 && volume <= 100)
+  if (volume > 0 && volume <= 100)
     airplay_volume = -30.0 + ((float)max_volume * (float)volume * 30.0) / (100.0 * AIRPLAY_CONFIG_MAX_VOLUME);
   else
     airplay_volume = -144.0;
@@ -1945,50 +1977,30 @@ airplay_volume_from_pct(int volume, const char *name)
 static int
 airplay_volume_to_pct(struct output_device *device, const char *volstr)
 {
-  float airplay_volume;
+  char *end;
+  float protocol_volume;
   float volume;
-  int max_volume;
+  int max_volume = volume_max_get(device->name);
 
-  airplay_volume = atof(volstr);
+  if (!volstr || max_volume < 1 || max_volume > AIRPLAY_CONFIG_MAX_VOLUME)
+    return -1;
 
-  if ((airplay_volume == 0.0 && volstr[0] != '0') || airplay_volume > 0.0)
-    {
-      DPRINTF(E_LOG, L_AIRPLAY, "AirPlay device volume is invalid: '%s'\n", volstr);
-      return -1;
-    }
+  protocol_volume = strtof(volstr, &end);
+  if (end == volstr || !isfinite(protocol_volume) || protocol_volume > 0.0f)
+    return -1;
+  while (isspace((unsigned char)*end))
+    end++;
+  if (*end)
+    return -1;
 
-  if (airplay_volume <= -30.0)
-    {
-      return 0; // -144.0 is muted
-    }
+  if (protocol_volume <= -30.0f)
+    return 0; // Includes the protocol mute sentinel, -144.0.
 
-  max_volume = volume_max_get(device->name);
-
-/*
-  This is an attempt at scaling the input volume that didn't really work for all
-  speakers (e.g. my Sony), but I'm leaving it here in case it should be a config
-  option some time
-
-  // If the input volume is -25 and we are playing at -20, then we only want the
-  // resulting volume to be -25 if there is no volume scaling. If the scaling is
-  // set to say 20% then we want the resulting volume to be -21, i.e. 20% of the
-  // change. Expressed as an equation:
-  //   a_r = a_0 + m/M * (a_i - a_0)     - where a_0 is the current airplay volume, a_i is the input and a_r is the scaled result
-  //
-  // Since current volume (device->volume) is measured on the 0-100 scale, and the
-  // result of this func should also be on that scale, we have the following two
-  // relationships (the first is also found in _from_pct() above):
-  //   a_0 = -30 + m/M * 30/100 * v_0    - where v_0 is device->volume
-  //   v_r = M/m * 100 * (1 + a_r / 30)  - converts a_r to v_r which is [0-100]
-  //
-  // Solving these three equations gives this:
-  volume_base = 100.0 * (1.0 + airplay_volume / 30.0);
-  volume = (float)device->volume * (1.0 - (float)max_volume/AIRPLAY_CONFIG_MAX_VOLUME) + volume_base;
-
-*/
-  // RAOP volume: -144.0 is off, -30.0 - 0 scaled by max_volume maps to 0 - 100
-  volume = (100.0 * (airplay_volume / 30.0 + 1.0) * AIRPLAY_CONFIG_MAX_VOLUME / (float)max_volume);
-  return MAX(0, MIN(100, (int)volume));
+  volume = 100.0f * (protocol_volume / 30.0f + 1.0f)
+    * AIRPLAY_CONFIG_MAX_VOLUME / (float)max_volume;
+  // Round the inverse. Truncating makes ordinary serialized values such as
+  // -29.7 report 0 rather than 1 and lets status polls pull sliders backward.
+  return (int)lroundf(MAX(0.0f, MIN(100.0f, volume)));
 }
 
 /* Volume in [0 - 100] */
@@ -2125,8 +2137,9 @@ packet_send(struct airplay_session *session, struct rtp_packet *pkt)
                 }
               int64_t elapsed_ns = ((int64_t)now.tv_sec - session->send_blocked_since.tv_sec) * 1000000000
                                  + now.tv_nsec - session->send_blocked_since.tv_nsec;
-              // Well inside the 700ms presentation buffer. Persistent failure
-              // still takes the normal reconnect path rather than going silent.
+              // A 1.5 s grace can exceed the presentation lead. It avoids
+              // tearing down the session for a brief local Wi-Fi queue stall;
+              // audible delivery during that stall is not guaranteed.
               if (elapsed_ns >= 0 && elapsed_ns < 1500000000)
                 return -1;
             }
@@ -3375,6 +3388,26 @@ response_handler_record(struct evrtsp_request *req, struct airplay_session *sess
   return AIRPLAY_SEQ_CONTINUE;
 }
 
+// The player event loop serves every speaker. A full UDP queue must return
+// EAGAIN to packet_send rather than blocking that shared playback clock.
+static int
+data_socket_prepare(struct airplay_session *session)
+{
+  int sndbuf = 512 * 1024;
+
+  if (evutil_make_socket_nonblocking(session->server_fd) < 0)
+    {
+      DPRINTF(E_LOG, L_AIRPLAY, "Could not make data socket nonblocking for '%s': %s\n",
+        session->devname, strerror(errno));
+      return -1;
+    }
+
+  if (setsockopt(session->server_fd, SOL_SOCKET, SO_SNDBUF, &sndbuf, sizeof(sndbuf)) < 0)
+    DPRINTF(E_WARN, L_AIRPLAY, "Could not raise SO_SNDBUF on data socket for '%s': %s\n",
+      session->devname, strerror(errno));
+  return 0;
+}
+
 static enum airplay_seq_type
 response_handler_setup_stream(struct evrtsp_request *req, struct airplay_session *session)
 {
@@ -3437,14 +3470,8 @@ response_handler_setup_stream(struct evrtsp_request *req, struct airplay_session
       goto error;
     }
 
-  // DALI: enlarge the UDP send buffer so a short retransmit burst (or a
-  // timer catch-up of a few packets) does not locally drop live audio.
-  {
-    int sndbuf = 512 * 1024;
-    if (setsockopt(session->server_fd, SOL_SOCKET, SO_SNDBUF, &sndbuf, sizeof(sndbuf)) < 0)
-      DPRINTF(E_WARN, L_AIRPLAY, "Could not raise SO_SNDBUF on data socket for '%s': %s\n",
-	session->devname, strerror(errno));
-  }
+  if (data_socket_prepare(session) < 0)
+    goto error;
 
   session->state = AIRPLAY_STATE_SETUP;
 
@@ -4018,7 +4045,7 @@ static struct airplay_seq_request airplay_seq_request[][7] =
     { AIRPLAY_SEQ_PIN_START, "PIN start", EVRTSP_REQ_POST, payload_make_pin_start, response_handler_pin_start, NULL, "/pair-pin-start", false },
   },
   {
-    { AIRPLAY_SEQ_SEND_VOLUME, "SET_PARAMETER (volume)", EVRTSP_REQ_SET_PARAMETER, payload_make_set_volume, NULL, "text/parameters", NULL, true },
+    { AIRPLAY_SEQ_SEND_VOLUME, "SET_PARAMETER (volume)", EVRTSP_REQ_SET_PARAMETER, payload_make_set_volume, NULL, "text/parameters", NULL, false },
   },
   {
     { AIRPLAY_SEQ_SEND_TEXT, "SET_PARAMETER (text)", EVRTSP_REQ_SET_PARAMETER, payload_make_send_text, NULL, "application/x-dmap-tagged", NULL, true },
@@ -4166,16 +4193,9 @@ sequence_continue(struct airplay_seq_ctx *seq_ctx)
   ret = evrtsp_make_request(session->ctrl, req, cur_request->rtsp_type, uri);
   if (ret < 0)
     {
-      // DALI patch (crash fix): evrtsp_make_request TAILQ-inserts req on
-      // ctrl->requests BEFORE connecting, and a synchronous connect() failure
-      // (EHOSTDOWN/EHOSTUNREACH to a sleeping receiver with a negative route
-      // entry) returns -1 WITHOUT unlinking it. Ownership is therefore with the
-      // connection: evrtsp_connection_free() will free it during the session
-      // teardown that deferred_session_failure() schedules. Freeing it here too
-      // (the old `goto error` path) left a dangling TAILQ node — the freed
-      // block got reused, and evrtsp_connection_free's queue walk stored
-      // through the garbage next-pointer: the 2026-08-01 SIGSEGV at
-      // evrtsp_connection_free+160 (crash report owntone-2026-08-01-134941).
+      // evrtsp_make_request takes ownership even on failure. It removes and
+      // frees a failed enqueue, so a retained media session cannot dispatch a
+      // request whose sequence context has already been freed.
       req = NULL;
       goto error;
     }
@@ -4192,11 +4212,13 @@ sequence_continue(struct airplay_seq_ctx *seq_ctx)
   if (req)
     evrtsp_request_free(req);
 
-  // Sets status to FAILED, gives status to player and frees session. Must be
-  // deferred, otherwise sequence_start() could invalidate the session, meaning
-  // any dereference of the session by the caller after sequence_start() would
-  // segfault.
-  deferred_session_failure(session);
+  // Defer completion until the caller has registered its pending callback.
+  // Volume-control failure has the same media-preserving policy whether the
+  // request timed out or could not be queued/connected in the first place.
+  if (seq_ctx->on_error == volume_command_failure)
+    deferred_volume_failure(session);
+  else
+    deferred_session_failure(session);
 
   free(seq_ctx);
 }

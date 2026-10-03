@@ -1,7 +1,8 @@
 #!/bin/bash
-# Vendors the locally-built owntone binary + its non-system dylibs into
+# Vendors the engine, SQLite module, web assets and non-system dylibs into
 # vendor/owntone/ so DALI.app can bundle them under Contents/Helpers/.
-# Rewrites every dylib path to @executable_path/lib/ and ad-hoc signs.
+# Rewrites the executable's libraries to @executable_path/lib/ and shared
+# libraries' dependencies to @loader_path/ so runtime-loaded modules relocate.
 #
 # Pass the binary explicitly when you have just rebuilt the engine:
 #   ./scripts/vendor-owntone.sh third_party/owntone/src/owntone
@@ -11,6 +12,8 @@
 set -euo pipefail
 
 SRC_BIN="${1:-$HOME/.local/beam/sbin/owntone}"
+SRC_SQLITE_EXT="${2:-}"
+SRC_WEBROOT="${3:-}"
 OUT="$(cd "$(dirname "$0")/.." && pwd)/vendor/owntone"
 
 # STAGE, THEN SWAP. This used to `rm -rf "$OUT"` up front and build in place, so
@@ -25,14 +28,47 @@ LIBDIR="$STAGE/lib"
 mkdir -p "$LIBDIR"
 
 [ -x "$SRC_BIN" ] || { echo "owntone binary not found at $SRC_BIN"; exit 1; }
+if [ -z "$SRC_SQLITE_EXT" ]; then
+  # Uninstalled build tree, installed prefix, or a previously vendored tree.
+  for candidate in \
+    "$(dirname "$SRC_BIN")/../sqlext/.libs/owntone-sqlext.so" \
+    "$(dirname "$SRC_BIN")/../lib/owntone/owntone-sqlext.so" \
+    "$(dirname "$SRC_BIN")/lib/owntone-sqlext.so"; do
+    if [ -f "$candidate" ]; then SRC_SQLITE_EXT="$candidate"; break; fi
+  done
+fi
+[ -f "$SRC_SQLITE_EXT" ] || {
+  echo 'FATAL: OwnTone SQLite extension missing. Pass the matching built owntone-sqlext.so as argument 2.'
+  exit 1
+}
+if [ -z "$SRC_WEBROOT" ]; then
+  for candidate in \
+    "$(dirname "$SRC_BIN")/../htdocs" \
+    "$(dirname "$SRC_BIN")/../share/owntone/htdocs" \
+    "$(dirname "$SRC_BIN")/htdocs"; do
+    if [ -f "$candidate/index.html" ]; then SRC_WEBROOT="$candidate"; break; fi
+  done
+fi
+[ -f "$SRC_WEBROOT/index.html" ] && [ -f "$SRC_WEBROOT/assets/index.js" ] && [ -f "$SRC_WEBROOT/assets/index.css" ] || {
+  echo 'FATAL: OwnTone web assets missing. Pass the matching htdocs directory as argument 3.'
+  exit 1
+}
+mkdir -p "$STAGE/htdocs"
+rsync -a --exclude='Makefile*' "$SRC_WEBROOT/" "$STAGE/htdocs/"
 cp "$SRC_BIN" "$STAGE/owntone"
 chmod u+w "$STAGE/owntone"
+cp "$SRC_SQLITE_EXT" "$LIBDIR/owntone-sqlext.so"
+chmod u+w "$LIBDIR/owntone-sqlext.so"
 
 # Some deps record a path they are no longer installed at (Homebrew relocations,
 # a deps prefix that moved). Look the basename up in the known prefixes before
 # giving up, so one moved library can't fail the whole vendor.
 SEARCH_DIRS=(
+  "$(dirname "$SRC_BIN")/lib"
+  "$(dirname "$SRC_SQLITE_EXT")"
   "$HOME/.local/beamdeps/lib"
+  "$(cd "$(dirname "$0")/.." && pwd)/build/engine-deps/lib"
+  "$(brew --prefix)/lib"
   /opt/homebrew/lib
   /usr/local/lib
 )
@@ -51,7 +87,8 @@ resolve() { # $1 = recorded path -> prints a real path, or nothing
 # is what actually worked.
 collect() {
   local dep base src
-  for dep in $(otool -L "$1" | awk 'NR>1 {print $1}' | grep -vE '^(/usr/lib|/System|@executable_path)'); do
+  while IFS= read -r dep; do
+    case "$dep" in /usr/lib/*|/System/*) continue ;; esac
     base="$(basename "$dep")"
     [ -f "$LIBDIR/$base" ] && continue
     src="$(resolve "$dep")"
@@ -63,40 +100,48 @@ collect() {
     cp "$src" "$LIBDIR/$base"
     chmod u+w "$LIBDIR/$base"
     collect "$LIBDIR/$base"
-  done
+  done < <(otool -L "$1" | sed -n '2,$s/^[[:space:]]*\(.*\) (compatibility version.*$/\1/p')
 }
 collect "$STAGE/owntone"
+collect "$LIBDIR/owntone-sqlext.so"
 # Second pass: deps of deps may have been added after their parents were scanned.
-for f in "$LIBDIR"/*.dylib; do collect "$f"; done
+shopt -s nullglob
+for f in "$LIBDIR"/*.dylib "$LIBDIR"/*.so; do collect "$f"; done
 
 fixup() {
-  local dep base
-  for dep in $(otool -L "$1" | awk 'NR>1 {print $1}' | grep -vE '^(/usr/lib|/System|@executable_path)'); do
+  local dep base prefix
+  prefix='@loader_path/'
+  [ "$1" != "$STAGE/owntone" ] || prefix='@executable_path/lib/'
+  while IFS= read -r dep; do
+    case "$dep" in /usr/lib/*|/System/*) continue ;; esac
     base="$(basename "$dep")"
-    install_name_tool -change "$dep" "@executable_path/lib/$base" "$1" 2>/dev/null
-  done
+    install_name_tool -change "$dep" "$prefix$base" "$1" 2>/dev/null
+  done < <(otool -L "$1" | sed -n '2,$s/^[[:space:]]*\(.*\) (compatibility version.*$/\1/p')
 }
 fixup "$STAGE/owntone"
 for f in "$LIBDIR"/*.dylib; do
-  install_name_tool -id "@executable_path/lib/$(basename "$f")" "$f" 2>/dev/null
+  install_name_tool -id "@loader_path/$(basename "$f")" "$f" 2>/dev/null
   fixup "$f"
 done
+fixup "$LIBDIR/owntone-sqlext.so"
 
-codesign -f -s - "$LIBDIR"/*.dylib "$STAGE/owntone"
+codesign -f -s - "$LIBDIR"/*.dylib "$LIBDIR"/*.so "$STAGE/owntone"
 
 # VERIFY BEFORE SWAPPING. Every non-system reference must now be an
-# @executable_path/lib/ path whose target is actually present — a dangling one
+# @executable_path/lib/ or @loader_path/ path whose target is present. A dangling one
 # means the engine dies at launch with a dyld error and nothing upstream notices.
 bad=0
-for f in "$STAGE/owntone" "$LIBDIR"/*.dylib; do
+for f in "$STAGE/owntone" "$LIBDIR"/*.dylib "$LIBDIR"/*.so; do
   while read -r d; do
     case "$d" in
       @executable_path/lib/*)
         [ -f "$LIBDIR/${d#@executable_path/lib/}" ] || { echo "DANGLING: $f -> $d"; bad=1; } ;;
+      @loader_path/*)
+        [ -f "$(dirname "$f")/${d#@loader_path/}" ] || { echo "DANGLING: $f -> $d"; bad=1; } ;;
       /usr/lib/*|/System/*) ;;
       *) echo "UNREWRITTEN: $f -> $d"; bad=1 ;;
     esac
-  done < <(otool -L "$f" | awk 'NR>1 {print $1}')
+  done < <(otool -L "$f" | sed -n '2,$s/^[[:space:]]*\(.*\) (compatibility version.*$/\1/p')
 done
 [ "$bad" -eq 0 ] || { echo "FATAL: vendored tree is broken — leaving $OUT untouched"; exit 1; }
 
@@ -113,11 +158,15 @@ if [ "$(strings "$STAGE/owntone" | grep -c "AI event=%s device='%s' divergence_m
   exit 1
 fi
 
+# Validate all runtime assets before replacing the previous complete vendor tree.
+# This only loads SQLite into a disposable in-memory DB, never starts OwnTone.
+python3 "$(dirname "$0")/tests/engine-packaging.py" "$STAGE"
+
 rm -rf "$OUT"
 mkdir -p "$(dirname "$OUT")"
 cp -R "$STAGE" "$OUT"
 
 echo "vendored: $OUT"
 echo "binary deps now:"
-otool -L "$OUT/owntone" | head -8
+otool -L "$OUT/owntone" | sed -n '1,8p'
 echo "lib count: $(ls "$OUT/lib" | wc -l | tr -d ' ')"
