@@ -20,6 +20,7 @@ final class SystemVolumeObserver: @unchecked Sendable {
     private var intentRevision: UInt64 = 0
     private var writeScheduled = false
     private var deviceID = AudioObjectID(kAudioObjectUnknown)
+    private var lastScalarVolume: Double?
     private var started = false
     private let queue = DispatchQueue(label: "dali.sysvol")
 
@@ -103,7 +104,9 @@ final class SystemVolumeObserver: @unchecked Sendable {
         var d = Self.defaultAddr()
         let ok = AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject),
                                             &d, 0, nil, &size, &dev) == noErr
-        deviceID = ok ? dev : AudioObjectID(kAudioObjectUnknown)
+        let nextDevice = ok ? dev : AudioObjectID(kAudioObjectUnknown)
+        if nextDevice != deviceID { lastScalarVolume = nil }
+        deviceID = nextDevice
         guard ok, dev != kAudioObjectUnknown else {
             state.lock()
             let fallback = cachedVolume ?? 0.5, previous = _lastVolume
@@ -194,7 +197,8 @@ final class SystemVolumeObserver: @unchecked Sendable {
         state.unlock()
         // Fixed-volume devices can omit the scalar property. Preserve the
         // existing 0.5 fallback, but still honor any mute property they expose.
-        let volume = readVolume() ?? 0.5
+        if let volume = readVolume() { lastScalarVolume = volume }
+        let volume = lastScalarVolume ?? 0.5
         let muted = readMuted()
         state.lock()
         knownMuted = muted

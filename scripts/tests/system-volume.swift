@@ -13,7 +13,7 @@ private final class FakeHAL: @unchecked Sendable {
     static let shared = FakeHAL()
     private let lock = NSLock()
     private var mainCalls = 0
-    private var values: [AudioObjectID: (Float32, UInt32)] = [42: (0.65, 1), 43: (0.3, 0)]
+    private var values: [AudioObjectID: (Float32, UInt32)] = [42: (0.65, 1), 43: (0.3, 0), 44: (0.2, 0)]
     private var defaultID: AudioObjectID = 42
     private var listeners: [String: Listener] = [:]
     private var written: [Write] = []
@@ -176,6 +176,17 @@ private final class Changes: @unchecked Sendable {
         try await waitUntil("new route publication") { events.values().last.map { abs($0 - 0.3) < 0.001 } == true }
         try await waitUntil("new route listeners") { FakeHAL.shared.hasListeners(43) }
         try expect(!FakeHAL.shared.hasListeners(42), "old route listeners are removed")
+        let beforeFailure = events.values().count
+        FakeHAL.shared.omitVolume(true)
+        FakeHAL.shared.fire(43, selector: kAudioDevicePropertyMute)
+        try await waitUntil("transient scalar error refresh") { events.values().count > beforeFailure }
+        try expect(abs((observer?.current() ?? -1) - 0.3) < 0.001,
+                   "transient scalar read failure preserves the last successful scalar")
+        FakeHAL.shared.route(44)
+        try await waitUntil("unsupported new route fallback") { events.values().last == 0.5 }
+        FakeHAL.shared.omitVolume(false)
+        FakeHAL.shared.route(43)
+        try await waitUntil("restored route scalar") { events.values().last.map { abs($0 - 0.3) < 0.001 } == true }
         observer?.setVolume(0.91)
         try await waitUntil("new route write") {
             FakeHAL.shared.writes().last == FakeHAL.Write(device: 43, volume: Float32(0.91))
