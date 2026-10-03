@@ -15,6 +15,7 @@ run_check() {
 
 run_check 'Swift backend regressions' swift test --scratch-path "$CHECK_ROOT/swift"
 run_check 'Production capture lifecycle' bash scripts/tests/capture-lifecycle.sh
+run_check 'System volume observer responsiveness' bash scripts/tests/system-volume.sh
 run_check 'Actual app controller integration' bash scripts/tests/app-controller.sh
 run_check 'Bundled engine source and patch hashes' python3 scripts/engine-source-provenance.py
 run_check 'Production C engine regressions' env DALI_ENGINE_TEST_SOURCE="$PWD/third_party/owntone" node scripts/tests/airplay-backpressure.mjs
