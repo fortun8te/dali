@@ -17,7 +17,13 @@ public final class FormatConverter {
     private var s16Scratch = [Int16]()
     private var rng: UInt32 = 0x9E3779B9      // xorshift32 state, persists across buffers
 
-    public init?(from inputFormat: AVAudioFormat) {
+    private var volume: PCMVolumeRamp
+    public var appliedMasterGain: Double { volume.applied }
+    // Source state before software master gain, for tap/silence recovery.
+    public private(set) var outputWasSilent = true
+
+    public init?(from inputFormat: AVAudioFormat, initialGain: Double = 1) {
+        volume = PCMVolumeRamp(initialGain: initialGain)
         guard inputFormat.sampleRate.isFinite, inputFormat.sampleRate > 0,
               inputFormat.channelCount > 0,
               let out = AVAudioFormat(commonFormat: .pcmFormatInt16,
@@ -48,11 +54,11 @@ public final class FormatConverter {
     /// True when `format` has the rate and channel count this converter was built
     /// for. A mismatch means the device reconfigured and a new converter is needed.
     public func accepts(_ format: AVAudioFormat) -> Bool {
-        format.sampleRate == inFormat.sampleRate && format.channelCount == inFormat.channelCount
+        format == inFormat
     }
 
     /// Convert one buffer; returns interleaved s16le bytes ready for the pipe.
-    public func convert(_ buffer: AVAudioPCMBuffer) -> Data? {
+    public func convert(_ buffer: AVAudioPCMBuffer, masterGain: Double = 1) -> Data? {
         let inRate = buffer.format.sampleRate
         // A zero/NaN rate would make the capacity math inf/NaN, and
         // AVAudioFrameCount(inf) is a hard trap.
@@ -78,6 +84,10 @@ public final class FormatConverter {
         guard status != .error, outBuf.frameLength > 0,
               let ch = outBuf.floatChannelData else { return nil }
         let count = Int(outBuf.frameLength) * Int(outFormat.channelCount)
+        let samples = UnsafeMutableBufferPointer(start: ch[0], count: count)
+        outputWasSilent = !samples.contains { $0 != 0 }
+        volume.apply(to: samples, channels: Int(outFormat.channelCount),
+                     sampleRate: outFormat.sampleRate, gain: masterGain)
         if s16Scratch.count < count { s16Scratch = [Int16](repeating: 0, count: count + 1024) }
         s16Scratch.withUnsafeMutableBufferPointer { dst in
             Self.quantize(UnsafeBufferPointer(start: ch[0], count: count), into: dst, rng: &rng)
