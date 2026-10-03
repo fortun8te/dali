@@ -93,8 +93,14 @@ final class SystemVolumeObserver: @unchecked Sendable {
         deviceID = ok ? dev : AudioObjectID(kAudioObjectUnknown)
         state.unlock()
         guard ok, dev != kAudioObjectUnknown else { return }
-        if let v = readEffectiveVolume() {   // baseline, no event fired
-            state.lock(); _lastVolume = v; state.unlock()
+        if let v = readEffectiveVolume() {
+            state.lock()
+            let previous = _lastVolume
+            _lastVolume = v
+            state.unlock()
+            // A new output route can have a different master without any volume
+            // property event. Publish it so the room cannot retain the old gain.
+            onChange?(v, previous)
         }
         var v = Self.volumeAddr()
         AudioObjectAddPropertyListenerBlock(dev, &v, queue, volumeBlock)
