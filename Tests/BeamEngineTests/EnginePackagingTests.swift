@@ -10,10 +10,15 @@ final class EnginePackagingTests: XCTestCase {
             let arguments = config.engineArguments(for: binary)
             XCTAssertEqual(arguments, ["-f", "-c", config.confFile.path, "-s",
                                        directory + "/Contents/Helpers/owntone/lib/owntone-sqlext.so", "-w",
-                                       directory + "/Contents/Helpers/owntone/htdocs"])
+                                       directory + "/Contents/Resources/OwnTone"])
             XCTAssertTrue(EngineSupervisor.matchesOwnTone(executablePath: binary.path,
                 arguments: arguments, configPath: config.confFile.path))
         }
+    }
+
+    func testDevelopmentWebRootStaysBesideEngineBinary() {
+        let binary = URL(fileURLWithPath: "/tmp/checkout/vendor/owntone/owntone")
+        XCTAssertEqual(OwnToneConfig.webRoot(for: binary).path, "/tmp/checkout/vendor/owntone/htdocs")
     }
 
     func testCacheDirectoryStaysInPersistentEngineRoot() throws {
@@ -33,7 +38,7 @@ final class EnginePackagingTests: XCTestCase {
         let binary = URL(fileURLWithPath: "/tmp/Moved DALI.app/Contents/Helpers/owntone/owntone")
         let arguments = ["-f", "-c", config.confFile.path, "-s",
                          "/tmp/Moved DALI.app/Contents/Helpers/owntone/lib/owntone-sqlext.so", "-w",
-                         "/tmp/Moved DALI.app/Contents/Helpers/owntone/htdocs"]
+                         "/tmp/Moved DALI.app/Contents/Resources/OwnTone"]
         XCTAssertTrue(EngineSupervisor.matchesOwnTone(executablePath: binary.path,
             arguments: arguments, configPath: config.confFile.path))
         XCTAssertFalse(EngineSupervisor.matchesOwnTone(executablePath: binary.path,

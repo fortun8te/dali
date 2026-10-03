@@ -131,8 +131,10 @@ HTTP web root and cache directory. Vendoring now copies the complete original
 `third_party/owntone/htdocs` assets from the corresponding isolated build tree,
 excluding generated Makefiles. The existing HTTP thread requires this directory
 before it will serve DALI's API. The bundled copy contains the original web UI,
-JavaScript, CSS and images. The supervisor supplies `-w` with this directory
-beside the helper, and `general.cache_dir` points to the materialized persistent
+JavaScript, CSS and images. Release packaging moves them into
+`Contents/Resources/OwnTone`, where macOS signs them as resources. The supervisor
+supplies `-w` with this resource directory for the app bundle and uses `htdocs`
+beside the helper for a development tree. `general.cache_dir` points to the materialized persistent
 `engine/var/cache` directory. The saved library database is unchanged.
 
 The full prefix audit found seven active defaults. Config, SQLite extension

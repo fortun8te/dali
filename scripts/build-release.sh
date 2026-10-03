@@ -29,6 +29,10 @@ APP="$BUILD_ROOT/products/Release/DALI.app"
 mkdir -p "$APP/Contents/Helpers"
 rm -rf "$APP/Contents/Helpers/owntone"
 cp -R vendor/owntone "$APP/Contents/Helpers/owntone"
+# Static assets belong in Resources, not in the code-signing Helpers directory.
+mkdir -p "$APP/Contents/Resources"
+rm -rf "$APP/Contents/Resources/OwnTone"
+mv "$APP/Contents/Helpers/owntone/htdocs" "$APP/Contents/Resources/OwnTone"
 # Only executable extension assets are shipped, not tests and development notes.
 rm -rf "$APP/Contents/Resources/chrome-extension" "$APP/Contents/Resources/ChromeExtension"
 mkdir -p "$APP/Contents/Resources/ChromeExtension"

@@ -48,7 +48,13 @@ public struct OwnToneConfig: Sendable {
     }
 
     static func webRoot(for binary: URL) -> URL {
-        binary.deletingLastPathComponent().appendingPathComponent("htdocs")
+        let helperDirectory = binary.deletingLastPathComponent()
+        let helpers = helperDirectory.deletingLastPathComponent()
+        let contents = helpers.deletingLastPathComponent()
+        if helpers.lastPathComponent == "Helpers", contents.lastPathComponent == "Contents" {
+            return contents.appendingPathComponent("Resources/OwnTone")
+        }
+        return helperDirectory.appendingPathComponent("htdocs")
     }
 
     /// libconfuse string literal: a path or user name containing `"` or `\` would

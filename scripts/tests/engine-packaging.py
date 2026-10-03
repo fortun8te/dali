@@ -30,8 +30,8 @@ def verify_prefix_contract():
         raise RuntimeError(f"unreviewed engine prefix resources: {sorted(prefixed_macros)}")
 
 
-def verify_tree(root):
-    webroot = root / "htdocs"
+def verify_tree(root, webroot=None):
+    webroot = webroot or root / "htdocs"
     if not webroot.is_dir():
         raise RuntimeError("bundled engine is missing its HTTP web root directory htdocs")
     source_webroot = Path(__file__).resolve().parents[2] / "third_party/owntone/htdocs"
@@ -42,9 +42,9 @@ def verify_tree(root):
             continue
         bundled = webroot / original.relative_to(source_webroot)
         if not bundled.is_file():
-            raise RuntimeError(f"missing bundled web asset: {bundled.relative_to(root)}")
+            raise RuntimeError(f"missing bundled web asset: {bundled.relative_to(webroot)}")
         if hashlib.sha256(original.read_bytes()).digest() != hashlib.sha256(bundled.read_bytes()).digest():
-            raise RuntimeError(f"bundled web asset differs from engine source: {bundled.relative_to(root)}")
+            raise RuntimeError(f"bundled web asset differs from engine source: {bundled.relative_to(webroot)}")
     extension = root / "lib/owntone-sqlext.so"
     if not extension.is_file():
         raise RuntimeError("bundled engine is missing runtime-loaded lib/owntone-sqlext.so")
@@ -117,7 +117,10 @@ def main():
     with tempfile.TemporaryDirectory(prefix="dali SQLite relocation ") as scratch:
         relocated = Path(scratch) / "Moved DALI.app/Contents/Helpers/owntone"
         shutil.copytree(source, relocated)
-        verify_tree(relocated)
+        webroot = relocated.parents[1] / "Resources/OwnTone"
+        webroot.parent.mkdir(parents=True)
+        shutil.move(str(relocated / "htdocs"), webroot)
+        verify_tree(relocated, webroot)
         load_sqlite_extension(relocated)
     print("PASS: engine prefix resource audit, complete web assets, dependencies and SQLite load after relocation; OwnTone was not started")
 
