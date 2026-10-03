@@ -173,6 +173,7 @@ public final class RoomSessionController {
                 dependencies.stopCapture()
                 dependencies.didTearDown()
                 try? await dependencies.stopPlayback()
+                try? await dependencies.setOutputs([])
                 // A replacement start cannot run until this task is drained.
                 guard self.generation == epoch else { return nil }
                 await dependencies.setResumePlayback(false)
@@ -218,6 +219,10 @@ public final class RoomSessionController {
             // A tap creation that was already in flight also has to be closed.
             dependencies?.stopCapture()
             try? await dependencies?.stopPlayback()
+            // /player/stop keeps OwnTone output connections warm for ten
+            // seconds. A replacement waits for those connections to close, so
+            // release them now rather than exhausting its settle timeout.
+            try? await dependencies?.setOutputs([])
             await dependencies?.setResumePlayback(false)
             if let self, self.generation == epoch {
                 self.state = .idle
@@ -306,6 +311,8 @@ public final class RoomSessionController {
                 dependencies.stopCapture()
                 try context.check()
                 try await dependencies.stopPlayback()
+                try context.check()
+                try await dependencies.setOutputs([])
                 try context.check()
                 dependencies.didTearDown()
                 try await dependencies.settle(context)

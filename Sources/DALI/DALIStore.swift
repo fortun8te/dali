@@ -880,7 +880,11 @@ final class DALIStore {
         // urgent receiver mute to cover audio already in the AirPlay pipeline.
         // @Sendable: CoreAudio invokes this on its own queue, so it must not
         // inherit this initializer's main-actor isolation (a runtime trap).
-        volumeObserver.onChange = { @Sendable [weak self] new, prev in
+        // Keep a muted Mac muted while the asynchronous hardware snapshot is
+        // pending. The first observer publication supplies its actual master.
+        systemVolume = 0
+        desiredSystemVolume = 0
+        volumeObserver.start(onChange: { @Sendable [weak self] new, prev in
             Task { @MainActor in
                 guard let self, new.isFinite, prev.isFinite else { return }
                 self.desiredSystemVolume = min(max(new, 0), 1)
@@ -890,10 +894,7 @@ final class DALIStore {
                     self.startSysVolRamp()
                 }
             }
-        }
-        let initial = volumeObserver.current() ?? 0.5
-        systemVolume = initial
-        desiredSystemVolume = initial
+        })
     }
 
     /// UI harness only (`DALI_PREVIEW=1`): no engine, no capture, no beacon,
@@ -1358,6 +1359,7 @@ final class DALIStore {
             // Player sessions have no RoomSession startup dependency snapshot.
             // Their stop lives in this same barrier, before any replacement.
             try? await api.stop()
+            try? await api.setOutputs(ids: [])
             await supervisor.setResumePlayback(false)
         }
     }

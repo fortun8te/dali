@@ -65,9 +65,9 @@ final class RoomSessionControllerTests: XCTestCase {
                     self.calls.append("settle")
                 },
                 setOutputs: { ids in
-                    self.selections += 1
+                    if !ids.isEmpty { self.selections += 1 }
                     self.calls.append("select:\(ids.joined(separator: ","))")
-                    if let gate = self.selectionGate { await gate.wait() }
+                    if !ids.isEmpty, let gate = self.selectionGate { await gate.wait() }
                 },
                 setSelected: { id, selected in self.calls.append("member:\(id):\(selected)") },
                 outputs: {
@@ -172,6 +172,66 @@ final class RoomSessionControllerTests: XCTestCase {
         await controller.invalidateAndStop().value
     }
 
+    func testRestartReleasesWarmOutputsInsteadOfSpendingTheEntireSettleTimeout() async throws {
+        let fixture = Fixture()
+        let controller = fixture.makeController()
+        var warmSession = false
+        var dependencies = fixture.dependencies
+        let stopPlayback = dependencies.stopPlayback
+        dependencies.stopPlayback = {
+            try await stopPlayback()
+            // OwnTone's /player/stop flushes, then retains the connection for
+            // ten seconds. The facade's bounded settle waits another six
+            // seconds whenever that old connection is still reported.
+            warmSession = true
+        }
+        let setOutputs = dependencies.setOutputs
+        dependencies.setOutputs = { ids in
+            try await setOutputs(ids)
+            if ids.isEmpty { warmSession = false }
+        }
+        dependencies.settle = { context in
+            try context.check()
+            fixture.calls.append("settle")
+            guard fixture.captures > 0 else { return }
+            fixture.time += 2.5 // Existing receiver teardown safety floor.
+            if warmSession { fixture.time += 6 }
+        }
+        _ = try await controller.start(using: dependencies)
+        await controller.invalidateAndStop().value
+        let began = fixture.time
+        let result = try await controller.start(using: dependencies)
+        XCTAssertEqual(result?.missing, [])
+        XCTAssertEqual(fixture.time - began, 2.5,
+                       "Restart must retain the safety floor without the avoidable six-second timeout")
+        await controller.invalidateAndStop().value
+    }
+
+    func testReplacementWaitsForWarmOutputReleaseToFinish() async throws {
+        let fixture = Fixture()
+        let controller = fixture.makeController()
+        let release = Gate()
+        var dependencies = fixture.dependencies
+        let setOutputs = dependencies.setOutputs
+        dependencies.setOutputs = { ids in
+            try await setOutputs(ids)
+            if ids.isEmpty { await release.wait() }
+        }
+        _ = try await controller.start(using: dependencies)
+        let cleanup = controller.invalidateAndStop()
+        try await eventually { release.isWaiting || controller.state == .idle }
+        XCTAssertTrue(release.isWaiting, "Stop must explicitly release the engine's warm connections")
+        let next = Fixture()
+        let restart = Task { try await controller.start(using: next.dependencies) }
+        await Task.yield()
+        XCTAssertTrue(next.calls.isEmpty, "Replacement cannot select while teardown is still pending")
+        release.release()
+        await cleanup.value
+        let result = try await restart.value
+        XCTAssertEqual(result?.missing, [])
+        await controller.invalidateAndStop().value
+    }
+
     func testSecondStartSharesFirstStartupAndResult() async throws {
         let fixture = Fixture()
         let gate = Gate()
@@ -273,7 +333,7 @@ final class RoomSessionControllerTests: XCTestCase {
         XCTAssertNil(oldResult)
         XCTAssertEqual(old.captures, 0)
         XCTAssertFalse(old.calls.contains("resume:true"))
-        XCTAssertEqual(Array(old.calls.suffix(3)), ["capture:stop", "playback:stop", "resume:false"])
+        XCTAssertEqual(Array(old.calls.suffix(4)), ["capture:stop", "playback:stop", "select:", "resume:false"])
         XCTAssertEqual(newResult?.readyIDs, ["front", "back"])
         await controller.invalidateAndStop().value
     }
