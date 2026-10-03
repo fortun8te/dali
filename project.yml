@@ -28,11 +28,8 @@ targets:
         ENABLE_HARDENED_RUNTIME: YES
         CODE_SIGN_STYLE: Manual
         CODE_SIGN_IDENTITY: ""
-        GENERATE_INFOPLIST_FILE: YES
-        INFOPLIST_KEY_LSUIElement: NO
-        INFOPLIST_KEY_CFBundleIconFile: AppIcon
-        INFOPLIST_KEY_NSHumanReadableCopyright: ""
-        INFOPLIST_KEY_NSAudioCaptureUsageDescription: "DALI captures your Mac's audio so it can play on your AirPlay speakers."
+        GENERATE_INFOPLIST_FILE: NO
+        INFOPLIST_FILE: Assets/Info.plist
         SWIFT_STRICT_CONCURRENCY: minimal
 
   DALITests:

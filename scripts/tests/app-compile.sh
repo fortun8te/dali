@@ -24,4 +24,5 @@ if ! xcodebuild -project "$BUILD_ROOT/project/DALI.xcodeproj" -scheme DALI \
 fi
 APP="$BUILD_ROOT/derived-data/Build/Products/Release/DALI.app"
 [ -x "$APP/Contents/MacOS/DALI" ] || { echo 'App executable missing after compilation'; exit 1; }
+python3 scripts/tests/app-metadata.py "$APP/Contents/Info.plist" "$APP/Contents/Resources"
 echo 'PASS: complete DALI app compiled unsigned, without launching or installing'
