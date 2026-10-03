@@ -1765,9 +1765,9 @@ final class DALIStore {
     private func applyPreviewState() {
         let env = ProcessInfo.processInfo.environment
         speakers = [
-            RoomSpeaker(id: "preview-front", name: "Front", type: "AirPlay 2",
+            RoomSpeaker(id: "preview-front", name: "MICHAEL D", type: "AirPlay 2",
                         kind: .front, enabled: true, relVolume: 100, health: .live),
-            RoomSpeaker(id: "preview-back", name: "Back", type: "AirPlay 2",
+            RoomSpeaker(id: "preview-back", name: "MICHAEL S", type: "AirPlay 2",
                         kind: .back, enabled: true, relVolume: 100, health: .live),
         ]
         audioLevel = 0.62; bassLevel = 0.5; trebleLevel = 0.4
@@ -1793,11 +1793,17 @@ final class DALIStore {
     /// so mute/volume-down is always responsive. 200 ms — OwnTone's
     /// SET_PARAMETER (volume) to the PowerNode times out under chatter and
     /// tears the AirPlay session down ("failed during execution of volume").
+    private var sysVolLastApplyAt = Date.distantPast
     private func startSysVolRamp() {
         guard sysVolRampTask == nil else { return }
+        // Leading edge: the first key press after a quiet spell applies at once
+        // (it used to wait the full 200 ms every time, which is the lag you feel
+        // on a single press). Presses inside the window still coalesce.
+        let wait = max(0, 0.2 - Date().timeIntervalSince(sysVolLastApplyAt))
         sysVolRampTask = Task { @MainActor in
-            try? await Task.sleep(nanoseconds: 200_000_000)
+            if wait > 0 { try? await Task.sleep(nanoseconds: UInt64(wait * 1_000_000_000)) }
             guard !Task.isCancelled else { sysVolRampTask = nil; return }
+            sysVolLastApplyAt = Date()
             systemVolume = desiredSystemVolume
             if phase == .streaming, case .system = source {
                 prioritizeManualVolumeChange()
@@ -2047,6 +2053,11 @@ final class DALIStore {
         let deadline = Date().addingTimeInterval(maxWait)
         while Date() < deadline, phase == .starting, gen == streamGeneration {
             guard let outs = try? await api.outputs() else { break }
+            // Wait for `connected` to clear as well as `streaming`. AirPlay 2 receivers
+            // keep `connected` for a few seconds while they tear the old session
+            // down; a new SETUP that lands inside that window leaves the engine
+            // reporting "streaming" while one receiver (random: front, back or
+            // both) plays nothing. Shortening this wait caused exactly that.
             let busy = outs.filter { names.contains($0.name) && ($0.streaming == true || $0.connected == true) }
             if busy.isEmpty { return }
             try? await Task.sleep(nanoseconds: 300_000_000)
@@ -2061,14 +2072,38 @@ final class DALIStore {
     /// FULL output list, which keeps the shared AirPlay 2 session intact; a
     /// per-member deselect is the last resort and both are re-added after it.
     /// Returns nil when the start was superseded.
-    private func verifyStartupActivation(chosen: [RoomSpeaker], gen: Int) async -> Set<String>? {
+    private func verifyStartupActivation(chosen: [RoomSpeaker], gen: Int) async throws -> Set<String>? {
         let all = chosen.map(\.id)
-        func current() -> Bool { phase == .starting && gen == streamGeneration }
+        func current() -> Bool { !Task.isCancelled && phase == .starting && gen == streamGeneration }
         func names(_ m: Set<String>) -> String {
             chosen.filter { m.contains($0.id) }.map(\.name).joined(separator: ", ")
         }
-        var missing = await awaitOutputsReady(ids: Set(all), timeoutMs: 6_000)
+        var missing = await awaitOutputsReady(ids: Set(all), timeoutMs: 6_000, failFast: true)
         guard current() else { return nil }
+        var recovery = RoomStartupRecovery()
+        // A fully failed cold start can leave the pipe player running with no
+        // active AirPlay sessions. Reasserting outputs kept that failed attempt
+        // alive; a normal fresh start recovered both speakers in the live repro.
+        // Reset once, only for explicitly failed ALL-room sessions. Librespot
+        // owns its own pipe writer and is excluded from this capture reset.
+        if source != .spotify, let outputs = try? await api.outputs(), current(),
+           recovery.claimReset(ids: Set(all), missing: missing, outputs: outputs) {
+            dlog("startup room sessions failed -> one fresh pipe session")
+            aiEvent("startup_room_reset", level: "warn", fields: ["speakers": names(missing)])
+            capture.stop()
+            guard current() else { return nil }
+            try await api.stop()
+            guard current() else { return nil }
+            lastTeardownAt = Date()
+            await settleAfterTeardown(gen: gen)
+            guard current() else { return nil }
+            try await api.setOutputs(ids: all)
+            guard current() else { return nil }
+            try capture.start(fifoPath: config.pipePath.path,
+                              muteLocal: true, source: source.tapSource)
+            missing = await awaitOutputsReady(ids: Set(all), timeoutMs: 8_000)
+            guard current() else { return nil }
+        }
         for (attempt, backoffMs, waitMs) in [(1, 0, 8_000), (2, 2_000, 10_000)] where !missing.isEmpty {
             dlog("startup speakers not ready: \(names(missing)) -> re-assert full output list (try \(attempt))")
             aiEvent("startup_speaker_retry", level: "warn",
@@ -2078,7 +2113,9 @@ final class DALIStore {
                 guard current() else { return nil }
             }
             try? await api.setOutputs(ids: all)
-            missing = await awaitOutputsReady(ids: missing, timeoutMs: waitMs)
+            // Re-selecting an AP2 group can disconnect its previously ready partner.
+            // Recheck the entire room rather than retaining a stale success.
+            missing = await awaitOutputsReady(ids: Set(all), timeoutMs: waitMs)
             guard current() else { return nil }
         }
         if !missing.isEmpty {
@@ -2092,7 +2129,7 @@ final class DALIStore {
             try? await Task.sleep(nanoseconds: 1_500_000_000)
             guard current() else { return nil }
             try? await api.setOutputs(ids: all)
-            missing = await awaitOutputsReady(ids: missing, timeoutMs: 10_000)
+            missing = await awaitOutputsReady(ids: Set(all), timeoutMs: 10_000)
             guard current() else { return nil }
         }
         return missing
@@ -2156,6 +2193,9 @@ final class DALIStore {
                 }
                 ptpDegraded = await supervisor.ptpAvailable == false
                 if ptpDegraded { dlog("PTP degraded at stream start — will show NEEDS YOU") }
+                guard phase == .starting, gen == streamGeneration else { return }
+                // Let a pending Stop finish tearing the old AirPlay sessions down.
+                await teardownTask?.value
                 guard phase == .starting, gen == streamGeneration else { return }
                 // The previous session (and a fresh engine) must settle before
                 // the same speakers are selected again.
@@ -2274,7 +2314,7 @@ final class DALIStore {
                 // when the actual AirPlay session is stopped or failed. Activation
                 // is verified per speaker and retried gently (full output list
                 // re-asserted, partner untouched); see verifyStartupActivation.
-                guard let missing = await verifyStartupActivation(chosen: chosen, gen: gen) else { return }
+                guard let missing = try await verifyStartupActivation(chosen: chosen, gen: gen) else { return }
                 if !missing.isEmpty {
                     let names = chosen.filter { missing.contains($0.id) }.map(\.name).joined(separator: ", ")
                     guard missing.count < chosen.count else {
@@ -2330,6 +2370,8 @@ final class DALIStore {
         }
     }
 
+    private var teardownTask: Task<Void, Never>?
+
     func stopStream() {
         lastTeardownAt = Date()
         streamGeneration += 1
@@ -2350,13 +2392,18 @@ final class DALIStore {
         resetCutState()
         networkSettleTask?.cancel(); networkSettleTask = nil
         capture.stop()
-        Task {
-            guard generation == streamGeneration else { return }
+        // The engine stop must ALWAYS run. It used to bail out when a new start had
+        // bumped `streamGeneration` first (Stop then Play within a second), so the
+        // old AirPlay sessions were never torn down: the engine kept reporting
+        // them "streaming" while one receiver (often the front) had already
+        // dropped out, and the new start inherited that half-dead session. The
+        // next start waits for this task instead of racing it.
+        let previousTeardown = teardownTask
+        teardownTask = Task {
+            await previousTeardown?.value
             await supervisor.setResumePlayback(false)
-            guard generation == streamGeneration else { return }
             try? await api.stop()
-            guard generation == streamGeneration else { return }
-            await stopSpotify()
+            if generation == streamGeneration { await stopSpotify() }
         }
         for i in speakers.indices { speakers[i].health = .off }
         dlog("stream stopped by user")
@@ -2749,7 +2796,7 @@ final class DALIStore {
     ///
     /// Still pushed rather than merely assumed, for two reasons: output ids are
     /// session-scoped so a new stream can inherit whatever the engine last
-    /// stored (the DB held a stale `Front = 60` from the old control long
+    /// stored (the DB held a stale `MICHAEL D = 60` from the old control long
     /// after the app had moved on), and a muted pair member stays in the AirPlay
     /// group, so skipping it would leave a wrong value to surface on unmute.
     ///
@@ -3052,7 +3099,15 @@ final class DALIStore {
             // 0...volumeLimit range. The old formula hit the limit at only 20%
             // Mac volume (then a second 15% cap flattened it again), so most
             // volume-key presses appeared to do nothing.
-            case .system: base = s.relVolume * systemVolume * (volumeLimit / 100)
+            case .system:
+                // The Mac's slider is linear but AirPlay volume is a dB scale, and
+                // the Bluesound front sits at about -53 dB for engine volume 31
+                // (-60 dB at 19): below roughly Mac 30% the front was simply
+                // inaudible and the room "played nothing". A gentle curve lifts the
+                // low end (Mac 18% -> 30, 31% -> 44, 68% -> 76) and leaves 0 and
+                // 100% where they were.
+                let curved = pow(min(max(systemVolume, 0), 1), 0.7)
+                base = s.relVolume * curved * (volumeLimit / 100)
             case .app:    base = s.relVolume
             case .spotify: base = s.relVolume
             }
@@ -3191,9 +3246,10 @@ final class DALIStore {
     }
 
     /// Returns the ids that did not become genuinely ready before the deadline.
-    private func awaitOutputsReady(ids: Set<String>, timeoutMs: Int) async -> Set<String> {
+    private func awaitOutputsReady(ids: Set<String>, timeoutMs: Int, failFast: Bool = false) async -> Set<String> {
         let client = api
-        return await OutputReadiness.missing(ids: ids, timeout: .milliseconds(timeoutMs)) {
+        return await OutputReadiness.missing(ids: ids, timeout: .milliseconds(timeoutMs),
+                                             failFastAfter: failFast ? .milliseconds(1_500) : nil) {
             try await client.outputs()
         }
     }
@@ -3436,7 +3492,7 @@ final class DALIStore {
                     // Pace between speakers (was 100ms end-of-batch only). AirPlay
                     // volume is RTSP SET_PARAMETER — stacking both devices at once
                     // is what produced APIHANG + "No response to SET_PARAMETER".
-                    try? await Task.sleep(nanoseconds: 180_000_000)
+                    try? await Task.sleep(nanoseconds: 100_000_000)
                 }
             } while pushAgain || forceVolumePush
         }
@@ -3757,7 +3813,7 @@ final class DALIStore {
         // The same stall follows DALI's OWN speaker rejoins/resumes: OwnTone's
         // command lane blocks on the RTSP handshake to the device being
         // re-selected. Log evidence (dali-debug.log 2026-09-22 02:14-02:25): the
-        // 02:16:20 respawn fired 10 s after "Back hard rejoin succeeded"
+        // 02:16:20 respawn fired 10 s after "MICHAEL S hard rejoin succeeded"
         // and threw that recovered session away.
         let settling = now.timeIntervalSince(lastNetworkChangeAt) < 20
             || now.timeIntervalSince(lastRecoveryActivityAt) < 20
@@ -3978,8 +4034,13 @@ final class DALIStore {
                         // the gentle rejoin. The rejoin never deselects the partner.
                         if strikes >= 2 {
                             if speakers[i].health != .trouble {
-                                dlog("\(speakers[i].name) dropped (2 strikes, ~6 s) -> rejoining gently")
-                                aiEvent("speaker_rejoin", level: "warn", fields: ["speaker": speakers[i].name])
+                                // Context for the next dropout: both speakers going at
+                                // once (and a path change just before) means the Mac or
+                                // engine stalled, not the speaker.
+                                let others = speakers.filter { $0.id != id && $0.enabled && $0.health != .live }.map(\.name)
+                                let netAge = Int(Date().timeIntervalSince(lastNetworkChangeAt))
+                                dlog("\(speakers[i].name) dropped (2 strikes, ~6 s) -> rejoining gently [also down: \(others.isEmpty ? "none" : others.joined(separator: ",")); path ok=\(pathSatisfied) last change \(netAge)s ago]")
+                                aiEvent("speaker_rejoin", level: "warn", fields: ["speaker": speakers[i].name, "also_down": others.joined(separator: ","), "path_ok": "\(pathSatisfied)"])
                             }
                             speakers[i].health = .trouble
                         }
