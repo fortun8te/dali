@@ -104,7 +104,6 @@ public actor EngineSupervisor {
         var clearClock: @Sendable () -> Void = { _ = shm_unlink("/airptp_shm") }
         var ptpTimeout: TimeInterval = 12
         var terminateGrace: TimeInterval = 11
-        var startupHold: TimeInterval = 1
     }
 
     public init(binary: URL, config: OwnToneConfig) {
@@ -608,12 +607,14 @@ public actor EngineSupervisor {
             try p.run()
             process = p
             spawnedAt = Date()
-            // Nothing may reach its HTTP thread while it is still initialising.
-            api.resumeSession()
-            api.holdOff(for: runtime.startupHold)
 
             // Health poll: the API must answer within the startup window. TCP
             // first (free), then ONE HTTP request at a time through the lane.
+            // Keep all callers fenced until the child's listener exists. The
+            // bundled engine initializes its worker/player and HTTP modules
+            // before listening, so readiness need not pay a fixed one-second
+            // delay after every spawn.
+            var listenerReady = false
             let deadline = Date().addingTimeInterval(Self.startupTimeoutSeconds)
             while true {
                 if stopEpoch != epoch { throw CancellationError() }
@@ -623,12 +624,18 @@ public actor EngineSupervisor {
                     transition(.failed("engine exited during startup"))
                     throw BeamAPIError(what: "engine exited during startup")
                 }
-                if runtime.tcpAccepts(config.port), await api.isUp(deadline: 3) {
-                    if stopEpoch != epoch { throw CancellationError() }
-                    guard process === p else { continue }
-                    transition(.running)
-                    startLogWatch()
-                    return
+                if runtime.tcpAccepts(config.port) {
+                    if !listenerReady {
+                        api.resumeSession()
+                        listenerReady = true
+                    }
+                    if await api.isUp(deadline: 3) {
+                        if stopEpoch != epoch { throw CancellationError() }
+                        guard p.isRunning, process === p else { continue }
+                        transition(.running)
+                        startLogWatch()
+                        return
+                    }
                 }
                 if Date() >= deadline { break }
                 try await Task.sleep(nanoseconds: 250_000_000)

@@ -1,6 +1,7 @@
 import Foundation
 import Darwin
 import XCTest
+import os
 @testable import BeamEngine
 
 private struct ChildFixture: Sendable {
@@ -71,7 +72,6 @@ private struct ChildFixture: Sendable {
         runtime.clearClock = {} // Tests must never unlink a live shared clock.
         runtime.ptpTimeout = 0.02
         runtime.terminateGrace = 0.5
-        runtime.startupHold = 0
         return runtime
     }
     func cleanup() {
@@ -112,6 +112,103 @@ final class EngineLifecycleTests: XCTestCase {
         await supervisor.stop()
         XCTAssertNil(fixture.pid)
         XCTAssertEqual(fixture.events.map { $0.split(separator: " ")[0] }, ["start", "stop"])
+    }
+
+    func testListeningEngineDoesNotPayFixedStartupHold() async throws {
+        let fixture = try ChildFixture.make()
+        defer { fixture.cleanup() }
+        let transport = ControlledBeamTransport()
+        // Exercise the same listener admission as production. A fast listener
+        // must not be hidden behind a fixed post-spawn delay.
+        let supervisor = EngineSupervisor(binary: fixture.binary, config: fixture.config,
+            api: BeamAPI(lane: RequestLane(transport: transport)), runtime: fixture.runtime())
+        let before = ContinuousClock.now
+        let starting = Task { try await supervisor.start() }
+        try await eventually { await transport.observation.requests.count == 1 }
+        let readinessLatency = before.duration(to: .now)
+        print("Isolated engine readiness latency: \(readinessLatency)")
+        await transport.reply()
+        try await starting.value
+        await supervisor.stop()
+        XCTAssertLessThan(readinessLatency, .milliseconds(700),
+            "A ready engine must not wait a fixed second before its readiness request")
+    }
+
+    func testStartupKeepsRequestsSuspendedUntilListenerAccepts() async throws {
+        let fixture = try ChildFixture.make()
+        defer { fixture.cleanup() }
+        let transport = ControlledBeamTransport()
+        let lane = RequestLane(transport: transport)
+        let api = BeamAPI(lane: lane)
+        let listening = OSAllocatedUnfairLock(initialState: false)
+        var runtime = fixture.runtime()
+        runtime.tcpAccepts = { _ in fixture.pid != nil && listening.withLock { $0 } }
+        let supervisor = EngineSupervisor(binary: fixture.binary, config: fixture.config,
+            api: api, runtime: runtime)
+        let starting = Task { try await supervisor.start() }
+        try await eventually { fixture.pid != nil }
+        XCTAssertFalse(lane.snapshot.accepting,
+            "No caller may send HTTP while the spawned engine has no listener")
+        let prematureRead = await api.isUp(deadline: 0.02)
+        XCTAssertFalse(prematureRead)
+        let beforeListener = await transport.observation
+        XCTAssertTrue(beforeListener.requests.isEmpty)
+        // Drain a premature socket even on the broken implementation, so this
+        // test reports the admission failure without stranding the supervisor.
+        if !beforeListener.requests.isEmpty { await transport.reply() }
+        listening.withLock { $0 = true }
+        try await eventually { await transport.observation.requests.count == beforeListener.requests.count + 1 }
+        let readyRequest = await transport.observation.requests.last!
+        XCTAssertEqual(readyRequest.url?.path, "/api/config")
+        await transport.reply()
+        try await starting.value
+        await supervisor.stop()
+    }
+
+    func testStopBeforeListenerWinsWithoutSendingHTTP() async throws {
+        let fixture = try ChildFixture.make()
+        defer { fixture.cleanup() }
+        let transport = ControlledBeamTransport()
+        let lane = RequestLane(transport: transport)
+        var runtime = fixture.runtime()
+        runtime.tcpAccepts = { _ in false }
+        let supervisor = EngineSupervisor(binary: fixture.binary, config: fixture.config,
+            api: BeamAPI(lane: lane), runtime: runtime)
+        let starting = Task { try await supervisor.start() }
+        try await eventually { fixture.pid != nil }
+        let stopping = Task { await supervisor.stop() }
+        stopping.cancel()
+        await stopping.value
+        do { try await starting.value; XCTFail("stopped listener startup succeeded") }
+        catch { XCTAssertTrue(error is CancellationError) }
+        XCTAssertNil(fixture.pid)
+        XCTAssertEqual(fixture.events.map { $0.split(separator: " ")[0] }, ["start", "stop"])
+        let observed = await transport.observation
+        XCTAssertTrue(observed.requests.isEmpty)
+        let state = await supervisor.state
+        XCTAssertEqual(state, .stopped)
+    }
+
+    func testDeathBeforeListenerFailsWithoutSendingHTTP() async throws {
+        let fixture = try ChildFixture.make()
+        defer { fixture.cleanup() }
+        let transport = ControlledBeamTransport()
+        var runtime = fixture.runtime()
+        runtime.tcpAccepts = { _ in false }
+        let supervisor = EngineSupervisor(binary: fixture.binary, config: fixture.config,
+            api: BeamAPI(lane: RequestLane(transport: transport)), runtime: runtime)
+        let starting = Task { try await supervisor.start() }
+        try await eventually { fixture.pid != nil }
+        kill(try XCTUnwrap(fixture.pid), SIGKILL)
+        do { try await starting.value; XCTFail("dead listener startup succeeded") }
+        catch { XCTAssertTrue(String(describing: error).contains("exited during startup")) }
+        // Cancel crash recovery while it is in backoff. Tests never leave an
+        // unowned fixture waiting for HTTP or probing the real PTP service.
+        await supervisor.stop()
+        let observed = await transport.observation
+        XCTAssertTrue(observed.requests.isEmpty)
+        let state = await supervisor.state
+        XCTAssertEqual(state, .stopped)
     }
 
     func testStopWinsDuringReadinessAndPreventsResurrection() async throws {
