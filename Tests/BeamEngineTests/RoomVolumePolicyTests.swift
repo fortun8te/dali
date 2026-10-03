@@ -16,6 +16,27 @@ final class RoomVolumePolicyTests: XCTestCase {
         }
     }
 
+    func testFront100Back80KeepsBalanceWhileMasterChangesRoomLoudness() {
+        let speakers = [RoomVolumeSpeaker(id: "front", slider: 100),
+                        RoomVolumeSpeaker(id: "back", slider: 80)]
+        for ceiling in [20.0, 40, 100] {
+            let full = RoomVolumePolicy.plan(speakers: speakers, ceiling: ceiling, systemMaster: 1)
+            XCTAssertEqual(full.hardware, ["front": Int(ceiling), "back": Int(ceiling * 0.8)])
+            var previousGain = 0.0
+            for step in 1...1_000 {
+                let plan = RoomVolumePolicy.plan(speakers: speakers, ceiling: ceiling,
+                                                 systemMaster: Double(step) / 1_000)
+                XCTAssertEqual(plan.hardware, full.hardware)
+                XCTAssertGreaterThan(plan.pcmGain, previousGain)
+                previousGain = plan.pcmGain
+            }
+            XCTAssertEqual(previousGain, 1, accuracy: 1e-12)
+            let mute = RoomVolumePolicy.plan(speakers: speakers, ceiling: ceiling, systemMaster: 0)
+            XCTAssertEqual(mute.pcmGain, 0)
+            XCTAssertEqual(mute.hardware, ["front": 0, "back": 0])
+        }
+    }
+
     func testSoftwareMasterMatchesLegacyStrongestReceiverAboveLowEndTaper() {
         for ceiling in [20.0, 40, 100] {
             let full = RoomVolumePolicy.plan(speakers: room, ceiling: ceiling, systemMaster: 1)
