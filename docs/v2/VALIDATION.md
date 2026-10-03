@@ -73,3 +73,15 @@ The user reported engine startup failure and a placeholder icon after the first 
 The repair adds an explicit source Info.plist, bundles and relocates the SQLite module and its dependencies, and passes a binary-relative module path to the engine. The metadata regression failed on the reported bundle and passed on the explicit source metadata; generated build settings selected that source plist. The module regression failed before repair and passed after relocating the helper tree, loading the extension into a fresh in-memory database, and exercising its custom function and collation. All 17 targeted Swift packaging, process-identity and lifecycle tests passed. Canonical engine source remained unchanged.
 
 The corrected app compiled and signed successfully with the existing identity, replaced the existing installation, and had its app registration refreshed. It was left closed. No post-build app verification, app launch, live engine startup or speaker testing was performed. These targeted checks do not establish runtime startup or audibility in the installed app.
+
+## Follow-up startup resource repair
+
+The second reported failure was traced from existing user-run logs: SQLite loaded successfully, then HTTP startup failed because the compiled web root pointed into the engine build prefix. The cache path also pointed there. No app or live engine was launched during diagnosis.
+
+The resource audit covers all seven active prefix defaults. The helper receives an explicit web root in `Contents/Resources/OwnTone`, while development helper trees retain their adjacent `htdocs`. The complete 14 original web assets are bundled; a regression compares their bytes with the matching engine source. Cache files use a newly materialized `engine/var/cache`; the saved database path and contents are preserved. `BeamAPIError` now supplies its actual message through localized errors instead of the generic numbered error shown in the screenshot.
+
+The missing-resource and cache regressions failed before repair. The initial targeted run passed 18 Swift tests, and the resource/dependency audit and relocated in-memory SQLite check passed. The localized-error regression independently failed twice before its fix and passed afterward. The canonical 543-file engine inventory is unchanged.
+
+The first signing attempt caught web assets in the executable-helper area; that candidate was not installed. The final packaging places them in the app resource area and updates launch paths and release packaging together.
+
+Final checks after the resource-layout correction passed: 20 targeted Swift tests (including localized errors), the complete source-prefix/resource/dependency audit, isolated relocated SQLite loading, script syntax, and diff whitespace checks. The final Apple Silicon Release compilation and signing both succeeded. The existing `/Applications/DALI.app` was replaced with the same signing identity, and the prior bundle was preserved for rollback. No post-build app verification, launch, UI interaction, live engine startup, or speaker test was performed. Build success and these isolated checks do not establish installed runtime behavior.
