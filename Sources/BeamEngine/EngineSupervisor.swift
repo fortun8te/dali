@@ -484,15 +484,19 @@ public actor EngineSupervisor {
     }
 
     private nonisolated static func isMatchingEngine(_ pid: Int32, confPath: String) -> Bool {
-        guard let info = processArguments(of: pid), info.argv.count == 4 else { return false }
+        guard let info = processArguments(of: pid) else { return false }
         return matchesOwnTone(executablePath: info.executable, arguments: Array(info.argv.dropFirst()),
                               configPath: confPath)
     }
 
     static func matchesOwnTone(executablePath: String, arguments: [String],
                                configPath: String) -> Bool {
-        URL(fileURLWithPath: executablePath).lastPathComponent == "owntone"
-            && arguments == ["-f", "-c", configPath]
+        let binary = URL(fileURLWithPath: executablePath)
+        let original = ["-f", "-c", configPath]
+        let bundled = original + ["-s", OwnToneConfig.sqliteExtension(for: binary).path]
+        // Keep exact matching for the prior installed generation during upgrades.
+        return binary.lastPathComponent == "owntone"
+            && (arguments == original || arguments == bundled)
     }
 
     /// How long a freshly spawned engine gets to start answering HTTP. Measured
@@ -586,7 +590,7 @@ public actor EngineSupervisor {
 
             let p = Process()
             p.executableURL = binary
-            p.arguments = ["-f", "-c", config.confFile.path]   // foreground, our config
+            p.arguments = config.engineArguments(for: binary)
             // No pipes on purpose: OwnTone logs to its own logfile, and a pipe
             // nobody drains eventually blocks the child on write.
             p.standardOutput = FileHandle.nullDevice

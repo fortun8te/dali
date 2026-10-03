@@ -15,7 +15,8 @@ BUILD_ROOT="$(mktemp -d /private/tmp/dali-release.XXXXXX)"
 trap 'rm -rf "$BUILD_ROOT"' EXIT
 command -v xcodegen >/dev/null || { echo 'Install XcodeGen: brew install xcodegen'; exit 1; }
 [ -x vendor/owntone/owntone ] || { echo 'Build and vendor the engine first. See docs/building.md.'; exit 1; }
-for binary in vendor/owntone/owntone vendor/owntone/lib/*.dylib; do
+python3 scripts/tests/engine-packaging.py
+for binary in vendor/owntone/owntone vendor/owntone/lib/*.dylib vendor/owntone/lib/*.so; do
   lipo "$binary" -verify_arch "$ARCH" || { echo "Missing $ARCH in $binary"; exit 1; }
 done
 xcodegen generate
@@ -36,7 +37,7 @@ if [ -d licenses ]; then cp -R licenses "$APP/Contents/Resources/ThirdPartyLicen
 /usr/bin/xattr -cr "$APP"
 SIGN_ARGS=(--force --sign "$IDENTITY" --options runtime)
 if [ "$IDENTITY" != '-' ]; then SIGN_ARGS+=(--timestamp); fi
-for binary in "$APP/Contents/Helpers/owntone/lib/"*.dylib "$APP/Contents/Helpers/owntone/owntone"; do
+for binary in "$APP/Contents/Helpers/owntone/lib/"*.dylib "$APP/Contents/Helpers/owntone/lib/"*.so "$APP/Contents/Helpers/owntone/owntone"; do
   codesign "${SIGN_ARGS[@]}" "$binary"
 done
 codesign "${SIGN_ARGS[@]}" "$APP"

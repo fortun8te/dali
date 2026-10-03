@@ -35,6 +35,16 @@ public struct OwnToneConfig: Sendable {
     }
     public var confFile: URL { etcDir.appendingPathComponent("owntone.conf") }
 
+    func engineArguments(for binary: URL) -> [String] {
+        ["-f", "-c", confFile.path, "-s", Self.sqliteExtension(for: binary).path]
+    }
+
+    /// OwnTone's compiled default points into the build prefix. The module must
+    /// follow the bundled executable when the app or checkout moves.
+    static func sqliteExtension(for binary: URL) -> URL {
+        binary.deletingLastPathComponent().appendingPathComponent("lib/owntone-sqlext.so")
+    }
+
     /// libconfuse string literal: a path or user name containing `"` or `\` would
     /// otherwise end the string early and make the whole file unparseable — the
     /// engine then fails to start on every launch for that user.

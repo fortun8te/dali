@@ -108,6 +108,24 @@ the relocated/ad-hoc-signed checkout-local helper was
 `6df9882bc3d0dee5a5ae56d6021d58dc982e2ef9cfdd2066c1741a74911606ef`.
 The app was not signed or installed, and the engine was not launched.
 
+The initial vendoring step omitted OwnTone's runtime-loaded SQLite extension.
+The engine's compiled default also pointed into the checkout's install prefix,
+which caused the observed database startup failure. Packaging now includes
+`lib/owntone-sqlext.so` and its dependencies. The supervisor supplies OwnTone's
+existing `-s` option with the extension beside the bundled executable, so app
+relocation does not use that build prefix. Shared libraries use `@loader_path`
+for their sibling dependencies. Release signing and architecture checks include
+the `.so` module as well as dylibs. No bundled C source changed for this repair.
+
+`python3 scripts/tests/engine-packaging.py` checks every bundled dependency,
+copies the engine tree into a new temporary app path containing spaces, then
+loads the relocated extension with the bundled SQLite library in a new
+in-memory database. It verifies the extension's custom function, Unicode LIKE
+and DAAP collation. It never starts OwnTone, opens the saved database, binds a
+port or connects to a speaker. The Swift packaging and reaping checks cover
+the exact launch arguments and safe recognition of the old and new process
+generations.
+
 The host's system SQLite lacked unlock-notify support. Compile validation used
 a copy of the prior development bundle's standalone SQLite dylib in the
 ignored checkout-local dependency directory. Only that copy's install name and

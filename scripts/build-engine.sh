@@ -36,5 +36,7 @@ rsync -a third_party/owntone/ build/engine-src/owntone/
   ./configure --prefix="$ENGINE_PREFIX" --sysconfdir="$ENGINE_PREFIX/etc" --localstatedir="$ENGINE_PREFIX/var"
   make -j4
 )
-./scripts/vendor-owntone.sh "$ROOT/build/engine-src/owntone/src/owntone"
+./scripts/vendor-owntone.sh "$ROOT/build/engine-src/owntone/src/owntone" \
+  "$ROOT/build/engine-src/owntone/sqlext/.libs/owntone-sqlext.so"
+python3 scripts/tests/engine-packaging.py
 echo 'Engine built and vendored. Nothing was installed or launched.'
