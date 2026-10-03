@@ -1,6 +1,6 @@
 # V2 validation
 
-Status: the complete automated gate passed on 3 October 2026, with a verified process exit status of zero. No V2 app candidate has been installed, signed, launched, or tested with physical speakers in this task.
+Status: the complete automated gate passed on 3 October 2026, with a verified process exit status of zero. The requested follow-up rebuild then replaced the existing installed app as recorded below. Physical speaker behavior remains untested.
 
 ## Complete gate
 
@@ -59,3 +59,9 @@ Before a public Mac release, test the candidate on real receivers across low, me
 Live video testing must cover YouTube and Shorts, TikTok feed/source changes, and Instagram audio reporting with its picture-delay bypass. Verify app and extension stop/restart and updates while pages remain open.
 
 Build and verify the exact bundled engine source and nested library architecture. Developer ID signing, notarization, final archive verification, Chrome Web Store distribution, and download/install/update on a clean Mac are separate release gates. See [release requirements](../releasing.md). Hosted CI is still inactive until a maintainer copies `docs/ci/ci.yml` into `.github/workflows/ci.yml` with the required workflow permission.
+
+## Requested follow-up rebuild
+
+On 3 October 2026, a bounded final source review found no additional high-impact issue. The unchanged application code was rebuilt successfully for Apple Silicon, bundled with the compiled V2 engine, and signed with the existing Michael Computer Use Signing identity. At the user's request, it replaced `/Applications/DALI.app` rather than installing a second app. The previous bundle was retained outside Applications for rollback. Saved settings were preserved.
+
+The app was left closed. No post-build app verification, launch, UI check, speaker test, or playback measurement was performed, as requested. The successful build and signing command results establish those operations only; they do not establish runtime behavior.
