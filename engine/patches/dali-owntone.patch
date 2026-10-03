@@ -1,763 +1,5 @@
-diff --git a/build-aux/config.rpath b/build-aux/config.rpath
-old mode 100644
-new mode 100755
-index e69de29..58870bd
---- a/build-aux/config.rpath
-+++ b/build-aux/config.rpath
-@@ -0,0 +1,751 @@
-+#! /bin/sh
-+# Output a system dependent set of variables, describing how to set the
-+# run time search path of shared libraries in a binary (executable or
-+# shared library).
-+#
-+#   Copyright 1996-2024 Free Software Foundation, Inc.
-+#   Taken from GNU libtool, 2001
-+#   Originally by Gordon Matzigkeit <gord@gnu.ai.mit.edu>, 1996
-+#
-+#   This file is free software; the Free Software Foundation gives
-+#   unlimited permission to copy and/or distribute it, with or without
-+#   modifications, as long as this notice is preserved.
-+
-+# Known limitations:
-+# - On IRIX 6.5 with CC="cc", the run time search patch must not be longer
-+#   than 256 bytes, otherwise the compiler driver will dump core. The only
-+#   known workaround is to choose shorter directory names for the build
-+#   directory and/or the installation directory.
-+
-+# func_usage
-+# outputs to stdout the --help usage message.
-+func_usage ()
-+{
-+  echo "\
-+Usage: config.rpath [OPTION] HOST
-+
-+Prints shell variable assignments that describe how to hardcode a directory
-+for the lookup of shared libraries into a binary (executable or shared library).
-+
-+The first argument passed to this file is the canonical host specification,
-+   CPU_TYPE-MANUFACTURER-OPERATING_SYSTEM
-+or
-+   CPU_TYPE-MANUFACTURER-KERNEL-OPERATING_SYSTEM
-+
-+The environment variables CC, GCC, LDFLAGS, LD, with_gnu_ld
-+should be set by the caller.
-+
-+The set of defined variables is at the end of this script.
-+
-+Options:
-+      --help           print this help and exit
-+      --version        print version information and exit
-+
-+Send patches and bug reports to <bug-gnulib@gnu.org>."
-+}
-+
-+# func_version
-+# outputs to stdout the --version message.
-+func_version ()
-+{
-+  echo "config.rpath (GNU gnulib, module havelib)"
-+  echo "Copyright (C) 2024 Free Software Foundation, Inc.
-+License: All-Permissive.
-+This is free software: you are free to change and redistribute it.
-+There is NO WARRANTY, to the extent permitted by law."
-+  echo
-+  printf 'Written by %s.\n' "Bruno Haible"
-+}
-+
-+# func_fatal_error message
-+# outputs to stderr a fatal error message, and terminates the program.
-+func_fatal_error ()
-+{
-+  echo "config.rpath: *** $1" 1>&2
-+  echo "config.rpath: *** Stop." 1>&2
-+  exit 1
-+}
-+
-+# Command-line option processing.
-+while test $# -gt 0; do
-+  case "$1" in
-+    --help | --hel | --he | --h )
-+      func_usage
-+      exit 0 ;;
-+   --version | --versio | --versi | --vers | --ver | --ve | --v )
-+      func_version
-+      exit 0 ;;
-+    -- )      # Stop option processing
-+      shift; break ;;
-+    -* )
-+      func_fatal_error "unrecognized option: $1"
-+      ;;
-+    * )
-+      break ;;
-+  esac
-+done
-+
-+if test $# -gt 1; then
-+  func_fatal_error "too many arguments"
-+fi
-+if test $# -lt 1; then
-+  func_fatal_error "too few arguments"
-+fi
-+
-+# All known linkers require a '.a' archive for static linking (except MSVC,
-+# which needs '.lib').
-+libext=a
-+shrext=.so
-+
-+host="$1"
-+host_cpu=`echo "$host" | sed 's/^\([^-]*\)-\([^-]*\)-\(.*\)$/\1/'`
-+host_vendor=`echo "$host" | sed 's/^\([^-]*\)-\([^-]*\)-\(.*\)$/\2/'`
-+host_os=`echo "$host" | sed 's/^\([^-]*\)-\([^-]*\)-\(.*\)$/\3/'`
-+
-+# Code taken from libtool.m4's _LT_CC_BASENAME.
-+
-+for cc_temp in $CC""; do
-+  case $cc_temp in
-+    compile | *[\\/]compile | ccache | *[\\/]ccache ) ;;
-+    distcc | *[\\/]distcc | purify | *[\\/]purify ) ;;
-+    \-*) ;;
-+    *) break;;
-+  esac
-+done
-+cc_basename=`echo "$cc_temp" | sed -e 's%^.*/%%'`
-+
-+# Code taken from libtool.m4's _LT_COMPILER_PIC.
-+
-+wl=
-+if test "$GCC" = yes; then
-+  wl='-Wl,'
-+else
-+  case "$host_os" in
-+    aix*)
-+      wl='-Wl,'
-+      ;;
-+    mingw* | cygwin* | pw32* | os2* | cegcc*)
-+      ;;
-+    hpux9* | hpux10* | hpux11*)
-+      wl='-Wl,'
-+      ;;
-+    irix5* | irix6* | nonstopux*)
-+      wl='-Wl,'
-+      ;;
-+    linux* | k*bsd*-gnu | kopensolaris*-gnu)
-+      case $cc_basename in
-+        ecc*)
-+          wl='-Wl,'
-+          ;;
-+        icc* | ifort*)
-+          wl='-Wl,'
-+          ;;
-+        lf95*)
-+          wl='-Wl,'
-+          ;;
-+        nagfor*)
-+          wl='-Wl,-Wl,,'
-+          ;;
-+        pgcc* | pgf77* | pgf90* | pgf95* | pgfortran*)
-+          wl='-Wl,'
-+          ;;
-+        ccc*)
-+          wl='-Wl,'
-+          ;;
-+        xl* | bgxl* | bgf* | mpixl*)
-+          wl='-Wl,'
-+          ;;
-+        como)
-+          wl='-lopt='
-+          ;;
-+        *)
-+          case `$CC -V 2>&1 | sed 5q` in
-+            *Sun\ F* | *Sun*Fortran*)
-+              wl=
-+              ;;
-+            *Sun\ C*)
-+              wl='-Wl,'
-+              ;;
-+          esac
-+          ;;
-+      esac
-+      ;;
-+    newsos6)
-+      ;;
-+    *nto* | *qnx*)
-+      ;;
-+    osf3* | osf4* | osf5*)
-+      wl='-Wl,'
-+      ;;
-+    rdos*)
-+      ;;
-+    solaris*)
-+      case $cc_basename in
-+        f77* | f90* | f95* | sunf77* | sunf90* | sunf95*)
-+          wl='-Qoption ld '
-+          ;;
-+        *)
-+          wl='-Wl,'
-+          ;;
-+      esac
-+      ;;
-+    sunos4*)
-+      wl='-Qoption ld '
-+      ;;
-+    sysv4 | sysv4.2uw2* | sysv4.3*)
-+      wl='-Wl,'
-+      ;;
-+    sysv4*MP*)
-+      ;;
-+    sysv5* | unixware* | sco3.2v5* | sco5v6* | OpenUNIX*)
-+      wl='-Wl,'
-+      ;;
-+    unicos*)
-+      wl='-Wl,'
-+      ;;
-+    uts4*)
-+      ;;
-+  esac
-+fi
-+
-+# Code taken from libtool.m4's _LT_LINKER_SHLIBS.
-+
-+hardcode_libdir_flag_spec=
-+hardcode_libdir_separator=
-+hardcode_direct=no
-+hardcode_minus_L=no
-+
-+case "$host_os" in
-+  cygwin* | mingw* | pw32* | cegcc*)
-+    # FIXME: the MSVC++ port hasn't been tested in a loooong time
-+    # When not using gcc, we currently assume that we are using
-+    # Microsoft Visual C++.
-+    if test "$GCC" != yes; then
-+      with_gnu_ld=no
-+    fi
-+    ;;
-+  interix*)
-+    # we just hope/assume this is gcc and not c89 (= MSVC++)
-+    with_gnu_ld=yes
-+    ;;
-+  openbsd*)
-+    with_gnu_ld=no
-+    ;;
-+esac
-+
-+ld_shlibs=yes
-+if test "$with_gnu_ld" = yes; then
-+  # Set some defaults for GNU ld with shared library support. These
-+  # are reset later if shared libraries are not supported. Putting them
-+  # here allows them to be overridden if necessary.
-+  # Unlike libtool, we use -rpath here, not --rpath, since the documented
-+  # option of GNU ld is called -rpath, not --rpath.
-+  hardcode_libdir_flag_spec='${wl}-rpath ${wl}$libdir'
-+  case "$host_os" in
-+    aix[3-9]*)
-+      # On AIX/PPC, the GNU linker is very broken
-+      if test "$host_cpu" != ia64; then
-+        ld_shlibs=no
-+      fi
-+      ;;
-+    amigaos*)
-+      case "$host_cpu" in
-+        powerpc)
-+          ;;
-+        m68k)
-+          hardcode_libdir_flag_spec='-L$libdir'
-+          hardcode_minus_L=yes
-+          ;;
-+      esac
-+      ;;
-+    beos*)
-+      if $LD --help 2>&1 | grep ': supported targets:.* elf' > /dev/null; then
-+        :
-+      else
-+        ld_shlibs=no
-+      fi
-+      ;;
-+    cygwin* | mingw* | pw32* | cegcc*)
-+      # hardcode_libdir_flag_spec is actually meaningless, as there is
-+      # no search path for DLLs.
-+      hardcode_libdir_flag_spec='-L$libdir'
-+      if $LD --help 2>&1 | grep 'auto-import' > /dev/null; then
-+        :
-+      else
-+        ld_shlibs=no
-+      fi
-+      ;;
-+    haiku*)
-+      ;;
-+    interix[3-9]*)
-+      hardcode_direct=no
-+      hardcode_libdir_flag_spec='${wl}-rpath,$libdir'
-+      ;;
-+    gnu* | linux* | tpf* | k*bsd*-gnu | kopensolaris*-gnu)
-+      if $LD --help 2>&1 | grep ': supported targets:.* elf' > /dev/null; then
-+        :
-+      else
-+        ld_shlibs=no
-+      fi
-+      ;;
-+    netbsd*)
-+      ;;
-+    solaris*)
-+      if $LD -v 2>&1 | grep 'BFD 2\.8' > /dev/null; then
-+        ld_shlibs=no
-+      elif $LD --help 2>&1 | grep ': supported targets:.* elf' > /dev/null; then
-+        :
-+      else
-+        ld_shlibs=no
-+      fi
-+      ;;
-+    sysv5* | sco3.2v5* | sco5v6* | unixware* | OpenUNIX*)
-+      case `$LD -v 2>&1` in
-+        *\ [01].* | *\ 2.[0-9].* | *\ 2.1[0-5].*)
-+          ld_shlibs=no
-+          ;;
-+        *)
-+          if $LD --help 2>&1 | grep ': supported targets:.* elf' > /dev/null; then
-+            hardcode_libdir_flag_spec='`test -z "$SCOABSPATH" && echo ${wl}-rpath,$libdir`'
-+          else
-+            ld_shlibs=no
-+          fi
-+          ;;
-+      esac
-+      ;;
-+    sunos4*)
-+      hardcode_direct=yes
-+      ;;
-+    *)
-+      if $LD --help 2>&1 | grep ': supported targets:.* elf' > /dev/null; then
-+        :
-+      else
-+        ld_shlibs=no
-+      fi
-+      ;;
-+  esac
-+  if test "$ld_shlibs" = no; then
-+    hardcode_libdir_flag_spec=
-+  fi
-+else
-+  case "$host_os" in
-+    aix3*)
-+      # Note: this linker hardcodes the directories in LIBPATH if there
-+      # are no directories specified by -L.
-+      hardcode_minus_L=yes
-+      if test "$GCC" = yes; then
-+        # Neither direct hardcoding nor static linking is supported with a
-+        # broken collect2.
-+        hardcode_direct=unsupported
-+      fi
-+      ;;
-+    aix[4-9]*)
-+      if test "$host_cpu" = ia64; then
-+        # On IA64, the linker does run time linking by default, so we don't
-+        # have to do anything special.
-+        aix_use_runtimelinking=no
-+      else
-+        aix_use_runtimelinking=no
-+        # Test if we are trying to use run time linking or normal
-+        # AIX style linking. If -brtl is somewhere in LDFLAGS, we
-+        # need to do runtime linking.
-+        case $host_os in aix4.[23]|aix4.[23].*|aix[5-9]*)
-+          for ld_flag in $LDFLAGS; do
-+            if (test $ld_flag = "-brtl" || test $ld_flag = "-Wl,-brtl"); then
-+              aix_use_runtimelinking=yes
-+              break
-+            fi
-+          done
-+          ;;
-+        esac
-+      fi
-+      hardcode_direct=yes
-+      hardcode_libdir_separator=':'
-+      if test "$GCC" = yes; then
-+        case $host_os in aix4.[012]|aix4.[012].*)
-+          collect2name=`${CC} -print-prog-name=collect2`
-+          if test -f "$collect2name" && \
-+            strings "$collect2name" | grep resolve_lib_name >/dev/null
-+          then
-+            # We have reworked collect2
-+            :
-+          else
-+            # We have old collect2
-+            hardcode_direct=unsupported
-+            hardcode_minus_L=yes
-+            hardcode_libdir_flag_spec='-L$libdir'
-+            hardcode_libdir_separator=
-+          fi
-+          ;;
-+        esac
-+      fi
-+      # Begin _LT_AC_SYS_LIBPATH_AIX.
-+      echo 'int main () { return 0; }' > conftest.c
-+      ${CC} ${LDFLAGS} conftest.c -o conftest
-+      aix_libpath=`dump -H conftest 2>/dev/null | sed -n -e '/Import File Strings/,/^$/ { /^0/ { s/^0  *\(.*\)$/\1/; p; }
-+}'`
-+      if test -z "$aix_libpath"; then
-+        aix_libpath=`dump -HX64 conftest 2>/dev/null | sed -n -e '/Import File Strings/,/^$/ { /^0/ { s/^0  *\(.*\)$/\1/; p; }
-+}'`
-+      fi
-+      if test -z "$aix_libpath"; then
-+        aix_libpath="/usr/lib:/lib"
-+      fi
-+      rm -f conftest.c conftest
-+      # End _LT_AC_SYS_LIBPATH_AIX.
-+      if test "$aix_use_runtimelinking" = yes; then
-+        hardcode_libdir_flag_spec='${wl}-blibpath:$libdir:'"$aix_libpath"
-+      else
-+        if test "$host_cpu" = ia64; then
-+          hardcode_libdir_flag_spec='${wl}-R $libdir:/usr/lib:/lib'
-+        else
-+          hardcode_libdir_flag_spec='${wl}-blibpath:$libdir:'"$aix_libpath"
-+        fi
-+      fi
-+      ;;
-+    amigaos*)
-+      case "$host_cpu" in
-+        powerpc)
-+          ;;
-+        m68k)
-+          hardcode_libdir_flag_spec='-L$libdir'
-+          hardcode_minus_L=yes
-+          ;;
-+      esac
-+      ;;
-+    bsdi[45]*)
-+      ;;
-+    cygwin* | mingw* | pw32* | cegcc*)
-+      # When not using gcc, we currently assume that we are using
-+      # Microsoft Visual C++.
-+      # hardcode_libdir_flag_spec is actually meaningless, as there is
-+      # no search path for DLLs.
-+      hardcode_libdir_flag_spec=' '
-+      libext=lib
-+      ;;
-+    darwin* | rhapsody*)
-+      hardcode_direct=no
-+      if { case $cc_basename in ifort*) true;; *) test "$GCC" = yes;; esac; }; then
-+        :
-+      else
-+        ld_shlibs=no
-+      fi
-+      ;;
-+    dgux*)
-+      hardcode_libdir_flag_spec='-L$libdir'
-+      ;;
-+    freebsd2.[01]*)
-+      hardcode_direct=yes
-+      hardcode_minus_L=yes
-+      ;;
-+    freebsd* | dragonfly* | midnightbsd*)
-+      hardcode_libdir_flag_spec='-R$libdir'
-+      hardcode_direct=yes
-+      ;;
-+    hpux9*)
-+      hardcode_libdir_flag_spec='${wl}+b ${wl}$libdir'
-+      hardcode_libdir_separator=:
-+      hardcode_direct=yes
-+      # hardcode_minus_L: Not really in the search PATH,
-+      # but as the default location of the library.
-+      hardcode_minus_L=yes
-+      ;;
-+    hpux10*)
-+      if test "$with_gnu_ld" = no; then
-+        hardcode_libdir_flag_spec='${wl}+b ${wl}$libdir'
-+        hardcode_libdir_separator=:
-+        hardcode_direct=yes
-+        # hardcode_minus_L: Not really in the search PATH,
-+        # but as the default location of the library.
-+        hardcode_minus_L=yes
-+      fi
-+      ;;
-+    hpux11*)
-+      if test "$with_gnu_ld" = no; then
-+        hardcode_libdir_flag_spec='${wl}+b ${wl}$libdir'
-+        hardcode_libdir_separator=:
-+        case $host_cpu in
-+          hppa*64*|ia64*)
-+            hardcode_direct=no
-+            ;;
-+          *)
-+            hardcode_direct=yes
-+            # hardcode_minus_L: Not really in the search PATH,
-+            # but as the default location of the library.
-+            hardcode_minus_L=yes
-+            ;;
-+        esac
-+      fi
-+      ;;
-+    irix5* | irix6* | nonstopux*)
-+      hardcode_libdir_flag_spec='${wl}-rpath ${wl}$libdir'
-+      hardcode_libdir_separator=:
-+      ;;
-+    netbsd*)
-+      hardcode_libdir_flag_spec='-R$libdir'
-+      hardcode_direct=yes
-+      ;;
-+    newsos6)
-+      hardcode_direct=yes
-+      hardcode_libdir_flag_spec='${wl}-rpath ${wl}$libdir'
-+      hardcode_libdir_separator=:
-+      ;;
-+    *nto* | *qnx*)
-+      ;;
-+    openbsd*)
-+      if test -f /usr/libexec/ld.so; then
-+        hardcode_direct=yes
-+        if test -z "`echo __ELF__ | $CC -E - | grep __ELF__`" || test "$host_os-$host_cpu" = "openbsd2.8-powerpc"; then
-+          hardcode_libdir_flag_spec='${wl}-rpath,$libdir'
-+        else
-+          case "$host_os" in
-+            openbsd[01].* | openbsd2.[0-7] | openbsd2.[0-7].*)
-+              hardcode_libdir_flag_spec='-R$libdir'
-+              ;;
-+            *)
-+              hardcode_libdir_flag_spec='${wl}-rpath,$libdir'
-+              ;;
-+          esac
-+        fi
-+      else
-+        ld_shlibs=no
-+      fi
-+      ;;
-+    os2*)
-+      hardcode_libdir_flag_spec='-L$libdir'
-+      hardcode_minus_L=yes
-+      ;;
-+    osf3*)
-+      hardcode_libdir_flag_spec='${wl}-rpath ${wl}$libdir'
-+      hardcode_libdir_separator=:
-+      ;;
-+    osf4* | osf5*)
-+      if test "$GCC" = yes; then
-+        hardcode_libdir_flag_spec='${wl}-rpath ${wl}$libdir'
-+      else
-+        # Both cc and cxx compiler support -rpath directly
-+        hardcode_libdir_flag_spec='-rpath $libdir'
-+      fi
-+      hardcode_libdir_separator=:
-+      ;;
-+    solaris*)
-+      hardcode_libdir_flag_spec='-R$libdir'
-+      ;;
-+    sunos4*)
-+      hardcode_libdir_flag_spec='-L$libdir'
-+      hardcode_direct=yes
-+      hardcode_minus_L=yes
-+      ;;
-+    sysv4)
-+      case $host_vendor in
-+        sni)
-+          hardcode_direct=yes # is this really true???
-+          ;;
-+        siemens)
-+          hardcode_direct=no
-+          ;;
-+        motorola)
-+          hardcode_direct=no #Motorola manual says yes, but my tests say they lie
-+          ;;
-+      esac
-+      ;;
-+    sysv4.3*)
-+      ;;
-+    sysv4*MP*)
-+      if test -d /usr/nec; then
-+        ld_shlibs=yes
-+      fi
-+      ;;
-+    sysv4*uw2* | sysv5OpenUNIX* | sysv5UnixWare7.[01].[10]* | unixware7* | sco3.2v5.0.[024]*)
-+      ;;
-+    sysv5* | sco3.2v5* | sco5v6*)
-+      hardcode_libdir_flag_spec='`test -z "$SCOABSPATH" && echo ${wl}-R,$libdir`'
-+      hardcode_libdir_separator=':'
-+      ;;
-+    uts4*)
-+      hardcode_libdir_flag_spec='-L$libdir'
-+      ;;
-+    *)
-+      ld_shlibs=no
-+      ;;
-+  esac
-+fi
-+
-+# Check dynamic linker characteristics
-+# Code taken from libtool.m4's _LT_SYS_DYNAMIC_LINKER.
-+# Unlike libtool.m4, here we don't care about _all_ names of the library, but
-+# only about the one the linker finds when passed -lNAME. This is the last
-+# element of library_names_spec in libtool.m4, or possibly two of them if the
-+# linker has special search rules.
-+library_names_spec=      # the last element of library_names_spec in libtool.m4
-+libname_spec='lib$name'
-+case "$host_os" in
-+  aix3*)
-+    library_names_spec='$libname.a'
-+    ;;
-+  aix[4-9]*)
-+    library_names_spec='$libname$shrext'
-+    ;;
-+  amigaos*)
-+    case "$host_cpu" in
-+      powerpc*)
-+        library_names_spec='$libname$shrext' ;;
-+      m68k)
-+        library_names_spec='$libname.a' ;;
-+    esac
-+    ;;
-+  beos*)
-+    library_names_spec='$libname$shrext'
-+    ;;
-+  bsdi[45]*)
-+    library_names_spec='$libname$shrext'
-+    ;;
-+  cygwin* | mingw* | pw32* | cegcc*)
-+    shrext=.dll
-+    library_names_spec='$libname.dll.a $libname.lib'
-+    ;;
-+  darwin* | rhapsody*)
-+    shrext=.dylib
-+    library_names_spec='$libname$shrext'
-+    ;;
-+  dgux*)
-+    library_names_spec='$libname$shrext'
-+    ;;
-+  freebsd[23].*)
-+    library_names_spec='$libname$shrext$versuffix'
-+    ;;
-+  freebsd* | dragonfly* | midnightbsd*)
-+    library_names_spec='$libname$shrext'
-+    ;;
-+  gnu*)
-+    library_names_spec='$libname$shrext'
-+    ;;
-+  haiku*)
-+    library_names_spec='$libname$shrext'
-+    ;;
-+  hpux9* | hpux10* | hpux11*)
-+    case $host_cpu in
-+      ia64*)
-+        shrext=.so
-+        ;;
-+      hppa*64*)
-+        shrext=.sl
-+        ;;
-+      *)
-+        shrext=.sl
-+        ;;
-+    esac
-+    library_names_spec='$libname$shrext'
-+    ;;
-+  interix[3-9]*)
-+    library_names_spec='$libname$shrext'
-+    ;;
-+  irix5* | irix6* | nonstopux*)
-+    library_names_spec='$libname$shrext'
-+    case "$host_os" in
-+      irix5* | nonstopux*)
-+        libsuff= shlibsuff=
-+        ;;
-+      *)
-+        case $LD in
-+          *-32|*"-32 "|*-melf32bsmip|*"-melf32bsmip ") libsuff= shlibsuff= ;;
-+          *-n32|*"-n32 "|*-melf32bmipn32|*"-melf32bmipn32 ") libsuff=32 shlibsuff=N32 ;;
-+          *-64|*"-64 "|*-melf64bmip|*"-melf64bmip ") libsuff=64 shlibsuff=64 ;;
-+          *) libsuff= shlibsuff= ;;
-+        esac
-+        ;;
-+    esac
-+    ;;
-+  linux*oldld* | linux*aout* | linux*coff*)
-+    ;;
-+  linux* | k*bsd*-gnu | kopensolaris*-gnu)
-+    library_names_spec='$libname$shrext'
-+    ;;
-+  knetbsd*-gnu)
-+    library_names_spec='$libname$shrext'
-+    ;;
-+  netbsd*)
-+    library_names_spec='$libname$shrext'
-+    ;;
-+  newsos6)
-+    library_names_spec='$libname$shrext'
-+    ;;
-+  *nto* | *qnx*)
-+    library_names_spec='$libname$shrext'
-+    ;;
-+  openbsd*)
-+    library_names_spec='$libname$shrext$versuffix'
-+    ;;
-+  os2*)
-+    libname_spec='$name'
-+    shrext=.dll
-+    library_names_spec='$libname.a'
-+    ;;
-+  osf3* | osf4* | osf5*)
-+    library_names_spec='$libname$shrext'
-+    ;;
-+  rdos*)
-+    ;;
-+  solaris*)
-+    library_names_spec='$libname$shrext'
-+    ;;
-+  sunos4*)
-+    library_names_spec='$libname$shrext$versuffix'
-+    ;;
-+  sysv4 | sysv4.3*)
-+    library_names_spec='$libname$shrext'
-+    ;;
-+  sysv4*MP*)
-+    library_names_spec='$libname$shrext'
-+    ;;
-+  sysv5* | sco3.2v5* | sco5v6* | unixware* | OpenUNIX* | sysv4*uw2*)
-+    library_names_spec='$libname$shrext'
-+    ;;
-+  tpf*)
-+    library_names_spec='$libname$shrext'
-+    ;;
-+  uts4*)
-+    library_names_spec='$libname$shrext'
-+    ;;
-+esac
-+
-+sed_quote_subst='s/\(["`$\\]\)/\\\1/g'
-+escaped_wl=`echo "X$wl" | sed -e 's/^X//' -e "$sed_quote_subst"`
-+shlibext=`echo "$shrext" | sed -e 's,^\.,,'`
-+escaped_libname_spec=`echo "X$libname_spec" | sed -e 's/^X//' -e "$sed_quote_subst"`
-+escaped_library_names_spec=`echo "X$library_names_spec" | sed -e 's/^X//' -e "$sed_quote_subst"`
-+escaped_hardcode_libdir_flag_spec=`echo "X$hardcode_libdir_flag_spec" | sed -e 's/^X//' -e "$sed_quote_subst"`
-+
-+LC_ALL=C sed -e 's/^\([a-zA-Z0-9_]*\)=/acl_cv_\1=/' <<EOF
-+
-+# How to pass a linker flag through the compiler.
-+wl="$escaped_wl"
-+
-+# Static library suffix (normally "a").
-+libext="$libext"
-+
-+# Shared library suffix (normally "so").
-+shlibext="$shlibext"
-+
-+# Format of library name prefix.
-+libname_spec="$escaped_libname_spec"
-+
-+# Library names that the linker finds when passed -lNAME.
-+library_names_spec="$escaped_library_names_spec"
-+
-+# Flag to hardcode \$libdir into a binary during linking.
-+# This must work even if \$libdir does not exist.
-+hardcode_libdir_flag_spec="$escaped_hardcode_libdir_flag_spec"
-+
-+# Whether we need a single -rpath flag with a separated argument.
-+hardcode_libdir_separator="$hardcode_libdir_separator"
-+
-+# Set to yes if using DIR/libNAME.so during linking hardcodes DIR into the
-+# resulting binary.
-+hardcode_direct="$hardcode_direct"
-+
-+# Set to yes if using the -LDIR flag during linking hardcodes DIR into the
-+# resulting binary.
-+hardcode_minus_L="$hardcode_minus_L"
-+
-+EOF
 diff --git a/src/evrtsp/evrtsp.h b/src/evrtsp/evrtsp.h
-index 2d5d091..6b77af4 100644
+index 2d5d091..2cf7780 100644
 --- a/src/evrtsp/evrtsp.h
 +++ b/src/evrtsp/evrtsp.h
 @@ -153,6 +153,10 @@ void evrtsp_connection_set_ciphercb(struct evrtsp_connection *evcon,
@@ -771,6 +13,174 @@ index 2d5d091..6b77af4 100644
  /** Get the remote address and port associated with this connection. */
  void evrtsp_connection_get_peer(struct evrtsp_connection *evcon,
      char **address, u_short *port);
+@@ -162,7 +166,7 @@ void
+ evrtsp_connection_get_local_address(struct evrtsp_connection *evcon,
+     char **address, u_short *port, int *family);
+ 
+-/** The connection gets ownership of the request */
++/** The connection gets ownership of the request, including on a -1 return. */
+ int evrtsp_make_request(struct evrtsp_connection *evcon,
+     struct evrtsp_request *req,
+     enum evrtsp_cmd_type type, const char *uri);
+diff --git a/src/evrtsp/rtsp.c b/src/evrtsp/rtsp.c
+index 4f70d48..5b9875c 100644
+--- a/src/evrtsp/rtsp.c
++++ b/src/evrtsp/rtsp.c
+@@ -1483,8 +1483,18 @@ event_debug(("%s: TEST", __func__));
+ 	TAILQ_INSERT_TAIL(&evcon->requests, req, next);
+ 
+ 	/* If the connection object is not connected; make it so */
+-	if (!evrtsp_connected(evcon))
+-		return (evrtsp_connection_connect(evcon));
++	if (!evrtsp_connected(evcon)) {
++		int result = evrtsp_connection_connect(evcon);
++		if (result < 0) {
++			/* Ownership transferred on enqueue. A caller may keep its
++			 * media session alive on control failure, so no queued request
++			 * may outlive the caller's failed callback context. */
++			TAILQ_REMOVE(&evcon->requests, req, next);
++			req->evcon = NULL;
++			evrtsp_request_free(req);
++		}
++		return (result);
++	}
+ 
+ 	/*
+ 	 * If it's connected already and we are the first in the queue,
+diff --git a/src/httpd.c b/src/httpd.c
+index 3645f55..8a7c255 100644
+--- a/src/httpd.c
++++ b/src/httpd.c
+@@ -28,6 +28,7 @@
+ #include <limits.h>
+ #include <errno.h>
+ #include <time.h>
++#include <pthread.h>
+ #include <sys/param.h>
+ #include <sys/types.h>
+ #include <sys/stat.h>
+@@ -945,6 +946,34 @@ httpd_speaker_update_handler(short event_mask, void *ctx)
+ 
+ /* ---------------------------- REQUEST CALLBACKS --------------------------- */
+ 
++// Shutdown must not free server requests/modules while queued handlers still
++// use them or need the HTTP thread to finish sending their replies.
++static pthread_mutex_t request_lock = PTHREAD_MUTEX_INITIALIZER;
++static pthread_cond_t request_idle = PTHREAD_COND_INITIALIZER;
++static unsigned int requests_in_flight;
++static bool requests_stopping;
++
++static void
++request_finished(void)
++{
++  pthread_mutex_lock(&request_lock);
++  if (--requests_in_flight == 0)
++    pthread_cond_broadcast(&request_idle);
++  pthread_mutex_unlock(&request_lock);
++}
++
++// Called by the main shutdown thread while the HTTP and worker loops remain
++// alive, so admitted handlers can still send replies before their owners die.
++static void
++requests_drain(void)
++{
++  pthread_mutex_lock(&request_lock);
++  requests_stopping = true;
++  while (requests_in_flight)
++    pthread_cond_wait(&request_idle, &request_lock);
++  pthread_mutex_unlock(&request_lock);
++}
++
+ // Worker thread, invoked by request_cb() below
+ static void
+ request_async_cb(void *arg)
+@@ -956,34 +985,42 @@ request_async_cb(void *arg)
+   // Some handlers require an evbase to schedule events
+   hreq->evbase = worker_evbase_get();
+   hreq->module->request(hreq);
++  request_finished();
+ }
+ 
+-// httpd thread
+-static void
+-request_cb(struct httpd_request *hreq, void *arg)
++// Returns true when ownership of completion passes to an async worker.
++static bool
++request_dispatch(struct httpd_request *hreq, void *arg)
+ {
+   if (is_cors_preflight(hreq, httpd_allow_origin))
+     {
+       httpd_send_reply(hreq, HTTP_OK, "OK", HTTPD_SEND_NO_GZIP);
+-      return;
++      return false;
+     }
+   else if (!hreq->uri || !hreq->uri_parsed)
+     {
+       DPRINTF(E_WARN, L_HTTPD, "Invalid URI in request: '%s'\n", hreq->uri);
+       httpd_redirect_to(hreq, "/");
+-      return;
++      return false;
+     }
+   else if (!hreq->path)
+     {
+       DPRINTF(E_WARN, L_HTTPD, "Invalid path in request: '%s'\n", hreq->uri);
+       httpd_redirect_to(hreq, "/");
+-      return;
++      return false;
+     }
+ 
+   httpd_request_handler_set(hreq);
+   if (hreq->module && hreq->is_async)
+     {
+-      worker_execute(request_async_cb, &hreq, sizeof(struct httpd_request *), 0);
++      if (worker_try_execute(request_async_cb, &hreq, sizeof(struct httpd_request *), 0))
++        return true;
++
++      // We are still on the HTTP thread; do not synchronously dispatch a
++      // reply back to that same thread after the worker rejected the task.
++      hreq->is_async = false;
++      httpd_send_error(hreq, HTTP_SERVUNAVAIL, "Server is busy");
++      return false;
+     }
+   else if (hreq->module)
+     {
+@@ -998,7 +1035,26 @@ request_cb(struct httpd_request *hreq, void *arg)
+       serve_file(hreq);
+     }
+ 
+-  // Don't touch hreq here, if async it has been passed to a worker thread
++  return false;
++}
++
++// httpd thread
++static void
++request_cb(struct httpd_request *hreq, void *arg)
++{
++  pthread_mutex_lock(&request_lock);
++  if (requests_stopping)
++    {
++      pthread_mutex_unlock(&request_lock);
++      httpd_send_error(hreq, HTTP_SERVUNAVAIL, "Server is stopping");
++      return;
++    }
++  requests_in_flight++;
++  pthread_mutex_unlock(&request_lock);
++
++  // Handlers may free hreq before returning; only inspect the returned flag.
++  if (!request_dispatch(hreq, arg))
++    request_finished();
+ }
+ 
+ 
+@@ -1611,6 +1667,8 @@ httpd_deinit(void)
+ {
+   listener_remove(httpd_speaker_update_handler);
+ 
++  requests_drain();
++
+   // Give modules a chance to hang up connections nicely
+   modules_deinit();
+ 
 diff --git a/src/httpd_jsonapi.c b/src/httpd_jsonapi.c
 index 619dfee..c3b4c8c 100644
 --- a/src/httpd_jsonapi.c
@@ -902,11 +312,44 @@ index 83a0300..eb01c50 100644
    .init = init,
    .deinit = deinit,
  };
+diff --git a/src/outputs.c b/src/outputs.c
+index ffa2cb1..0ea55e3 100644
+--- a/src/outputs.c
++++ b/src/outputs.c
+@@ -1035,6 +1035,7 @@ outputs_device_volume_set(struct output_device *device, output_status_cb cb)
+   if (!device->session)
+     return 0; // Device isn't active
+ 
++  device->volume_control_failed = false;
+   ret = outputs[device->type]->device_volume_set(device, callback_add(device, cb));
+ 
+   return ret; // We don't change device state just because of a failed volume change
+diff --git a/src/outputs.h b/src/outputs.h
+index e8474c9..adfc3dc 100644
+--- a/src/outputs.h
++++ b/src/outputs.h
+@@ -125,6 +125,8 @@ struct output_device
+   int volume;
+   int relvol;
+   int max_volume;
++  // Control error is separate from connected/streaming media state.
++  bool volume_control_failed;
+ 
+   // Quality of audio output
+   struct media_quality quality;
 diff --git a/src/outputs/airplay.c b/src/outputs/airplay.c
-index 4290b75..a4fdafc 100644
+index 4290b75..848125b 100644
 --- a/src/outputs/airplay.c
 +++ b/src/outputs/airplay.c
-@@ -97,8 +97,37 @@
+@@ -24,6 +24,7 @@
+ #include <stdint.h>
+ #include <inttypes.h>
+ #include <math.h>
++#include <ctype.h>
+ #include <errno.h>
+ #include <sys/types.h>
+ #include <sys/socket.h>
+@@ -97,8 +98,37 @@
  // audio payload encryption. For normal pairing the key is 32 bytes.
  #define AIRPLAY_AUDIO_KEY_LEN 32
  
@@ -935,7 +378,7 @@ index 4290b75..a4fdafc 100644
 +// of milliseconds; three seconds still leaves ample transient headroom.
 +#define AIRPLAY_STREAM_CONTROL_TIMEOUT_SEC 3
 +
-+// Retransmit storm breaker. Live evidence: Kitchen/D request 2–4 unique
++// Retransmit storm breaker. Live evidence: MICHAEL S/D request 2–4 unique
 +// packets/s on ordinary WiFi; unbounded honouring of duplicate/aged requests
 +// then crowds the same UDP path as live audio and amplifies loss.
 +#define AIRPLAY_RESEND_MAX_LEN        8
@@ -946,7 +389,15 @@ index 4290b75..a4fdafc 100644
  
  #define AIRPLAY_MD_DELAY_STARTUP      15360
  #define AIRPLAY_MD_DELAY_SWITCH       (AIRPLAY_MD_DELAY_STARTUP * 2)
-@@ -283,6 +312,33 @@ struct airplay_session
+@@ -257,6 +287,7 @@ struct airplay_session
+   bool supports_encryption;
+ 
+   struct event *deferredev;
++  bool volume_failure_pending;
+ 
+   int reqs_in_flight;
+   int cseq;
+@@ -283,6 +314,33 @@ struct airplay_session
    // amplifier or DSP delays)
    int offset_samples;
  
@@ -980,7 +431,7 @@ index 4290b75..a4fdafc 100644
    char *local_v4_address;
    char *local_v6_address;
    char local_mac_address[18];
-@@ -492,6 +548,9 @@ sequence_start(enum airplay_seq_type seq_type, struct airplay_session *session,
+@@ -492,6 +550,9 @@ sequence_start(enum airplay_seq_type seq_type, struct airplay_session *session,
  static void
  sequence_continue(struct airplay_seq_ctx *seq_ctx);
  
@@ -990,7 +441,7 @@ index 4290b75..a4fdafc 100644
  
  /* ------------------------------- MISC HELPERS ----------------------------- */
  
-@@ -1136,7 +1195,17 @@ master_session_cleanup(struct airplay_master_session *ams)
+@@ -1136,7 +1197,17 @@ master_session_cleanup(struct airplay_master_session *ams)
  	; /* EMPTY */
  
        if (!s)
@@ -1009,7 +460,7 @@ index 4290b75..a4fdafc 100644
        else
  	s->next = ams->next;
      }
-@@ -1204,7 +1273,14 @@ master_session_make(struct media_quality *quality, bool use_ptp)
+@@ -1204,7 +1275,14 @@ master_session_make(struct media_quality *quality, bool use_ptp)
    ams->use_ptp = use_ptp;
    ams->samples_per_packet = AIRPLAY_SAMPLES_PER_PACKET;
    ams->rawbuf_size = STOB(ams->samples_per_packet, quality->bits_per_sample, quality->channels);
@@ -1025,7 +476,7 @@ index 4290b75..a4fdafc 100644
  
    CHECK_NULL(L_AIRPLAY, ams->rawbuf = malloc(ams->rawbuf_size));
    CHECK_NULL(L_AIRPLAY, ams->input_buffer = evbuffer_new());
-@@ -1273,7 +1349,32 @@ session_cleanup(struct airplay_session *session)
+@@ -1273,7 +1351,32 @@ session_cleanup(struct airplay_session *session)
  	; /* EMPTY */
  
        if (!s)
@@ -1059,7 +510,7 @@ index 4290b75..a4fdafc 100644
        else
  	s->next = session->next;
      }
-@@ -1295,6 +1396,20 @@ session_failure(struct airplay_session *session)
+@@ -1295,11 +1398,37 @@ session_failure(struct airplay_session *session)
    session_cleanup(session);
  }
  
@@ -1071,16 +522,65 @@ index 4290b75..a4fdafc 100644
 +static void
 +volume_command_failure(struct airplay_session *session)
 +{
++  struct output_device *device = outputs_device_get(session->device_id);
++
++  if (device && device->session == session)
++    device->volume_control_failed = true;
++
 +  DPRINTF(E_WARN, L_AIRPLAY,
-+    "AI event=volume_control_timeout_ignored device='%s' state=streaming\n",
-+    session->devname);
++    "AI event=volume_control_failed device='%s' state=%s action=retain_media\n",
++    session->devname, session->state == AIRPLAY_STATE_STREAMING ? "streaming" : "connected");
 +  session_status(session);
 +}
 +
  static void
  deferred_session_failure_cb(int fd, short what, void *arg)
  {
-@@ -1752,6 +1867,12 @@ airplay_metadata_keep_alive_send(struct airplay_session *session)
+   struct airplay_session *session = arg;
+ 
++  if (session->volume_failure_pending)
++    {
++      session->volume_failure_pending = false;
++      volume_command_failure(session);
++      return;
++    }
++
+   DPRINTF(E_DBG, L_AIRPLAY, "Cleaning up failed session (deferred) on device '%s'\n", session->devname);
+   session_failure(session);
+ }
+@@ -1309,6 +1438,7 @@ deferred_session_failure(struct airplay_session *session)
+ {
+   struct timeval tv;
+ 
++  session->volume_failure_pending = false;
+   if (session->state != AIRPLAY_STATE_AUTH)
+     session->state = AIRPLAY_STATE_FAILED;
+ 
+@@ -1316,6 +1446,23 @@ deferred_session_failure(struct airplay_session *session)
+   evtimer_add(session->deferredev, &tv);
+ }
+ 
++// An immediate RTSP enqueue/connect failure happens before the player command
++// has registered its pending callback. Complete on the next event-loop turn,
++// just as a timeout does, while retaining the media session.
++static void
++deferred_volume_failure(struct airplay_session *session)
++{
++  struct timeval tv;
++
++  // A delivery failure already owns this timer and must win.
++  if (session->state == AIRPLAY_STATE_FAILED || session->state == AIRPLAY_STATE_AUTH)
++    return;
++
++  session->volume_failure_pending = true;
++  evutil_timerclear(&tv);
++  evtimer_add(session->deferredev, &tv);
++}
++
+ static void
+ rtsp_close_cb(struct evrtsp_connection *evcon, void *arg)
+ {
+@@ -1752,6 +1899,12 @@ airplay_metadata_keep_alive_send(struct airplay_session *session)
    sequence_start(AIRPLAY_SEQ_FEEDBACK, session, NULL, "keep_alive");
  }
  
@@ -1093,7 +593,91 @@ index 4290b75..a4fdafc 100644
  static void
  airplay_metadata_send(struct output_metadata *metadata)
  {
-@@ -1957,6 +2078,7 @@ packet_send(struct airplay_session *session, struct rtp_packet *pkt)
+@@ -1810,10 +1963,10 @@ airplay_volume_from_pct(int volume, const char *name)
+   max_volume = volume_max_get(name);
+ 
+   /* RAOP volume
+-   *  -144.0 is off (not really used since we have no concept of muted/off)
+-   *  0 - 100 maps to -30.0 - 0 (if no max_volume set)
++   *  0 percent is protocol mute (-144.0), so disabled/cut speakers are silent.
++   *  1 - 100 maps to just above -30.0 through 0 (if no max_volume set)
+    */
+-  if (volume >= 0 && volume <= 100)
++  if (volume > 0 && volume <= 100)
+     airplay_volume = -30.0 + ((float)max_volume * (float)volume * 30.0) / (100.0 * AIRPLAY_CONFIG_MAX_VOLUME);
+   else
+     airplay_volume = -144.0;
+@@ -1824,50 +1977,30 @@ airplay_volume_from_pct(int volume, const char *name)
+ static int
+ airplay_volume_to_pct(struct output_device *device, const char *volstr)
+ {
+-  float airplay_volume;
++  char *end;
++  float protocol_volume;
+   float volume;
+-  int max_volume;
+-
+-  airplay_volume = atof(volstr);
+-
+-  if ((airplay_volume == 0.0 && volstr[0] != '0') || airplay_volume > 0.0)
+-    {
+-      DPRINTF(E_LOG, L_AIRPLAY, "AirPlay device volume is invalid: '%s'\n", volstr);
+-      return -1;
+-    }
++  int max_volume = volume_max_get(device->name);
+ 
+-  if (airplay_volume <= -30.0)
+-    {
+-      return 0; // -144.0 is muted
+-    }
++  if (!volstr || max_volume < 1 || max_volume > AIRPLAY_CONFIG_MAX_VOLUME)
++    return -1;
+ 
+-  max_volume = volume_max_get(device->name);
++  protocol_volume = strtof(volstr, &end);
++  if (end == volstr || !isfinite(protocol_volume) || protocol_volume > 0.0f)
++    return -1;
++  while (isspace((unsigned char)*end))
++    end++;
++  if (*end)
++    return -1;
+ 
+-/*
+-  This is an attempt at scaling the input volume that didn't really work for all
+-  speakers (e.g. my Sony), but I'm leaving it here in case it should be a config
+-  option some time
+-
+-  // If the input volume is -25 and we are playing at -20, then we only want the
+-  // resulting volume to be -25 if there is no volume scaling. If the scaling is
+-  // set to say 20% then we want the resulting volume to be -21, i.e. 20% of the
+-  // change. Expressed as an equation:
+-  //   a_r = a_0 + m/M * (a_i - a_0)     - where a_0 is the current airplay volume, a_i is the input and a_r is the scaled result
+-  //
+-  // Since current volume (device->volume) is measured on the 0-100 scale, and the
+-  // result of this func should also be on that scale, we have the following two
+-  // relationships (the first is also found in _from_pct() above):
+-  //   a_0 = -30 + m/M * 30/100 * v_0    - where v_0 is device->volume
+-  //   v_r = M/m * 100 * (1 + a_r / 30)  - converts a_r to v_r which is [0-100]
+-  //
+-  // Solving these three equations gives this:
+-  volume_base = 100.0 * (1.0 + airplay_volume / 30.0);
+-  volume = (float)device->volume * (1.0 - (float)max_volume/AIRPLAY_CONFIG_MAX_VOLUME) + volume_base;
++  if (protocol_volume <= -30.0f)
++    return 0; // Includes the protocol mute sentinel, -144.0.
+ 
+-*/
+-  // RAOP volume: -144.0 is off, -30.0 - 0 scaled by max_volume maps to 0 - 100
+-  volume = (100.0 * (airplay_volume / 30.0 + 1.0) * AIRPLAY_CONFIG_MAX_VOLUME / (float)max_volume);
+-  return MAX(0, MIN(100, (int)volume));
++  volume = 100.0f * (protocol_volume / 30.0f + 1.0f)
++    * AIRPLAY_CONFIG_MAX_VOLUME / (float)max_volume;
++  // Round the inverse. Truncating makes ordinary serialized values such as
++  // -29.7 report 0 rather than 1 and lets status polls pull sliders backward.
++  return (int)lroundf(MAX(0.0f, MIN(100.0f, volume)));
+ }
+ 
+ /* Volume in [0 - 100] */
+@@ -1957,6 +2090,7 @@ packet_send(struct airplay_session *session, struct rtp_packet *pkt)
    size_t buf_len;
    ssize_t sent;
    int ret;
@@ -1101,7 +685,7 @@ index 4290b75..a4fdafc 100644
  
    if (!session)
      return -1;
-@@ -1968,6 +2090,8 @@ packet_send(struct airplay_session *session, struct rtp_packet *pkt)
+@@ -1968,6 +2102,8 @@ packet_send(struct airplay_session *session, struct rtp_packet *pkt)
  	return -1;
  
        sent = send(session->server_fd, buf, buf_len, 0);
@@ -1110,7 +694,7 @@ index 4290b75..a4fdafc 100644
        free(buf);
      }
    else
-@@ -1975,11 +2099,39 @@ packet_send(struct airplay_session *session, struct rtp_packet *pkt)
+@@ -1975,11 +2111,40 @@ packet_send(struct airplay_session *session, struct rtp_packet *pkt)
        buf = pkt->data;
        buf_len = pkt->data_len;
        sent = send(session->server_fd, buf, buf_len, 0);
@@ -1141,8 +725,9 @@ index 4290b75..a4fdafc 100644
 +                }
 +              int64_t elapsed_ns = ((int64_t)now.tv_sec - session->send_blocked_since.tv_sec) * 1000000000
 +                                 + now.tv_nsec - session->send_blocked_since.tv_nsec;
-+              // Well inside the 700ms presentation buffer. Persistent failure
-+              // still takes the normal reconnect path rather than going silent.
++              // A 1.5 s grace can exceed the presentation lead. It avoids
++              // tearing down the session for a brief local Wi-Fi queue stall;
++              // audible delivery during that stall is not guaranteed.
 +              if (elapsed_ns >= 0 && elapsed_ns < 1500000000)
 +                return -1;
 +            }
@@ -1151,7 +736,7 @@ index 4290b75..a4fdafc 100644
  
        // Can't free it right away, it would make the ->next in the calling
        // master_session and session loops invalid
-@@ -1988,10 +2140,46 @@ packet_send(struct airplay_session *session, struct rtp_packet *pkt)
+@@ -1988,10 +2153,46 @@ packet_send(struct airplay_session *session, struct rtp_packet *pkt)
      }
    else if (sent != buf_len)
      {
@@ -1198,7 +783,7 @@ index 4290b75..a4fdafc 100644
  /*
    DPRINTF(E_DBG, L_AIRPLAY, "RTP PACKET seqnum %u, rtptime %u, payload 0x%x, pktbuf_s %zu\n",
      session->master_session->rtp_session->seqnum,
-@@ -2038,43 +2226,136 @@ control_packet_send(struct airplay_session *session, struct rtp_packet *pkt)
+@@ -2038,43 +2239,136 @@ control_packet_send(struct airplay_session *session, struct rtp_packet *pkt)
  static void
  packets_resend(struct airplay_session *session, uint16_t seqnum, int len)
  {
@@ -1225,10 +810,10 @@ index 4290b75..a4fdafc 100644
 +    return;
 +  if (len > AIRPLAY_RESEND_MAX_LEN)
 +    len = AIRPLAY_RESEND_MAX_LEN;
++
++  clock_gettime(CLOCK_MONOTONIC, &now);
  
 -  rtp_session = session->master_session->rtp_session;
-+  clock_gettime(CLOCK_MONOTONIC, &now);
-+
 +  // Refill retransmit token bucket.
 +  if (session->resend_tokens_ts.tv_sec == 0 && session->resend_tokens_ts.tv_nsec == 0)
 +    {
@@ -1354,7 +939,7 @@ index 4290b75..a4fdafc 100644
  }
  
  static int
-@@ -2162,6 +2443,10 @@ packets_sync_send(struct airplay_master_session *ams)
+@@ -2162,6 +2456,10 @@ packets_sync_send(struct airplay_master_session *ams)
    struct airplay_session *session;
    struct timespec ts;
    bool is_sync_time;
@@ -1365,7 +950,7 @@ index 4290b75..a4fdafc 100644
  
    // Check if it is time send a sync packet to sessions that are already running
    is_sync_time = rtp_sync_is_time(ams->rtp_session);
-@@ -2177,6 +2462,24 @@ packets_sync_send(struct airplay_master_session *ams)
+@@ -2177,6 +2475,24 @@ packets_sync_send(struct airplay_master_session *ams)
        cur_stamp = ams->cur_stamp;
  
        // Apply user configured offset
@@ -1390,7 +975,7 @@ index 4290b75..a4fdafc 100644
        cur_stamp.pos -= session->offset_samples;
  
        // A device has joined and should get an init sync packet
-@@ -2193,6 +2496,43 @@ packets_sync_send(struct airplay_master_session *ams)
+@@ -2193,6 +2509,43 @@ packets_sync_send(struct airplay_master_session *ams)
  	{
  	  sync_pkt = rtp_sync_packet_next(ams->rtp_session, cur_stamp, 0x80);
  	  control_packet_send(session, sync_pkt);
@@ -1434,23 +1019,44 @@ index 4290b75..a4fdafc 100644
  	}
      }
  }
-@@ -3097,6 +3437,15 @@ response_handler_setup_stream(struct evrtsp_request *req, struct airplay_session
+@@ -3035,6 +3388,26 @@ response_handler_record(struct evrtsp_request *req, struct airplay_session *sess
+   return AIRPLAY_SEQ_CONTINUE;
+ }
+ 
++// The player event loop serves every speaker. A full UDP queue must return
++// EAGAIN to packet_send rather than blocking that shared playback clock.
++static int
++data_socket_prepare(struct airplay_session *session)
++{
++  int sndbuf = 512 * 1024;
++
++  if (evutil_make_socket_nonblocking(session->server_fd) < 0)
++    {
++      DPRINTF(E_LOG, L_AIRPLAY, "Could not make data socket nonblocking for '%s': %s\n",
++        session->devname, strerror(errno));
++      return -1;
++    }
++
++  if (setsockopt(session->server_fd, SOL_SOCKET, SO_SNDBUF, &sndbuf, sizeof(sndbuf)) < 0)
++    DPRINTF(E_WARN, L_AIRPLAY, "Could not raise SO_SNDBUF on data socket for '%s': %s\n",
++      session->devname, strerror(errno));
++  return 0;
++}
++
+ static enum airplay_seq_type
+ response_handler_setup_stream(struct evrtsp_request *req, struct airplay_session *session)
+ {
+@@ -3097,6 +3470,9 @@ response_handler_setup_stream(struct evrtsp_request *req, struct airplay_session
        goto error;
      }
  
-+  // DALI: enlarge the UDP send buffer so a short retransmit burst (or a
-+  // timer catch-up of a few packets) does not locally drop live audio.
-+  {
-+    int sndbuf = 512 * 1024;
-+    if (setsockopt(session->server_fd, SOL_SOCKET, SO_SNDBUF, &sndbuf, sizeof(sndbuf)) < 0)
-+      DPRINTF(E_WARN, L_AIRPLAY, "Could not raise SO_SNDBUF on data socket for '%s': %s\n",
-+	session->devname, strerror(errno));
-+  }
++  if (data_socket_prepare(session) < 0)
++    goto error;
 +
    session->state = AIRPLAY_STATE_SETUP;
  
    plist_free(response);
-@@ -3623,14 +3972,14 @@ static struct airplay_seq_definition airplay_seq_definition[] =
+@@ -3623,14 +3999,14 @@ static struct airplay_seq_definition airplay_seq_definition[] =
    { AIRPLAY_SEQ_STOP, session_success, session_failure },
    { AIRPLAY_SEQ_FAILURE, session_success, session_failure},
    { AIRPLAY_SEQ_PIN_START, session_success, session_failure },
@@ -1467,29 +1073,50 @@ index 4290b75..a4fdafc 100644
  };
  
  // The size of the second array dimension MUST at least be the size of largest
-@@ -3816,7 +4165,20 @@ sequence_continue(struct airplay_seq_ctx *seq_ctx)
+@@ -3669,7 +4045,7 @@ static struct airplay_seq_request airplay_seq_request[][7] =
+     { AIRPLAY_SEQ_PIN_START, "PIN start", EVRTSP_REQ_POST, payload_make_pin_start, response_handler_pin_start, NULL, "/pair-pin-start", false },
+   },
+   {
+-    { AIRPLAY_SEQ_SEND_VOLUME, "SET_PARAMETER (volume)", EVRTSP_REQ_SET_PARAMETER, payload_make_set_volume, NULL, "text/parameters", NULL, true },
++    { AIRPLAY_SEQ_SEND_VOLUME, "SET_PARAMETER (volume)", EVRTSP_REQ_SET_PARAMETER, payload_make_set_volume, NULL, "text/parameters", NULL, false },
+   },
+   {
+     { AIRPLAY_SEQ_SEND_TEXT, "SET_PARAMETER (text)", EVRTSP_REQ_SET_PARAMETER, payload_make_send_text, NULL, "application/x-dmap-tagged", NULL, true },
+@@ -3816,7 +4192,13 @@ sequence_continue(struct airplay_seq_ctx *seq_ctx)
  
    ret = evrtsp_make_request(session->ctrl, req, cur_request->rtsp_type, uri);
    if (ret < 0)
 -    goto error;
 +    {
-+      // DALI patch (crash fix): evrtsp_make_request TAILQ-inserts req on
-+      // ctrl->requests BEFORE connecting, and a synchronous connect() failure
-+      // (EHOSTDOWN/EHOSTUNREACH to a sleeping receiver with a negative route
-+      // entry) returns -1 WITHOUT unlinking it. Ownership is therefore with the
-+      // connection: evrtsp_connection_free() will free it during the session
-+      // teardown that deferred_session_failure() schedules. Freeing it here too
-+      // (the old `goto error` path) left a dangling TAILQ node — the freed
-+      // block got reused, and evrtsp_connection_free's queue walk stored
-+      // through the garbage next-pointer: the 2026-08-01 SIGSEGV at
-+      // evrtsp_connection_free+160 (crash report owntone-2026-08-01-134941).
++      // evrtsp_make_request takes ownership even on failure. It removes and
++      // frees a failed enqueue, so a retained media session cannot dispatch a
++      // request whose sequence context has already been freed.
 +      req = NULL;
 +      goto error;
 +    }
  
    evrtsp_connection_set_closecb(session->ctrl, NULL, NULL);
  
-@@ -4276,6 +4638,7 @@ airplay_write(struct output_buffer *obuf)
+@@ -3830,11 +4212,13 @@ sequence_continue(struct airplay_seq_ctx *seq_ctx)
+   if (req)
+     evrtsp_request_free(req);
+ 
+-  // Sets status to FAILED, gives status to player and frees session. Must be
+-  // deferred, otherwise sequence_start() could invalidate the session, meaning
+-  // any dereference of the session by the caller after sequence_start() would
+-  // segfault.
+-  deferred_session_failure(session);
++  // Defer completion until the caller has registered its pending callback.
++  // Volume-control failure has the same media-preserving policy whether the
++  // request timed out or could not be queued/connected in the first place.
++  if (seq_ctx->on_error == volume_command_failure)
++    deferred_volume_failure(session);
++  else
++    deferred_session_failure(session);
+ 
+   free(seq_ctx);
+ }
+@@ -4276,6 +4660,7 @@ airplay_write(struct output_buffer *obuf)
  	evtimer_add(keep_alive_timer, &keep_alive_tv);
  
        session->state = AIRPLAY_STATE_STREAMING;
@@ -1498,10 +1125,18 @@ index 4290b75..a4fdafc 100644
      }
  }
 diff --git a/src/outputs/raop.c b/src/outputs/raop.c
-index 89c00e9..65e9e1c 100644
+index 89c00e9..6fd2582 100644
 --- a/src/outputs/raop.c
 +++ b/src/outputs/raop.c
-@@ -2576,11 +2576,49 @@ raop_metadata_startup_send(struct raop_session *rs)
+@@ -42,6 +42,7 @@
+ #include <stdint.h>
+ #include <inttypes.h>
+ #include <math.h>
++#include <ctype.h>
+ #include <errno.h>
+ #include <sys/types.h>
+ #include <sys/socket.h>
+@@ -2576,11 +2577,49 @@ raop_metadata_startup_send(struct raop_session *rs)
    return raop_metadata_send_generic(rs, raop_cur_metadata, false);
  }
  
@@ -1552,6 +1187,65 @@ index 89c00e9..65e9e1c 100644
  
    raop_cur_metadata->startup = false;
  
+@@ -2623,10 +2662,10 @@ raop_volume_from_pct(int volume, struct output_device *device)
+   float raop_volume;
+ 
+   /* RAOP volume
+-   *  -144.0 is off (not really used since we have no concept of muted/off)
+-   *  0 - 100 maps to -30.0 - 0 (if no max_volume set)
++   *  0 percent is protocol mute (-144.0), so disabled/cut speakers are silent.
++   *  1 - 100 maps to just above -30.0 through 0 (if no max_volume set)
+    */
+-  if (volume >= 0 && volume <= 100)
++  if (volume > 0 && volume <= 100)
+     raop_volume = -30.0 + ((float)device->max_volume * (float)volume * 30.0) / (100.0 * RAOP_CONFIG_MAX_VOLUME);
+   else
+     raop_volume = -144.0;
+@@ -2637,25 +2676,30 @@ raop_volume_from_pct(int volume, struct output_device *device)
+ static int
+ raop_volume_to_pct(struct output_device *device, const char *volstr)
+ {
+-  float raop_volume;
++  char *end;
++  float protocol_volume;
+   float volume;
++  int max_volume = device->max_volume;
+ 
+-  raop_volume = atof(volstr);
++  if (!volstr || max_volume < 1 || max_volume > RAOP_CONFIG_MAX_VOLUME)
++    return -1;
+ 
+-  if ((raop_volume == 0.0 && volstr[0] != '0') || raop_volume > 0.0)
+-    {
+-      DPRINTF(E_LOG, L_RAOP, "RAOP device volume is invalid: '%s'\n", volstr);
+-      return -1;
+-    }
++  protocol_volume = strtof(volstr, &end);
++  if (end == volstr || !isfinite(protocol_volume) || protocol_volume > 0.0f)
++    return -1;
++  while (isspace((unsigned char)*end))
++    end++;
++  if (*end)
++    return -1;
+ 
+-  if (raop_volume <= -30.0)
+-    {
+-      return 0;
+-    }
++  if (protocol_volume <= -30.0f)
++    return 0; // Includes the protocol mute sentinel, -144.0.
+ 
+-  // RAOP volume: -144.0 is off, -30.0 - 0 scaled by max_volume maps to 0 - 100
+-  volume = (100.0 * (raop_volume / 30.0 + 1.0) * RAOP_CONFIG_MAX_VOLUME / (float)device->max_volume);
+-  return MAX(0, MIN(100, (int)volume));
++  volume = 100.0f * (protocol_volume / 30.0f + 1.0f)
++    * RAOP_CONFIG_MAX_VOLUME / (float)max_volume;
++  // Round the inverse. Truncating makes ordinary serialized values such as
++  // -29.7 report 0 rather than 1 and lets status polls pull sliders backward.
++  return (int)lroundf(MAX(0.0f, MIN(100.0f, volume)));
+ }
+ 
+ static int
 diff --git a/src/outputs/rtp_common.c b/src/outputs/rtp_common.c
 index 5b3d418..b1b05ea 100644
 --- a/src/outputs/rtp_common.c
@@ -1576,7 +1270,7 @@ index 5b3d418..b1b05ea 100644
    return session;
  }
 diff --git a/src/player.c b/src/player.c
-index f9ce616..12c320d 100644
+index f9ce616..36daa5e 100644
 --- a/src/player.c
 +++ b/src/player.c
 @@ -118,7 +118,7 @@
@@ -1705,7 +1399,7 @@ index f9ce616..12c320d 100644
 +
 +  if (clock_gettime(CLOCK_MONOTONIC, &now_ts) < 0)
 +    goto out;
-+
+ 
 +  if (timespec_cmp(pb_session.pts, now_ts) <= 0)
 +    {
 +      diff = timespec_sub(now_ts, pb_session.pts);
@@ -1728,7 +1422,7 @@ index f9ce616..12c320d 100644
 +	pb_session.last_pts_slew_ts = now_ts;
 +      goto out;
 +    }
- 
++
 +  diff = timespec_sub(pb_session.pts, now_ts);
 +  diff_ms = (int64_t)diff.tv_sec * 1000 + diff.tv_nsec / 1000000;
 +  if (diff_ms < PTS_AHEAD_DEADBAND_MS)
@@ -1786,7 +1480,7 @@ index f9ce616..12c320d 100644
    int nbytes;
    int nsamples;
    int i;
-@@ -1280,6 +1384,7 @@ playback_cb(int fd, short what, void *arg)
+@@ -1280,20 +1384,153 @@ playback_cb(int fd, short what, void *arg)
  
    // Check if we missed any timer expirations
    overrun = 0;
@@ -1794,15 +1488,27 @@ index f9ce616..12c320d 100644
  #ifdef HAVE_TIMERFD
    ret = read(fd, &overrun, sizeof(overrun));
    if (ret <= 0)
-@@ -1287,13 +1392,134 @@ playback_cb(int fd, short what, void *arg)
+     DPRINTF(E_LOG, L_PLAYER, "Error reading timer\n");
    else if (overrun > 0)
-     overrun--;
- #else
+-    overrun--;
+-#else
 -  ret = timer_getoverrun(pb_timer);
 -  if (ret < 0)
 -    DPRINTF(E_LOG, L_PLAYER, "Error getting timer overrun\n");
--  else
++    {
++      // Previously deferred Linux ticks must be repaid too, rather than
++      // accumulating forever while only the new timerfd expiration is read.
++      if (player_tick_interval.tv_nsec > 0)
++        {
++          overrun += pb_tick_debt_ns / (uint64_t)player_tick_interval.tv_nsec;
++          pb_tick_debt_ns %= (uint64_t)player_tick_interval.tv_nsec;
++        }
++      overrun--;
++    }
+   else
 -    overrun = ret;
++    skip_tick = true;
++#else
 +  // DALI patch — THE FIX FOR THE BUFFER RATCHET. Read before touching.
 +  //
 +  // On macOS there is no timerfd; misc.c backs timer_settime() with
@@ -1934,7 +1640,7 @@ index f9ce616..12c320d 100644
    // We are too delayed, probably some output blocked: reset if first overrun or abort if second overrun
    if (overrun > pb_write_deficit_max)
      {
-@@ -1317,7 +1543,7 @@ playback_cb(int fd, short what, void *arg)
+@@ -1317,7 +1554,7 @@ playback_cb(int fd, short what, void *arg)
    else
      {
        if (overrun > 1) // An overrun of 1 is no big deal
@@ -1943,7 +1649,7 @@ index f9ce616..12c320d 100644
  
        pb_write_recovery = false;
      }
-@@ -1372,6 +1598,17 @@ playback_cb(int fd, short what, void *arg)
+@@ -1372,6 +1609,17 @@ playback_cb(int fd, short what, void *arg)
  	}
      }
  
@@ -1961,7 +1667,7 @@ index f9ce616..12c320d 100644
    if (pb_session.read_deficit_max && pb_session.read_deficit > pb_session.read_deficit_max)
      {
        DPRINTF(E_LOG, L_PLAYER, "Source is not providing sufficient data, temporarily suspending playback (deficit=%zu/%zu bytes)\n",
-@@ -1507,13 +1744,23 @@ device_streaming_cb(struct output_device *device, enum output_device_state statu
+@@ -1507,13 +1755,23 @@ device_streaming_cb(struct output_device *device, enum output_device_state statu
  
        // The device can fail outside of playback, e.g. if it disconnects after a
        // flush command
@@ -1990,7 +1696,7 @@ index f9ce616..12c320d 100644
  	goto out;
  
        DPRINTF(E_LOG, L_PLAYER, "Attempting reconnection in %d sec to the %s device '%s'\n", PLAYER_SPEAKER_RESURRECT_TIME, device->type_name, device->name);
-@@ -1524,6 +1771,58 @@ device_streaming_cb(struct output_device *device, enum output_device_state statu
+@@ -1524,6 +1782,58 @@ device_streaming_cb(struct output_device *device, enum output_device_state statu
    else if (status == OUTPUT_STATE_STOPPED)
      {
        DPRINTF(E_INFO, L_PLAYER, "The %s device '%s' stopped\n", device->type_name, device->name);
@@ -2049,7 +1755,44 @@ index f9ce616..12c320d 100644
      }
    else
      {
-@@ -1803,6 +2102,7 @@ pb_session_stop(void)
+@@ -1541,19 +1851,27 @@ device_streaming_cb(struct output_device *device, enum output_device_state statu
+ static void
+ device_volume_cb(struct output_device *device, enum output_device_state status)
+ {
++  // A media-preserving control failure must still fail the volume command.
++  // Keep an earlier failure when a command targets more than one output.
++  int retval = commands_exec_returnvalue(cmdbase) < 0 ? -1 : 0;
++
+   if (!device)
+     {
+       DPRINTF(E_LOG, L_PLAYER, "Output device disappeared before command completion!\n");
++      retval = -1;
+       goto out;
+     }
+   else if (status == OUTPUT_STATE_FAILED)
+     {
+       DPRINTF(E_LOG, L_PLAYER, "The %s device '%s' failed during execution of volume command\n", device->type_name, device->name);
++      retval = -1;
+       goto out;
+     }
+ 
+   DPRINTF(E_DBG, L_PLAYER, "Callback from %s device %s to device_volume_cb (status %d)\n", device->type_name, device->name, status);
+ 
++  if (device->volume_control_failed)
++    retval = -1;
+   outputs_device_cb_set(device, device_streaming_cb);
+ 
+  out:
+@@ -1562,7 +1880,7 @@ device_volume_cb(struct output_device *device, enum output_device_state status)
+   if (outputs_sessions_count() == 0)
+     pb_suspend();
+ 
+-  commands_exec_end(cmdbase, 0);
++  commands_exec_end(cmdbase, retval);
+ }
+ 
+ static void
+@@ -1803,6 +2121,7 @@ pb_session_stop(void)
  static void
  pb_abort(void)
  {
@@ -2057,7 +1800,7 @@ index f9ce616..12c320d 100644
    // Immediate stop of all outputs
    outputs_stop(device_streaming_cb);
    outputs_metadata_purge();
-@@ -1984,6 +2284,7 @@ playing_now(void *arg, int *retval)
+@@ -1984,6 +2303,7 @@ playing_now(void *arg, int *retval)
  static enum command_state
  playback_stop(void *arg, int *retval)
  {
@@ -2065,7 +1808,7 @@ index f9ce616..12c320d 100644
    if (player_state == PLAY_STOPPED)
      {
        *retval = 0;
-@@ -2030,6 +2331,7 @@ playback_start_bh(void *arg, int *retval)
+@@ -2030,6 +2350,7 @@ playback_start_bh(void *arg, int *retval)
  
    // We also ask listeners to update speaker/volume state, since it is possible
    // some of the speakers we tried to start responded with failure
@@ -2073,7 +1816,7 @@ index f9ce616..12c320d 100644
    status_update(PLAY_PLAYING, LISTENER_PLAYER | LISTENER_SPEAKER | LISTENER_VOLUME);
  
    *retval = 0;
-@@ -2470,6 +2772,7 @@ playback_pause_bh(void *arg, int *retval)
+@@ -2470,6 +2791,7 @@ playback_pause_bh(void *arg, int *retval)
  static enum command_state
  playback_pause(void *arg, int *retval)
  {
@@ -2081,7 +1824,7 @@ index f9ce616..12c320d 100644
    if (player_state == PLAY_STOPPED)
      {
        *retval = -1;
-@@ -2498,6 +2801,7 @@ playback_pause(void *arg, int *retval)
+@@ -2498,6 +2820,7 @@ playback_pause(void *arg, int *retval)
  static enum command_state
  playback_flush(void *arg, int *retval)
  {
@@ -2089,7 +1832,7 @@ index f9ce616..12c320d 100644
    if (player_state == PLAY_STOPPED)
      {
        *retval = -1;
-@@ -2562,6 +2866,8 @@ device_to_speaker_info(struct player_speaker_info *spk, struct output_device *de
+@@ -2562,6 +2885,8 @@ device_to_speaker_info(struct player_speaker_info *spk, struct output_device *de
      spk->format = device->supported_formats;
  
    spk->selected = OUTPUTS_DEVICE_DISPLAY_SELECTED(device);
@@ -2098,7 +1841,7 @@ index f9ce616..12c320d 100644
  
    spk->has_password = device->has_password;
    spk->has_video = device->has_video;
-@@ -2978,6 +3284,9 @@ speaker_resurrect(void *arg, int *retval)
+@@ -2978,6 +3303,9 @@ speaker_resurrect(void *arg, int *retval)
        // Playback was suspended by device_streaming_cb() because the speaker was
        // the only one playing. In that case we need to first resume the source,
        // then wait for the speaker to reactivate, and then run bottom half.
@@ -2145,3 +1888,84 @@ index 0fa7736..55a16b0 100644
    if (ret < 0)
      {
        DPRINTF(E_LOG, L_AIRPLAY, "%s\n", airptp_errmsg_get());
+diff --git a/src/worker.c b/src/worker.c
+index 0116144..d9b4553 100644
+--- a/src/worker.c
++++ b/src/worker.c
+@@ -114,8 +114,8 @@ exit_cb(struct evthr *thr, void *shared)
+ 
+ /* ---------------------------- Our worker API  --------------------------- */
+ 
+-void
+-worker_execute(void (*cb)(void *), void *cb_arg, size_t arg_size, int delay)
++bool
++worker_try_execute(void (*cb)(void *), void *cb_arg, size_t arg_size, int delay)
+ {
+   struct worker_arg *cmdarg;
+   void *argcpy;
+@@ -124,7 +124,7 @@ worker_execute(void (*cb)(void *), void *cb_arg, size_t arg_size, int delay)
+   if (!cmdarg)
+     {
+       DPRINTF(E_LOG, L_MAIN, "Could not allocate worker_arg\n");
+-      return;
++      return false;
+     }
+ 
+   if (arg_size > 0)
+@@ -134,7 +134,7 @@ worker_execute(void (*cb)(void *), void *cb_arg, size_t arg_size, int delay)
+ 	{
+ 	  DPRINTF(E_LOG, L_MAIN, "Out of memory\n");
+ 	  free(cmdarg);
+-	  return;
++	  return false;
+ 	}
+ 
+       memcpy(argcpy, cb_arg, arg_size);
+@@ -146,7 +146,21 @@ worker_execute(void (*cb)(void *), void *cb_arg, size_t arg_size, int delay)
+   cmdarg->cb_arg = argcpy;
+   cmdarg->delay = delay;
+ 
+-  evthr_pool_defer(worker_threadpool, execute, cmdarg);
++  if (evthr_pool_defer(worker_threadpool, execute, cmdarg) != EVTHR_RES_OK)
++    {
++      DPRINTF(E_LOG, L_MAIN, "Could not queue worker task\n");
++      free(argcpy);
++      free(cmdarg);
++      return false;
++    }
++
++  return true;
++}
++
++void
++worker_execute(void (*cb)(void *), void *cb_arg, size_t arg_size, int delay)
++{
++  worker_try_execute(cb, cb_arg, arg_size, delay);
+ }
+ 
+ struct event_base *
+diff --git a/src/worker.h b/src/worker.h
+index 32afea7..19f6448 100644
+--- a/src/worker.h
++++ b/src/worker.h
+@@ -3,6 +3,7 @@
+ #define __WORKER_H__
+ 
+ #include <event2/event.h>
++#include <stdbool.h>
+ 
+ /* The worker thread is made for running asyncronous tasks from a real time
+  * thread.
+@@ -21,6 +22,12 @@
+ void
+ worker_execute(void (*cb)(void *), void *cb_arg, size_t arg_size, int delay);
+ 
++/* Returns false if the task could not be queued; the callback will not run.
++ * Argument ownership remains with the caller, as with worker_execute().
++ */
++bool
++worker_try_execute(void (*cb)(void *), void *cb_arg, size_t arg_size, int delay);
++
+ /* Can be called within a callback to get the worker thread's event base
+  */
+ struct event_base *

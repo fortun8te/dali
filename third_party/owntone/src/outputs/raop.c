@@ -42,6 +42,7 @@
 #include <stdint.h>
 #include <inttypes.h>
 #include <math.h>
+#include <ctype.h>
 #include <errno.h>
 #include <sys/types.h>
 #include <sys/socket.h>
@@ -2661,10 +2662,10 @@ raop_volume_from_pct(int volume, struct output_device *device)
   float raop_volume;
 
   /* RAOP volume
-   *  -144.0 is off (not really used since we have no concept of muted/off)
-   *  0 - 100 maps to -30.0 - 0 (if no max_volume set)
+   *  0 percent is protocol mute (-144.0), so disabled/cut speakers are silent.
+   *  1 - 100 maps to just above -30.0 through 0 (if no max_volume set)
    */
-  if (volume >= 0 && volume <= 100)
+  if (volume > 0 && volume <= 100)
     raop_volume = -30.0 + ((float)device->max_volume * (float)volume * 30.0) / (100.0 * RAOP_CONFIG_MAX_VOLUME);
   else
     raop_volume = -144.0;
@@ -2675,25 +2676,30 @@ raop_volume_from_pct(int volume, struct output_device *device)
 static int
 raop_volume_to_pct(struct output_device *device, const char *volstr)
 {
-  float raop_volume;
+  char *end;
+  float protocol_volume;
   float volume;
+  int max_volume = device->max_volume;
 
-  raop_volume = atof(volstr);
+  if (!volstr || max_volume < 1 || max_volume > RAOP_CONFIG_MAX_VOLUME)
+    return -1;
 
-  if ((raop_volume == 0.0 && volstr[0] != '0') || raop_volume > 0.0)
-    {
-      DPRINTF(E_LOG, L_RAOP, "RAOP device volume is invalid: '%s'\n", volstr);
-      return -1;
-    }
+  protocol_volume = strtof(volstr, &end);
+  if (end == volstr || !isfinite(protocol_volume) || protocol_volume > 0.0f)
+    return -1;
+  while (isspace((unsigned char)*end))
+    end++;
+  if (*end)
+    return -1;
 
-  if (raop_volume <= -30.0)
-    {
-      return 0;
-    }
+  if (protocol_volume <= -30.0f)
+    return 0; // Includes the protocol mute sentinel, -144.0.
 
-  // RAOP volume: -144.0 is off, -30.0 - 0 scaled by max_volume maps to 0 - 100
-  volume = (100.0 * (raop_volume / 30.0 + 1.0) * RAOP_CONFIG_MAX_VOLUME / (float)device->max_volume);
-  return MAX(0, MIN(100, (int)volume));
+  volume = 100.0f * (protocol_volume / 30.0f + 1.0f)
+    * RAOP_CONFIG_MAX_VOLUME / (float)max_volume;
+  // Round the inverse. Truncating makes ordinary serialized values such as
+  // -29.7 report 0 rather than 1 and lets status polls pull sliders backward.
+  return (int)lroundf(MAX(0.0f, MIN(100.0f, volume)));
 }
 
 static int

@@ -119,5 +119,5 @@ cp -R "$STAGE" "$OUT"
 
 echo "vendored: $OUT"
 echo "binary deps now:"
-otool -L "$OUT/owntone" | head -8
+otool -L "$OUT/owntone" | sed -n '1,8p'
 echo "lib count: $(ls "$OUT/lib" | wc -l | tr -d ' ')"
