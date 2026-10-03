@@ -87,6 +87,7 @@ private struct CaptureLifecycleTests {
         try await converterStallCannotRefreshOldAudio()
         try await muteAfterAttachBeforeFirstBuffer()
         try await mutedStartRebuildAndSourceSelection()
+        try await signalSnapshotsDistinguishMuteSilenceAndMissingMeasurements()
         try await stopCannotWaitForHardware()
         try await failedStartCanRetryAndSilenceIsPaced()
         print("PASS: production CaptureController lifecycle, stale conversion, mute/rebuild/source, stop latency and paced silence")
@@ -213,6 +214,26 @@ private struct CaptureLifecycleTests {
         do { try await pending.value; throw Failure(description: "Queued pre-stop start resurrected capture") }
         catch is CancellationError {}
         try expect(factory.count == 1 && !capture.isRunning, "Obsolete queued start created hardware")
+    }
+
+    static func signalSnapshotsDistinguishMuteSilenceAndMissingMeasurements() async throws {
+        let fixture = try PipeFixture(), factory = TapFactory()
+        let capture = CaptureController(makeTap: { factory.make() }, observeWake: false)
+        capture.setMasterGain(0)
+        try await capture.startAsync(fifoPath: fixture.path)
+        factory.latest.emit(rate: 44100)
+        let muted = capture.readMetrics()
+        try expect(muted.signalSamples > 0, "Muted source has no signal measurement")
+        try expect(abs(muted.sourceRMSDBFS + 6.0206) < 0.01, "Source level includes master attenuation")
+        try expect(muted.outputRMSDBFS == -120, "Muted outgoing PCM is not measured as silent")
+        let empty = capture.readMetrics()
+        try expect(empty.signalSamples == 0, "Snapshot reused the previous source signal")
+        factory.latest.emit(value: 0, rate: 44100)
+        let silent = capture.readMetrics()
+        try expect(silent.signalSamples > 0 && silent.sourceRMSDBFS == -120 && silent.outputRMSDBFS == -120,
+                   "Measured source silence is not distinct from missing callbacks")
+        capture.stop()
+        try expect(capture.readMetrics().signalSamples == 0, "Stopped capture retained a stale signal measurement")
     }
 
     static func failedStartCanRetryAndSilenceIsPaced() async throws {

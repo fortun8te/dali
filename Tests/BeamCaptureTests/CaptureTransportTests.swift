@@ -177,4 +177,42 @@ final class CaptureTransportTests: XCTestCase {
         let interleaved = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 44100, channels: 2, interleaved: true)!
         XCTAssertFalse(converter.accepts(interleaved), "Layout changes require a new converter even at the same rate")
     }
+
+    func testConverterSignalMetricsDistinguishQuietGainMuteAndSourceSilence() throws {
+        let format = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 44100, channels: 2, interleaved: false)!
+        let pcm = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 1024)!
+        pcm.frameLength = 1024
+        func fill(_ value: Float) {
+            for channel in 0..<2 { for frame in 0..<1024 { pcm.floatChannelData![channel][frame] = value } }
+        }
+        fill(0.5)
+        let gain = 0.09219786555579713 // reported silent session's desired gain
+        let quiet = try XCTUnwrap(FormatConverter(from: format, initialGain: gain))
+        let data = try XCTUnwrap(quiet.convert(pcm, masterGain: gain))
+        XCTAssertEqual(quiet.signalSampleCount, data.count / 2)
+        XCTAssertEqual(quiet.sourceMeanSquare, 0.25, accuracy: 0.000001)
+        XCTAssertEqual(quiet.outputMeanSquare, 0.25 * gain * gain, accuracy: 0.00001)
+        XCTAssertGreaterThan(quiet.outputMeanSquare, 0, "Desired gain alone does not prove outgoing signal")
+        let muted = try XCTUnwrap(FormatConverter(from: format, initialGain: 0))
+        _ = try XCTUnwrap(muted.convert(pcm, masterGain: 0))
+        XCTAssertEqual(muted.sourceMeanSquare, 0.25, accuracy: 0.000001)
+        XCTAssertEqual(muted.outputMeanSquare, 0)
+        XCTAssertFalse(muted.outputWasSilent)
+        fill(0)
+        let silent = try XCTUnwrap(FormatConverter(from: format))
+        _ = try XCTUnwrap(silent.convert(pcm))
+        XCTAssertEqual(silent.sourceMeanSquare, 0)
+        XCTAssertEqual(silent.outputMeanSquare, 0)
+        XCTAssertTrue(silent.outputWasSilent)
+        fill(.nan)
+        let invalid = try XCTUnwrap(FormatConverter(from: format))
+        let invalidData = try XCTUnwrap(invalid.convert(pcm))
+        XCTAssertTrue(invalidData.allSatisfy { $0 == 0 })
+        XCTAssertEqual(invalid.sourceMeanSquare, 0)
+        XCTAssertEqual(invalid.outputMeanSquare, 0)
+        XCTAssertTrue(invalid.outputWasSilent, "Invalid samples cannot establish real source audio")
+        pcm.frameLength = 0
+        XCTAssertNil(quiet.convert(pcm))
+        XCTAssertEqual(quiet.signalSampleCount, 0, "Failed conversion cannot reuse a previous signal measurement")
+    }
 }

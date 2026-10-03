@@ -258,7 +258,7 @@ struct SpeakerControlRow: View {
         switch speaker.health {
         case .off: return "Selected"
         case .connecting: return "Connecting"
-        case .live: return "Playing"
+        case .live: return store.effectiveVolume(speaker) == 0 || store.captureMasterGain == 0 ? "Muted" : "Connected"
         case .trouble: return "Needs attention"
         }
     }

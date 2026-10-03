@@ -237,6 +237,11 @@ final class DALIStore {
             "speakers": spk,
             "chrome": roomChrome.pillLabel.isEmpty ? phaseLabel : roomChrome.pillLabel.lowercased(),
             "mac_volume": systemVolume.isFinite ? Int(systemVolume * 100) : 0,
+            "software_gain": captureMasterGain,
+            "room_muted": roomVolumePlan.pcmGain == 0 || roomVolumePlan.hardware.values.allSatisfy { $0 == 0 },
+            "signal_samples": lastFlight?.signalSamples ?? 0,
+            "source_dbfs": (lastFlight.flatMap { $0.signalSamples > 0 ? $0.sourceRMSDBFS : nil } as Any?) ?? NSNull(),
+            "output_dbfs": (lastFlight.flatMap { $0.signalSamples > 0 ? $0.outputRMSDBFS : nil } as Any?) ?? NSNull(),
             "backlog_ms": Int(Double(st.pending ?? 0) / 176.4),
             "rate_ppm": Int(-refill.eps * 1_000_000),
             "rate_hold": driftFreeze.isEmpty ? "none" : driftFreeze,
@@ -263,12 +268,14 @@ final class DALIStore {
         case starting
         case live
         case catchingUp
+        case muted
         case speakerOut
         case error(String)
 
         var pillLabel: String {
             switch self {
             case .live: return "LIVE"
+            case .muted: return "MUTED"
             case .catchingUp: return "CATCHING UP"
             case .speakerOut: return "SPEAKER OUT"
             case .error: return "NEEDS YOU"
@@ -279,6 +286,7 @@ final class DALIStore {
         var menuLabel: String {
             switch self {
             case .live: return "Playing in the room"
+            case .muted: return "Room muted"
             case .catchingUp: return "Getting a speaker back…"
             case .speakerOut: return "A speaker dropped out"
             case .starting: return "Connecting…"
@@ -313,6 +321,8 @@ final class DALIStore {
             }
             let enabled = speakers.filter(\.enabled)
             if enabled.isEmpty { return .error("Choose a speaker in Room settings") }
+            let volume = roomVolumePlan
+            if volume.pcmGain == 0 || volume.hardware.values.allSatisfy({ $0 == 0 }) { return .muted }
             if enabled.contains(where: { !$0.available }) { return .speakerOut }
             if enabled.contains(where: { $0.health == .trouble }) { return .speakerOut }
             if enabled.contains(where: { $0.health != .live }) { return .catchingUp }
@@ -454,7 +464,7 @@ final class DALIStore {
             "\($0.name)[\($0.health) ref=\(effectiveVolume($0))]"
         }.joined(separator: " ")
         let fill = result.fill.map { String(format: "%.3f", $0) } ?? "unknown"
-        Self.flog("v2 fill_estimate=\(fill)s hold=\(result.hold) refill=\(refill.label) ratio=\(result.ratio) pcm=\(captureMasterGain) pending=\(f.pending) dropped=\(f.dropped) maxgap=\(Int(f.maxGapMs))ms api=\(queryMs)ms \(links) \(flags)")
+        Self.flog("v2 fill_estimate=\(fill)s hold=\(result.hold) refill=\(refill.label) ratio=\(result.ratio) gain=\(captureMasterGain) source_dbfs=\(f.signalSamples > 0 ? String(format: "%.1f", f.sourceRMSDBFS) : "unknown") output_dbfs=\(f.signalSamples > 0 ? String(format: "%.1f", f.outputRMSDBFS) : "unknown") signal_samples=\(f.signalSamples) pending=\(f.pending) dropped=\(f.dropped) maxgap=\(Int(f.maxGapMs))ms api=\(queryMs)ms \(links) \(flags)")
         applyRoomDelay()
         syncBeacon.publish(streaming: true, delaySeconds: roomDelaySec)
     }

@@ -187,6 +187,8 @@ final class CaptureController: @unchecked Sendable {
     private var lastTapNs: UInt64 = 0
     private var staleConversions = 0
     private var overrunsSeen = 0      // tap ring overruns already reported
+    private var sourceSquaresAcc = 0.0, outputSquaresAcc = 0.0
+    private var signalSamplesAcc = 0
 
     // ZERO-BUFFER CANARY.
     // Core Audio process taps are documented to enter a state where the IOProc
@@ -290,6 +292,11 @@ final class CaptureController: @unchecked Sendable {
         var bufCount = 0, maxGapMs = 0.0, convRebuilds = 0, inFrames = 0, outBytes = 0
         var inRate = 0.0   // device input sample rate seen
         var ratio = 1.0    // current varispeed ratio (drift correction)
+        /// Measured converted source before master gain and quantized output.
+        /// These are signal levels, independent of the UI visualization/gain.
+        /// A zero sample count means no measurement, rather than known silence.
+        var sourceRMSDBFS = -120.0, outputRMSDBFS = -120.0
+        var signalSamples = 0
         /// Wall seconds actually elapsed since the previous readMetrics(). The
         /// flight loop sleeps 1 s and THEN makes two HTTP calls, so its period
         /// is 1 s + API latency and varies by several percent poll to poll.
@@ -326,6 +333,14 @@ final class CaptureController: @unchecked Sendable {
         if let fw = fifo { f.written = fw.writtenBytes; f.dropped = fw.droppedBytes; f.pending = fw.pendingBytes; f.eagain = fw.eagainCount }
         f.bufCount = bufCount; f.maxGapMs = maxGapMs; f.convRebuilds = convRebuilds
         f.inFrames = inFrames; f.outBytes = outBytes; f.inRate = converterInputRate
+        f.signalSamples = signalSamplesAcc
+        if signalSamplesAcc > 0 {
+            func db(_ sum: Double) -> Double {
+                sum > 0 ? 10 * log10(sum / Double(signalSamplesAcc)) : -120
+            }
+            f.sourceRMSDBFS = db(sourceSquaresAcc)
+            f.outputRMSDBFS = db(outputSquaresAcc)
+        }
         f.ratio = lastRatio
         f.silenceBytes = silenceBytesAcc
         f.tapRebuilds = tapRebuildAcc
@@ -336,6 +351,7 @@ final class CaptureController: @unchecked Sendable {
         lastMetricsMono = now
         bufCount = 0; maxGapMs = 0; convRebuilds = 0; inFrames = 0; outBytes = 0
         corrByteSum = 0; corrByteTot = 0; silenceBytesAcc = 0; tapRebuildAcc = 0
+        sourceSquaresAcc = 0; outputSquaresAcc = 0; signalSamplesAcc = 0
         return f
     }
 
@@ -635,6 +651,12 @@ final class CaptureController: @unchecked Sendable {
             self.bufCount += 1
             self.inFrames += Int(buffer.frameLength)
             self.outBytes += data.count
+            if let conv {
+                let count = conv.signalSampleCount
+                self.signalSamplesAcc += count
+                self.sourceSquaresAcc += conv.sourceMeanSquare * Double(count)
+                self.outputSquaresAcc += conv.outputMeanSquare * Double(count)
+            }
             if rebuilt { self.convRebuilds += 1; self.converterInputRate = buffer.format.sampleRate }
             // Publish under the token lock so rebuild/stop cannot occur between
             // validation and writing into a pipe shared by the replacement tap.
@@ -877,6 +899,7 @@ final class CaptureController: @unchecked Sendable {
         lastTapNs = 0
         bufCount = 0; maxGapMs = 0; convRebuilds = 0; inFrames = 0; outBytes = 0
         converterInputRate = 0; silentSec = 0; sourceSilent = false; staleConversions = 0
+        sourceSquaresAcc = 0; outputSquaresAcc = 0; signalSamplesAcc = 0
         lpSlow = 0; lpMid = 0; levelPrimed = false
         _level = 0; _bass = 0; _treble = 0
         peakSinceRead = (0, 0, 0)

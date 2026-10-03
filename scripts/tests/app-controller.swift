@@ -113,6 +113,8 @@ struct AppControllerRegression {
         let muteWrites = await transport.snapshot()
         try expect(muteWrites.suffix(2).allSatisfy { $0.value == 0 } && store.captureMasterGain == 0,
                "zero master mutes receiver commands and captured PCM")
+        try expect(store.statusText == "Muted" && store.roomChrome.menuLabel == "Room muted",
+                   "zero master must not tell the user the room is playing")
         store.systemVolume = 0.5
         try await waitUntil({ await transport.snapshot().count == beforeMute + 4 }, "unmute restores both fixed receiver references")
         let gainBeforeDisable = store.captureMasterGain

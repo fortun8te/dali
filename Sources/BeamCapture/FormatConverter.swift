@@ -21,6 +21,11 @@ public final class FormatConverter {
     public var appliedMasterGain: Double { volume.applied }
     // Source state before software master gain, for tap/silence recovery.
     public private(set) var outputWasSilent = true
+    // Linear power only on the consumer thread. The controller combines these
+    // weighted by sample count and computes dB once per diagnostic snapshot.
+    public private(set) var sourceMeanSquare = 0.0
+    public private(set) var outputMeanSquare = 0.0
+    public private(set) var signalSampleCount = 0
 
     public init?(from inputFormat: AVAudioFormat, initialGain: Double = 1) {
         volume = PCMVolumeRamp(initialGain: initialGain)
@@ -59,6 +64,7 @@ public final class FormatConverter {
 
     /// Convert one buffer; returns interleaved s16le bytes ready for the pipe.
     public func convert(_ buffer: AVAudioPCMBuffer, masterGain: Double = 1) -> Data? {
+        sourceMeanSquare = 0; outputMeanSquare = 0; signalSampleCount = 0
         let inRate = buffer.format.sampleRate
         // A zero/NaN rate would make the capacity math inf/NaN, and
         // AVAudioFrameCount(inf) is a hard trap.
@@ -85,13 +91,26 @@ public final class FormatConverter {
               let ch = outBuf.floatChannelData else { return nil }
         let count = Int(outBuf.frameLength) * Int(outFormat.channelCount)
         let samples = UnsafeMutableBufferPointer(start: ch[0], count: count)
-        outputWasSilent = !samples.contains { $0 != 0 }
+        var sourceSquares = 0.0
+        for sample in samples where sample.isFinite {
+            let value = Double(sample)
+            sourceSquares += value * value
+        }
+        sourceMeanSquare = sourceSquares / Double(count)
+        outputWasSilent = sourceSquares == 0
         volume.apply(to: samples, channels: Int(outFormat.channelCount),
                      sampleRate: outFormat.sampleRate, gain: masterGain)
         if s16Scratch.count < count { s16Scratch = [Int16](repeating: 0, count: count + 1024) }
         s16Scratch.withUnsafeMutableBufferPointer { dst in
             Self.quantize(UnsafeBufferPointer(start: ch[0], count: count), into: dst, rng: &rng)
         }
+        var outputSquares = 0.0
+        for index in 0..<count {
+            let value = Double(s16Scratch[index])
+            outputSquares += value * value
+        }
+        outputMeanSquare = outputSquares / (Double(count) * 32768.0 * 32768.0)
+        signalSampleCount = count
         return s16Scratch.withUnsafeBytes { Data(bytes: $0.baseAddress!, count: count * MemoryLayout<Int16>.size) }
     }
 
