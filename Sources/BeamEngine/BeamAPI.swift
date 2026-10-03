@@ -66,9 +66,10 @@ public struct QueueItem: Codable, Identifiable, Equatable, Sendable {
     public let uri: String?
 }
 
-public struct BeamAPIError: Error, CustomStringConvertible {
+public struct BeamAPIError: LocalizedError, CustomStringConvertible {
     public let what: String
     public var description: String { "BeamAPI: \(what)" }
+    public var errorDescription: String? { what }
 }
 
 /// Decodes to nil instead of failing the whole list, so one odd element can
