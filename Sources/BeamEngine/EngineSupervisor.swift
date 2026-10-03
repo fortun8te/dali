@@ -493,10 +493,11 @@ public actor EngineSupervisor {
                                configPath: String) -> Bool {
         let binary = URL(fileURLWithPath: executablePath)
         let original = ["-f", "-c", configPath]
-        let bundled = original + ["-s", OwnToneConfig.sqliteExtension(for: binary).path]
+        let sqliteOnly = original + ["-s", OwnToneConfig.sqliteExtension(for: binary).path]
+        let bundled = sqliteOnly + ["-w", OwnToneConfig.webRoot(for: binary).path]
         // Keep exact matching for the prior installed generation during upgrades.
         return binary.lastPathComponent == "owntone"
-            && (arguments == original || arguments == bundled)
+            && (arguments == original || arguments == sqliteOnly || arguments == bundled)
     }
 
     /// How long a freshly spawned engine gets to start answering HTTP. Measured

@@ -4,14 +4,47 @@
 Never executes OwnTone or opens DALI's saved database, ports, or audio devices.
 """
 import ctypes
+import hashlib
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
 import tempfile
 
 
+def verify_prefix_contract():
+    source = Path(__file__).resolve().parents[2] / "third_party/owntone/src"
+    prefixed_settings = set()
+    prefixed_macros = set()
+    for path in list(source.rglob("*.c")) + list(source.rglob("*.h")):
+        for line in path.read_text().splitlines():
+            if "STATEDIR" in line and "CFG_STR(" in line and "CFGF_DEPRECATED" not in line:
+                prefixed_settings.update(re.findall(r'CFG_STR\("([^"]+)"', line))
+            if re.match(r"\s*#define\s+\w+\s+(STATEDIR|DATADIR|PKGLIBDIR|CONFDIR)\b", line):
+                prefixed_macros.update(re.findall(r"#define\s+(\w+)", line))
+    # Any additional compiled resource requires an explicit new routing audit.
+    if prefixed_settings != {"db_path", "logfile", "cache_dir"}:
+        raise RuntimeError(f"unreviewed engine prefix settings: {sorted(prefixed_settings)}")
+    if prefixed_macros != {"CONFFILE", "PIDFILE", "WEB_ROOT", "SQLITE_EXT_PATH"}:
+        raise RuntimeError(f"unreviewed engine prefix resources: {sorted(prefixed_macros)}")
+
+
 def verify_tree(root):
+    webroot = root / "htdocs"
+    if not webroot.is_dir():
+        raise RuntimeError("bundled engine is missing its HTTP web root directory htdocs")
+    source_webroot = Path(__file__).resolve().parents[2] / "third_party/owntone/htdocs"
+    if not source_webroot.is_dir():
+        raise RuntimeError("engine source web assets missing; cannot verify the bundle")
+    for original in source_webroot.rglob("*"):
+        if not original.is_file() or original.name.startswith("Makefile"):
+            continue
+        bundled = webroot / original.relative_to(source_webroot)
+        if not bundled.is_file():
+            raise RuntimeError(f"missing bundled web asset: {bundled.relative_to(root)}")
+        if hashlib.sha256(original.read_bytes()).digest() != hashlib.sha256(bundled.read_bytes()).digest():
+            raise RuntimeError(f"bundled web asset differs from engine source: {bundled.relative_to(root)}")
     extension = root / "lib/owntone-sqlext.so"
     if not extension.is_file():
         raise RuntimeError("bundled engine is missing runtime-loaded lib/owntone-sqlext.so")
@@ -78,6 +111,7 @@ def load_sqlite_extension(root):
 
 
 def main():
+    verify_prefix_contract()
     source = Path(sys.argv[1]) if len(sys.argv) > 1 else Path(__file__).resolve().parents[2] / "vendor/owntone"
     verify_tree(source)
     with tempfile.TemporaryDirectory(prefix="dali SQLite relocation ") as scratch:
@@ -85,7 +119,7 @@ def main():
         shutil.copytree(source, relocated)
         verify_tree(relocated)
         load_sqlite_extension(relocated)
-    print("PASS: bundled dependencies and SQLite extension load after relocation; OwnTone was not started")
+    print("PASS: engine prefix resource audit, complete web assets, dependencies and SQLite load after relocation; OwnTone was not started")
 
 
 if __name__ == "__main__":

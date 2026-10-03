@@ -126,6 +126,22 @@ port or connects to a speaker. The Swift packaging and reaping checks cover
 the exact launch arguments and safe recognition of the old and new process
 generations.
 
+The follow-up startup log exposed the same missing-resource problem for the
+HTTP web root and cache directory. Vendoring now copies the complete original
+`third_party/owntone/htdocs` assets from the corresponding isolated build tree,
+excluding generated Makefiles. The existing HTTP thread requires this directory
+before it will serve DALI's API. The bundled copy contains the original web UI,
+JavaScript, CSS and images. The supervisor supplies `-w` with this directory
+beside the helper, and `general.cache_dir` points to the materialized persistent
+`engine/var/cache` directory. The saved library database is unchanged.
+
+The full prefix audit found seven active defaults. Config, SQLite extension
+and web root are overridden with `-c`, `-s` and `-w`; database, logfile and cache
+directory are overridden in the generated config; `-f` bypasses the background
+PID file. Deprecated Spotify settings have no runtime reader. The packaging
+check rejects new unreviewed prefix defaults and compares every web asset byte
+with the published engine source before the vendor tree is replaced.
+
 The host's system SQLite lacked unlock-notify support. Compile validation used
 a copy of the prior development bundle's standalone SQLite dylib in the
 ignored checkout-local dependency directory. Only that copy's install name and

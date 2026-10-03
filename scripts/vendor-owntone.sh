@@ -1,5 +1,5 @@
 #!/bin/bash
-# Vendors the locally-built owntone binary, SQLite module and non-system dylibs into
+# Vendors the engine, SQLite module, web assets and non-system dylibs into
 # vendor/owntone/ so DALI.app can bundle them under Contents/Helpers/.
 # Rewrites the executable's libraries to @executable_path/lib/ and shared
 # libraries' dependencies to @loader_path/ so runtime-loaded modules relocate.
@@ -13,6 +13,7 @@ set -euo pipefail
 
 SRC_BIN="${1:-$HOME/.local/beam/sbin/owntone}"
 SRC_SQLITE_EXT="${2:-}"
+SRC_WEBROOT="${3:-}"
 OUT="$(cd "$(dirname "$0")/.." && pwd)/vendor/owntone"
 
 # STAGE, THEN SWAP. This used to `rm -rf "$OUT"` up front and build in place, so
@@ -40,6 +41,20 @@ fi
   echo 'FATAL: OwnTone SQLite extension missing. Pass the matching built owntone-sqlext.so as argument 2.'
   exit 1
 }
+if [ -z "$SRC_WEBROOT" ]; then
+  for candidate in \
+    "$(dirname "$SRC_BIN")/../htdocs" \
+    "$(dirname "$SRC_BIN")/../share/owntone/htdocs" \
+    "$(dirname "$SRC_BIN")/htdocs"; do
+    if [ -f "$candidate/index.html" ]; then SRC_WEBROOT="$candidate"; break; fi
+  done
+fi
+[ -f "$SRC_WEBROOT/index.html" ] && [ -f "$SRC_WEBROOT/assets/index.js" ] && [ -f "$SRC_WEBROOT/assets/index.css" ] || {
+  echo 'FATAL: OwnTone web assets missing. Pass the matching htdocs directory as argument 3.'
+  exit 1
+}
+mkdir -p "$STAGE/htdocs"
+rsync -a --exclude='Makefile*' "$SRC_WEBROOT/" "$STAGE/htdocs/"
 cp "$SRC_BIN" "$STAGE/owntone"
 chmod u+w "$STAGE/owntone"
 cp "$SRC_SQLITE_EXT" "$LIBDIR/owntone-sqlext.so"
@@ -142,6 +157,10 @@ if [ "$(strings "$STAGE/owntone" | grep -c "AI event=%s device='%s' divergence_m
   echo "FATAL: $SRC_BIN is missing the DALI engine patches — leaving $OUT untouched"
   exit 1
 fi
+
+# Validate all runtime assets before replacing the previous complete vendor tree.
+# This only loads SQLite into a disposable in-memory DB, never starts OwnTone.
+python3 "$(dirname "$0")/tests/engine-packaging.py" "$STAGE"
 
 rm -rf "$OUT"
 mkdir -p "$(dirname "$OUT")"

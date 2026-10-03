@@ -37,6 +37,7 @@ rsync -a third_party/owntone/ build/engine-src/owntone/
   make -j4
 )
 ./scripts/vendor-owntone.sh "$ROOT/build/engine-src/owntone/src/owntone" \
-  "$ROOT/build/engine-src/owntone/sqlext/.libs/owntone-sqlext.so"
+  "$ROOT/build/engine-src/owntone/sqlext/.libs/owntone-sqlext.so" \
+  "$ROOT/build/engine-src/owntone/htdocs"
 python3 scripts/tests/engine-packaging.py
 echo 'Engine built and vendored. Nothing was installed or launched.'

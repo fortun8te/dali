@@ -23,6 +23,7 @@ public struct OwnToneConfig: Sendable {
 
     public var etcDir: URL   { rootDir.appendingPathComponent("etc") }
     public var varDir: URL   { rootDir.appendingPathComponent("var") }
+    public var cacheDir: URL { varDir.appendingPathComponent("cache") }
     public var logFile: URL  { varDir.appendingPathComponent("owntone.log") }
     public var dbFile: URL   { varDir.appendingPathComponent("songs3.db") }
     public var mediaDir: URL { rootDir.appendingPathComponent("media") }
@@ -36,13 +37,18 @@ public struct OwnToneConfig: Sendable {
     public var confFile: URL { etcDir.appendingPathComponent("owntone.conf") }
 
     func engineArguments(for binary: URL) -> [String] {
-        ["-f", "-c", confFile.path, "-s", Self.sqliteExtension(for: binary).path]
+        ["-f", "-c", confFile.path, "-s", Self.sqliteExtension(for: binary).path,
+         "-w", Self.webRoot(for: binary).path]
     }
 
     /// OwnTone's compiled default points into the build prefix. The module must
     /// follow the bundled executable when the app or checkout moves.
     static func sqliteExtension(for binary: URL) -> URL {
         binary.deletingLastPathComponent().appendingPathComponent("lib/owntone-sqlext.so")
+    }
+
+    static func webRoot(for binary: URL) -> URL {
+        binary.deletingLastPathComponent().appendingPathComponent("htdocs")
     }
 
     /// libconfuse string literal: a path or user name containing `"` or `\` would
@@ -68,6 +74,7 @@ public struct OwnToneConfig: Sendable {
             uid = \(Self.quoted(NSUserName()))
             db_path = \(Self.quoted(dbFile.path))
             logfile = \(Self.quoted(logFile.path))
+            cache_dir = \(Self.quoted(cacheDir.path))
             loglevel = info
             trusted_networks = { "localhost" }
             websocket_interface = "lo0"
@@ -101,7 +108,7 @@ public struct OwnToneConfig: Sendable {
     /// Create dirs, the FIFO, and write the config file.
     public func materialize() throws {
         let fm = FileManager.default
-        for dir in [etcDir, varDir, mediaDir] {
+        for dir in [etcDir, varDir, cacheDir, mediaDir] {
             try fm.createDirectory(at: dir, withIntermediateDirectories: true)
         }
         // The path must be a real FIFO. A regular file left there (a stray
