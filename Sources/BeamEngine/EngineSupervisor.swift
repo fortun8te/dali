@@ -14,13 +14,11 @@ public actor EngineSupervisor {
     private let binary: URL
     private var config: OwnToneConfig
     private let api: BeamAPI
+    private let lifecycle = EngineLifecycleGate()
+    private let runtime: Runtime
     private let log = Logger(subsystem: "beam.engine", category: "supervisor")
 
-    /// False when the engine had to be started while UDP 319/320 were still held
-    /// by a dying instance. OwnTone's embedded PTP service binds those two ports
-    /// at startup and silently degrades to NTP-only timing if it cannot — and an
-    /// NTP-only engine skips the AirPlay SETPEERS request, so multiple speakers
-    /// never share a clock. Nonzero consequence, zero error message: surface it.
+    /// Startup fails while PTP ports are held, preserving shared speaker timing.
     public private(set) var ptpAvailable = true
 
     /// Swap in a freshly-built config (e.g. after the low-latency toggle). Takes
@@ -95,10 +93,32 @@ public actor EngineSupervisor {
 
     public func setResumePlayback(_ on: Bool) { resumePlaybackOnRestart = on }
 
+    /// Injectable platform checks let tests exercise the supervisor with a
+    /// disposable child and mock HTTP, without probing or unlinking live PTP.
+    struct Runtime: Sendable {
+        var tcpAccepts: @Sendable (Int) -> Bool = { EngineSupervisor.tcpAccepts(port: $0) }
+        var ptpPortsAreFree: @Sendable () -> Bool = { EngineSupervisor.ptpPortsAreFree() }
+        var reap: @Sendable (String, TimeInterval) -> [Int32] = {
+            EngineSupervisor.reapEngines(matchingConfig: $0, graceSeconds: $1)
+        }
+        var clearClock: @Sendable () -> Void = { _ = shm_unlink("/airptp_shm") }
+        var ptpTimeout: TimeInterval = 12
+        var terminateGrace: TimeInterval = 11
+        var startupHold: TimeInterval = 1
+    }
+
     public init(binary: URL, config: OwnToneConfig) {
         self.binary = binary
         self.config = config
         self.api = BeamAPI(port: config.port)
+        self.runtime = Runtime()
+    }
+
+    init(binary: URL, config: OwnToneConfig, api: BeamAPI, runtime: Runtime) {
+        self.binary = binary
+        self.config = config
+        self.api = api
+        self.runtime = runtime
     }
 
     deinit {
@@ -288,20 +308,17 @@ public actor EngineSupervisor {
         ptpPorts.allSatisfy { udpPortIsBindable($0) }
     }
 
-    /// Poll until both PTP ports are bindable, up to `timeoutMs`.
+    /// Poll until both PTP ports are bindable within the startup budget.
     /// Returns false if they never freed up.
-    private func waitForPTPPorts(timeoutMs: Int = 12_000, stepMs: Int = 250) async -> Bool {
-        if Self.ptpPortsAreFree() { return true }
-        var waited = 0
-        while waited < timeoutMs {
-            try? await Task.sleep(nanoseconds: UInt64(stepMs) * 1_000_000)
-            waited += stepMs
-            if Self.ptpPortsAreFree() {
-                log.info("PTP ports 319/320 freed after \(waited)ms")
-                return true
-            }
+    private func waitForPTPPorts(stepMs: Int = 250) async throws -> Bool {
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: .seconds(runtime.ptpTimeout))
+        while true {
+            try Task.checkCancellation()
+            if runtime.ptpPortsAreFree() { return true }
+            if clock.now >= deadline { return false }
+            try await Task.sleep(for: .milliseconds(stepMs))
         }
-        return false
     }
 
     /// Does anything accept TCP connections on 127.0.0.1:`port`? A bare connect
@@ -343,7 +360,17 @@ public actor EngineSupervisor {
             if let inFlight = startTask {
                 task = inFlight
             } else {
-                task = Task { try await self.performStart() }
+                task = Task {
+                    await self.lifecycle.acquire()
+                    do {
+                        try Task.checkCancellation()
+                        try await self.performStart()
+                        await self.lifecycle.release()
+                    } catch {
+                        await self.lifecycle.release()
+                        throw error
+                    }
+                }
                 startTask = task
             }
             do {
@@ -478,20 +505,21 @@ public actor EngineSupervisor {
         // An orphan from a previous run of THIS app (see reapEngines) ignores
         // SIGTERM, so it must be escalated before anything else looks at ports.
         if process == nil {
-            let killed = Self.reapEngines(matchingConfig: config.confFile.path, graceSeconds: 2.5)
+            let killed = runtime.reap(config.confFile.path, 2.5)
             if !killed.isEmpty {
                 log.error("reaped \(killed.count) orphaned engine(s) that ignored SIGTERM: \(killed.map(String.init).joined(separator: ","))")
             }
         }
-        guard process == nil else { return }
+        if let process, process.isRunning { return }
+        process = nil
         // The port must be DEAD before we spawn: if anything still answers on it,
         // our child will run headless ("HTTPd thread failed to start") while
         // sharing the DB and pipe with the impostor — the two-engine glitch.
         // A bare TCP connect answers that without sending the impostor a request.
         for attempt in 0..<10 {
-            if !Self.tcpAccepts(port: config.port) { break }
-            _ = Self.reapEngines(matchingConfig: config.confFile.path, graceSeconds: 0.4)
-            try? await Task.sleep(nanoseconds: 400_000_000)
+            if !runtime.tcpAccepts(config.port) { break }
+            _ = runtime.reap(config.confFile.path, 0.4)
+            try await Task.sleep(nanoseconds: 400_000_000)
             if attempt == 9 {
                 transition(.failed("another audio engine is holding the port and refuses to quit"))
                 throw BeamAPIError(what: "port \(config.port) occupied by a foreign engine")
@@ -525,14 +553,9 @@ public actor EngineSupervisor {
             // HTTP being free is NOT enough — the PTP sockets outlive it by
             // seconds. Wait for UDP 319+320 before spawning, or the new engine
             // comes up NTP-only and multi-speaker sync is silently broken.
-            if await waitForPTPPorts() {
-                ptpAvailable = true
-            } else {
-                // Do NOT abort: an NTP-only engine still plays. Just never let
-                // this be invisible — it is the root cause of "speakers drift
-                // apart".
-                ptpAvailable = false
-                log.error("UDP 319/320 still held after 12s — starting anyway; PTP unavailable, AirPlay multi-speaker sync will be degraded (NTP-only, no SETPEERS)")
+            ptpAvailable = try await waitForPTPPorts()
+            guard ptpAvailable else {
+                throw BeamAPIError(what: "PTP ports are still held; refusing to overlap audio engines")
             }
             if stopEpoch != epoch { throw CancellationError() }
 
@@ -543,7 +566,14 @@ public actor EngineSupervisor {
             // session on a clock nobody serves. We are about to spawn the only
             // engine on this box, so any existing segment is by definition
             // stale: remove it. (ENOENT is the normal case; ignored.)
-            _ = shm_unlink("/airptp_shm")
+            runtime.clearClock()
+
+            // A previous process has exited, but its HTTP transport may still
+            // be draining. Never let an old committed request hit the new child.
+            api.suspendSession()
+            await api.waitForDrain()
+            try Task.checkCancellation()
+            if stopEpoch != epoch { throw CancellationError() }
 
             rotateEngineLogIfNeeded()
             if databaseNeedsCheck {
@@ -574,7 +604,8 @@ public actor EngineSupervisor {
             process = p
             spawnedAt = Date()
             // Nothing may reach its HTTP thread while it is still initialising.
-            api.holdOff(for: 1.0)
+            api.resumeSession()
+            api.holdOff(for: runtime.startupHold)
 
             // Health poll: the API must answer within the startup window. TCP
             // first (free), then ONE HTTP request at a time through the lane.
@@ -587,7 +618,7 @@ public actor EngineSupervisor {
                     transition(.failed("engine exited during startup"))
                     throw BeamAPIError(what: "engine exited during startup")
                 }
-                if Self.tcpAccepts(port: config.port), await api.isUp(deadline: 3) {
+                if runtime.tcpAccepts(config.port), await api.isUp(deadline: 3) {
                     if stopEpoch != epoch { throw CancellationError() }
                     guard process === p else { continue }
                     transition(.running)
@@ -602,7 +633,8 @@ public actor EngineSupervisor {
             // treat this as a crash and auto-respawn a competitor at the next
             // start.
             intentionalStop = true
-            stopProcess(kind: .stop)
+            api.suspendSession()
+            await stopProcess(kind: .stop)
             throw BeamAPIError(what: "engine start timeout")
         } catch {
             // An abandoned start (stop() ran) has nothing to report: stop()
@@ -653,6 +685,7 @@ public actor EngineSupervisor {
             return
         }
         process = nil
+        api.suspendSession()
         logTask?.cancel(); logTask = nil
         // A death WE asked for (stop/restart) is not a crash. Without this, a
         // restart's own SIGTERM landed here after start() had already cleared
@@ -736,7 +769,6 @@ public actor EngineSupervisor {
     /// likely why UDP 319/320 were left lingering for the next start to trip
     /// over. 11s lets it finish and release its sockets properly.
     /// SIGKILL stays as the backstop for a truly wedged process.
-    private static let terminateGraceSeconds: TimeInterval = 11
 
     /// A WEDGED engine gets a much shorter grace. killForRespawn() exists for a
     /// process that is alive but frozen — it may never service SIGTERM at all, so
@@ -746,48 +778,37 @@ public actor EngineSupervisor {
     /// then absorbs any socket that does linger.
     private static let wedgeGraceSeconds: TimeInterval = 2
 
-    /// Synchronous on purpose. Making this async would let the actor reenter —
-    /// the terminationHandler's handleDeath() could spawn a replacement while we
-    /// are still waiting, and our `process = nil` would then clobber it.
-    private func stopProcess(kind: KillKind,
-                             graceSeconds: TimeInterval = EngineSupervisor.terminateGraceSeconds) {
+    private func stopProcess(kind: KillKind, graceSeconds: TimeInterval? = nil) async {
         logTask?.cancel(); logTask = nil
-        guard let p = process, p.isRunning else { process = nil; return }
+        guard let child = process else { return }
         requestedKills[engineGeneration] = kind
-        p.terminate()                       // SIGTERM
-        let deadline = Date().addingTimeInterval(graceSeconds)
-        while p.isRunning && Date() < deadline {
-            usleep(50_000)
+        let exited = await ManagedChildTermination.stop(child,
+            graceSeconds: graceSeconds ?? runtime.terminateGrace)
+        // The lifecycle gate blocks start, and identity also protects against a
+        // delayed handler. A still-running child remains owned and blocks spawn.
+        if exited {
+            if child.terminationReason == .uncaughtSignal, child.terminationStatus == SIGKILL {
+                log.error("engine required SIGKILL after graceful shutdown deadline")
+            }
+            if process === child { process = nil }
+        } else {
+            transition(.failed("engine did not exit after shutdown"))
         }
-        if p.isRunning {
-            log.error("engine ignored SIGTERM for \(graceSeconds)s — SIGKILL (sockets may linger)")
-            kill(p.processIdentifier, SIGKILL)
-            // The kernel frees the sockets the instant the process is gone;
-            // wait (briefly) for that instead of racing the next spawn.
-            let killDeadline = Date().addingTimeInterval(1.0)
-            while p.isRunning && Date() < killDeadline { usleep(20_000) }
-        }
-        process = nil
     }
 
     public func stop() async {
-        // Bumped BEFORE the pause below so a start() still in flight abandons
-        // itself instead of spawning an engine we are about to kill; bumped
-        // again after, to catch a start() that began during the pause.
         stopEpoch += 1
+        let epoch = stopEpoch
         intentionalStop = true
-        // Best-effort courtesy so speakers are not left mid-stream; short deadline
-        // because a wedged engine must not delay its own shutdown.
-        // Only pause a player that is actually playing: pausing a stopped or
-        // already-paused OwnTone answers HTTP 500 ("web: Error pausing playback",
-        // seen before every engine restart in owntone.log) for no benefit.
-        if process != nil, let st = try? await api.playerState(deadline: 2), st.state == "play" {
-            try? await api.pause(deadline: 2)
-        }
-        stopEpoch += 1
-        intentionalStop = true
-        stopProcess(kind: .stop)
-        transition(.stopped)
+        api.suspendSession()
+        startTask?.cancel()
+        await lifecycle.acquire()
+        // SIGTERM performs OwnTone's graceful speaker/RTSP teardown. An HTTP
+        // courtesy pause could itself be stuck, so teardown owns this path.
+        await stopProcess(kind: .stop)
+        await api.waitForDrain()
+        if epoch == stopEpoch, process == nil { transition(.stopped) }
+        await lifecycle.release()
     }
 
     /// `resettingBudgets`: true (the default) for a HUMAN-initiated restart —
@@ -810,7 +831,9 @@ public actor EngineSupervisor {
     /// windows (60s / 600s) — it only bites an engine that is STILL wedging,
     /// which is exactly the case the breaker exists for.
     public func restart(resettingBudgets: Bool = true) async throws {
+        let epoch = stopEpoch + 1
         await stop()
+        guard epoch == stopEpoch else { throw CancellationError() }
         if resettingBudgets {
             deathTimes = []
             forcedRespawnTimes = []
@@ -826,11 +849,17 @@ public actor EngineSupervisor {
     /// rescues the "weird noises then everything dies, must restart the engine by
     /// hand" failure: the supervisor's normal watchdog only fires when the process
     /// actually exits, and a wedged process never does.
-    public func killForRespawn() {
+    public func killForRespawn() async {
         guard !intentionalStop, process != nil else { return }
         // Short grace: a wedged process is unlikely to honour SIGTERM, and every
         // second here is audible silence. -> terminationHandler -> handleDeath
         // -> restart.
-        stopProcess(kind: .respawn, graceSeconds: Self.wedgeGraceSeconds)
+        api.suspendSession()
+        await lifecycle.acquire()
+        if !intentionalStop {
+            await stopProcess(kind: .respawn, graceSeconds: Self.wedgeGraceSeconds)
+            await api.waitForDrain()
+        }
+        await lifecycle.release()
     }
 }

@@ -71,217 +71,6 @@ public struct BeamAPIError: Error, CustomStringConvertible {
     public var description: String { "BeamAPI: \(what)" }
 }
 
-// MARK: - transport
-//
-// THE KNOWN OWNTONE CRASH: SIGSEGV in evhttp_add_header_internal <-
-// httpd_header_add <- jsonapi_request. OwnTone's HTTP thread is single and its
-// command lane stalls for ~15 s whenever it is inside an RTSP handshake. Any
-// request queued behind that stall is served LATE; if the client has already
-// hung up (a URLSession timeout, a cancelled Task, a second client's overlapping
-// request) the engine writes headers onto a connection that is gone and dies.
-//
-// So the client rules are: (1) one request on the wire per engine at a time,
-// shared by EVERY BeamAPI value for that port (DALIStore and EngineSupervisor
-// each own one), (2) a request that has been written is NEVER cancelled or
-// abandoned at the socket — a caller that runs out of patience (its deadline,
-// or its own Task being cancelled) simply stops waiting and the late reply is
-// dropped, (3) a request that has not been written yet is dropped when its
-// caller gives up, so an abandoned burst cannot pile onto a stalled engine,
-// (4) no connection reuse (a fresh session per request) so we never talk to the
-// corpse of a previous engine over a pooled socket.
-
-/// Resumes exactly one waiter exactly once, from any thread, in any order
-/// relative to `wait()` — the result may land before the continuation exists.
-final class ReplySlot: @unchecked Sendable {
-    private let lock = NSLock()
-    private var continuation: CheckedContinuation<Data, Error>?
-    private var result: Result<Data, Error>?
-    private var finished = false
-
-    var isResolved: Bool { lock.lock(); defer { lock.unlock() }; return finished }
-
-    @discardableResult
-    func resolve(_ r: Result<Data, Error>) -> Bool {
-        lock.lock()
-        guard !finished else { lock.unlock(); return false }
-        finished = true
-        if let c = continuation {
-            continuation = nil
-            lock.unlock()
-            c.resume(with: r)
-        } else {
-            result = r
-            lock.unlock()
-        }
-        return true
-    }
-
-    func wait() async throws -> Data {
-        try await withCheckedThrowingContinuation { (c: CheckedContinuation<Data, Error>) in
-            lock.lock()
-            if let r = result {
-                result = nil
-                lock.unlock()
-                c.resume(with: r)
-            } else {
-                continuation = c
-                lock.unlock()
-            }
-        }
-    }
-}
-
-/// One serial lane per engine port; see the block comment above.
-final class RequestLane: @unchecked Sendable {
-    /// `coalesceKey`: a write that says "set X to V" is made obsolete by a later
-    /// "set X to W". While the older one is still queued (not yet on the wire) it
-    /// is dropped and its caller told "done" — latest target wins, and a stalled
-    /// engine never receives a backlog of values nobody wants any more.
-    struct Op { let request: URLRequest; let slot: ReplySlot; var coalesceKey: String? = nil; var writeKind: String? = nil }
-    private struct State {
-        var queue: [Op] = []
-        var busy = false
-        var notBefore = Date.distantPast
-        var wakePending = false
-        /// Every state-changing request that actually reached the wire, so the
-        /// app can publish "engine writes per minute" (each volume / offset /
-        /// select is an RTSP SET_PARAMETER on OwnTone's shared player thread).
-        var writes: [(at: Date, kind: String)] = []
-        var totalWrites = 0
-    }
-
-    private static let registry = OSAllocatedUnfairLock(initialState: [Int: RequestLane]())
-    static func shared(port: Int) -> RequestLane {
-        registry.withLock { lanes in
-            if let lane = lanes[port] { return lane }
-            let lane = RequestLane()
-            lanes[port] = lane
-            return lane
-        }
-    }
-
-    private let state = OSAllocatedUnfairLock(initialState: State())
-    private let config: URLSessionConfiguration
-
-    private init() {
-        let cfg = URLSessionConfiguration.ephemeral
-        // These are the LAST-RESORT bounds for a socket that has gone silent, not
-        // the caller's patience (that is BeamAPI.readDeadline/writeDeadline, and
-        // it never touches the socket). They sit well beyond OwnTone's longest
-        // observed stall (~34 s in the flight log) only for a truly dead peer;
-        // the health loop respawns a wedged engine long before this fires, and a
-        // respawn closes the socket from the server side anyway.
-        cfg.timeoutIntervalForRequest = 45
-        cfg.timeoutIntervalForResource = 60
-        cfg.waitsForConnectivity = false
-        cfg.httpMaximumConnectionsPerHost = 1
-        cfg.httpShouldUsePipelining = false
-        cfg.httpShouldSetCookies = false
-        cfg.httpCookieStorage = nil
-        cfg.urlCache = nil
-        cfg.requestCachePolicy = .reloadIgnoringLocalCacheData
-        cfg.connectionProxyDictionary = [:]     // loopback: never via a system proxy
-        config = cfg
-    }
-
-    func enqueue(_ op: Op) {
-        let superseded: [ReplySlot] = state.withLock { s in
-            s.queue.removeAll { $0.slot.isResolved }     // callers that gave up
-            var dropped: [ReplySlot] = []
-            if let key = op.coalesceKey {
-                dropped = s.queue.filter { $0.coalesceKey == key }.map(\.slot)
-                s.queue.removeAll { $0.coalesceKey == key }
-            }
-            s.queue.append(op)
-            return dropped
-        }
-        // Outside the lock: resolving resumes a continuation.
-        for slot in superseded { slot.resolve(.success(Data())) }
-        pump()
-    }
-
-    /// Writes that went on the wire in the last `window` seconds, by kind.
-    func recentWrites(window: TimeInterval) -> [String: Int] {
-        let cutoff = Date().addingTimeInterval(-window)
-        return state.withLock { s in
-            s.writes.removeAll { $0.at < Date().addingTimeInterval(-600) }
-            var out: [String: Int] = [:]
-            for w in s.writes where w.at >= cutoff { out[w.kind, default: 0] += 1 }
-            return out
-        }
-    }
-
-    var totalWrites: Int { state.withLock { $0.totalWrites } }
-
-    private func noteWrite(kind: String) {
-        state.withLock { s in
-            s.writes.append((Date(), kind))
-            s.totalWrites += 1
-        }
-    }
-
-    /// Keep the lane quiet for `seconds` (right after an engine spawn, while its
-    /// HTTP thread is still initialising). Queued requests wait; they do not fail.
-    func holdOff(_ seconds: TimeInterval) {
-        state.withLock { $0.notBefore = max($0.notBefore, Date().addingTimeInterval(seconds)) }
-    }
-
-    private enum Next { case none, run(Op), wait(TimeInterval) }
-
-    private func pump() {
-        let next: Next = state.withLock { s in
-            guard !s.busy else { return .none }
-            s.queue.removeAll { $0.slot.isResolved }
-            guard !s.queue.isEmpty else { return .none }
-            let hold = s.notBefore.timeIntervalSinceNow
-            if hold > 0 {
-                if s.wakePending { return .none }
-                s.wakePending = true
-                return .wait(hold)
-            }
-            s.busy = true
-            return .run(s.queue.removeFirst())
-        }
-        switch next {
-        case .none:
-            break
-        case .wait(let hold):
-            Task {
-                try? await Task.sleep(nanoseconds: UInt64(hold * 1_000_000_000) + 10_000_000)
-                self.state.withLock { $0.wakePending = false }
-                self.pump()
-            }
-        case .run(let op):
-            // Unstructured on purpose: nothing a caller does can cancel this.
-            Task {
-                await self.perform(op)
-                self.state.withLock { $0.busy = false }
-                self.pump()
-            }
-        }
-    }
-
-    private func perform(_ op: Op) async {
-        // A throwaway session per request: URLSession pools keep-alive sockets
-        // (and reserves the `Connection` header, so "close" cannot be forced),
-        // and a pooled socket to a previous engine's corpse is exactly what a
-        // respawn leaves behind. Invalidating after the reply has fully landed
-        // closes the socket cleanly, never mid-serve. Loopback: connect is free.
-        let session = URLSession(configuration: config)
-        defer { session.finishTasksAndInvalidate() }
-        if let kind = op.writeKind { noteWrite(kind: kind) }
-        do {
-            let (data, resp) = try await session.data(for: op.request)
-            guard let http = resp as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
-                throw BeamAPIError(what: "\(op.request.httpMethod ?? "GET") \(op.request.url?.path ?? "?") -> \((resp as? HTTPURLResponse)?.statusCode ?? -1)")
-            }
-            op.slot.resolve(.success(data))
-        } catch {
-            op.slot.resolve(.failure(error))
-        }
-    }
-}
-
 /// Decodes to nil instead of failing the whole list, so one odd element can
 /// never make a healthy engine look dead to the health loop.
 private struct Lossy<T: Decodable>: Decodable {
@@ -311,9 +100,20 @@ public struct BeamAPI: Sendable {
     public let baseURL: URL
     private let lane: RequestLane
 
+    /// The shared engine generation. Work queued for an older generation fails.
+    public var sessionEpoch: UInt64 { lane.sessionEpoch }
+
+    @discardableResult
+    public func invalidateSession() -> UInt64 { lane.invalidateSession() }
+
+    /// Supervisor-only lifecycle fences. Sent sockets always drain naturally.
+    func suspendSession() { lane.suspendSession() }
+    func resumeSession() { lane.resumeSession() }
+    func waitForDrain() async { await lane.waitForDrain() }
+
     /// How long a CALLER waits before giving up on a reply. Giving up never
-    /// touches the socket (see the transport notes above): the request stays
-    /// queued or in flight and its late reply is discarded.
+    /// touches a sent socket. Unsent work is removed immediately, while a sent
+    /// request drains and its late reply is discarded.
     /// Reads are cheap and the health loop counts every miss as a strike, so
     /// they are bounded tighter than writes, which can legitimately sit behind
     /// a ~15 s RTSP handshake on OwnTone's command lane.
@@ -325,6 +125,12 @@ public struct BeamAPI: Sendable {
         lane = RequestLane.shared(port: port)
     }
 
+    /// Tests use a private lane with a controlled transport, never a live port.
+    init(port: Int = 0, lane: RequestLane) {
+        baseURL = URL(string: "http://127.0.0.1:\(port)")!
+        self.lane = lane
+    }
+
     /// Keep every request to this engine waiting for `seconds` (used right after
     /// a spawn so nothing hits the HTTP thread while it is still coming up).
     public func holdOff(for seconds: TimeInterval) { lane.holdOff(seconds) }
@@ -332,7 +138,8 @@ public struct BeamAPI: Sendable {
     // MARK: requests
 
     private func request(_ method: String, _ path: String, body: Data? = nil,
-                         deadline: TimeInterval? = nil, coalesceKey: String? = nil) async throws -> Data {
+                         deadline: TimeInterval? = nil, coalesceKey: String? = nil,
+                         epoch: UInt64? = nil) async throws -> Data {
         try Task.checkCancellation()
         // Split the query manually: appendingPathComponent would escape "?".
         var comps = URLComponents(url: baseURL, resolvingAgainstBaseURL: false)!
@@ -350,23 +157,11 @@ public struct BeamAPI: Sendable {
         if body != nil { req.setValue("application/json", forHTTPHeaderField: "Content-Type") }
 
         let limit = deadline ?? (method == "GET" ? Self.readDeadline : Self.writeDeadline)
-        let slot = ReplySlot()
-        let timer = Task {
-            do { try await Task.sleep(nanoseconds: UInt64(limit * 1_000_000_000)) } catch { return }
-            slot.resolve(.failure(BeamAPIError(what: "\(method) \(path) no reply in \(Int(limit))s")))
-        }
-        defer { timer.cancel() }
-        // Anything but a GET changes engine state; count it under a coarse kind.
         let kind: String? = method == "GET" ? nil : (coalesceKey?.split(separator: ":").first.map(String.init)
             ?? (path.hasPrefix("/api/outputs") ? "select" : "player"))
-        lane.enqueue(RequestLane.Op(request: req, slot: slot, coalesceKey: coalesceKey, writeKind: kind))
-        // Cancelling THIS task only stops the wait; the lane keeps (or drops,
-        // if not yet written) the request itself.
-        return try await withTaskCancellationHandler {
-            try await slot.wait()
-        } onCancel: {
-            slot.resolve(.failure(CancellationError()))
-        }
+        return try await lane.send(req, deadline: limit, epoch: epoch ?? sessionEpoch,
+                                   coalesceKey: coalesceKey, writeKind: kind)
+
     }
 
     // MARK: API surface
@@ -383,12 +178,13 @@ public struct BeamAPI: Sendable {
 
     public func setOutputs(ids: [String]) async throws {
         let body = try JSONSerialization.data(withJSONObject: ["outputs": ids])
-        _ = try await request("PUT", "/api/outputs/set", body: body)
+        _ = try await request("PUT", "/api/outputs/set", body: body, coalesceKey: "select:room")
     }
 
     public func setSelected(outputID: String, selected: Bool) async throws {
         let body = try JSONSerialization.data(withJSONObject: ["selected": selected])
-        _ = try await request("PUT", "/api/outputs/\(outputID)", body: body)
+        _ = try await request("PUT", "/api/outputs/\(outputID)", body: body,
+                              coalesceKey: "select:\(outputID)")
     }
 
     /// Engine write counts by kind ("volume", "offset", "select", "player") over
@@ -401,6 +197,21 @@ public struct BeamAPI: Sendable {
         let body = try JSONSerialization.data(withJSONObject: ["volume": max(0, min(100, volume))])
         _ = try await request("PUT", "/api/outputs/\(outputID)", body: body,
                               coalesceKey: "volume:\(outputID)")
+    }
+
+    /// A successful HTTP acknowledgement confirms this command reached OwnTone.
+    /// A replaced command was never sent. Cancellation, timeout and session
+    /// changes leave application unknown until a fresh observation arrives.
+    public func setVolumeConfirmed(outputID: String, volume: Int) async -> BeamWriteResult {
+        let epoch = sessionEpoch
+        do {
+            try await setVolume(outputID: outputID, volume: volume)
+            return epoch == sessionEpoch ? .applied : .unknown
+        } catch BeamRequestError.superseded {
+            return .superseded
+        } catch {
+            return .unknown
+        }
     }
 
     /// Per-speaker playback offset in milliseconds (positive = this speaker
@@ -416,7 +227,8 @@ public struct BeamAPI: Sendable {
     }
 
     public func setMasterVolume(_ volume: Int) async throws {
-        _ = try await request("PUT", "/api/player/volume?volume=\(max(0, min(100, volume)))")
+        _ = try await request("PUT", "/api/player/volume?volume=\(max(0, min(100, volume)))",
+                              coalesceKey: "volume:master")
     }
 
     /// Find the pipe track in the library by title (the FIFO file name).
@@ -430,8 +242,9 @@ public struct BeamAPI: Sendable {
     }
 
     public func playPipe(uri: String) async throws {
-        _ = try await request("POST", "/api/queue/items/add?uris=\(uri)&clear=true")
-        _ = try await request("PUT", "/api/player/play")
+        let epoch = sessionEpoch
+        _ = try await request("POST", "/api/queue/items/add?uris=\(uri)&clear=true", epoch: epoch)
+        _ = try await request("PUT", "/api/player/play", epoch: epoch)
     }
 
     public func pause(deadline: TimeInterval? = nil) async throws {
