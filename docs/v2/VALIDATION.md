@@ -65,3 +65,11 @@ Build and verify the exact bundled engine source and nested library architecture
 On 3 October 2026, a bounded final source review found no additional high-impact issue. The unchanged application code was rebuilt successfully for Apple Silicon, bundled with the compiled V2 engine, and signed with the existing Michael Computer Use Signing identity. At the user's request, it replaced `/Applications/DALI.app` rather than installing a second app. The previous bundle was retained outside Applications for rollback. Saved settings were preserved.
 
 The app was left closed. No post-build app verification, launch, UI check, speaker test, or playback measurement was performed, as requested. The successful build and signing command results establish those operations only; they do not establish runtime behavior.
+
+## Packaging repair after reported startup failure
+
+The user reported engine startup failure and a placeholder icon after the first installed rebuild. Existing engine logs identified a missing runtime-loaded SQLite extension and a compiled build-folder lookup path. The failed app metadata also lacked both the icon entry and the audio-capture permission description. The earlier compile and source checks had not covered these packaging requirements.
+
+The repair adds an explicit source Info.plist, bundles and relocates the SQLite module and its dependencies, and passes a binary-relative module path to the engine. The metadata regression failed on the reported bundle and passed on the explicit source metadata; generated build settings selected that source plist. The module regression failed before repair and passed after relocating the helper tree, loading the extension into a fresh in-memory database, and exercising its custom function and collation. All 17 targeted Swift packaging, process-identity and lifecycle tests passed. Canonical engine source remained unchanged.
+
+The corrected app compiled and signed successfully with the existing identity, replaced the existing installation, and had its app registration refreshed. It was left closed. No post-build app verification, app launch, live engine startup or speaker testing was performed. These targeted checks do not establish runtime startup or audibility in the installed app.

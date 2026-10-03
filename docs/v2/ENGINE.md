@@ -134,3 +134,9 @@ Homebrew installation. This is a compile/link check, not a clean-machine
 dependency reproduction or proof of corresponding source for that borrowed
 library. Dependency provenance and hardware acceptance remain separate gates. No automated check here proves receiver audibility, long playback,
 network changes, sleep/wake or recovery on physical speakers.
+
+## SQLite module packaging repair
+
+The first installed rebuild exposed a missing runtime-loaded `owntone-sqlext.so`; ordinary linked-library collection had missed it. The helper now carries that module in its `lib` directory and DALI passes `-s` with the binary-relative path. Shared-library dependencies use `@loader_path` so the module can relocate with the helper. Vendoring and release signing include the module. The relocated helper hash recorded above identifies the earlier bundle, before this packaging repair. The canonical C source and unvendored engine build did not change.
+
+`python3 scripts/tests/engine-packaging.py` checks the helper tree and loads the module into a fresh in-memory database after relocation. It does not start OwnTone, use the saved database, or operate speakers.
