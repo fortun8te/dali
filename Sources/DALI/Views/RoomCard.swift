@@ -17,7 +17,9 @@ struct RoomCard: View {
                     if let front = store.front { PairRow(speaker: front, title: "Front") }
                     if let back = store.back { PairRow(speaker: back, title: "Back") }
                 }
-                .frame(height: PanelMetrics.rowHeight * 2, alignment: .top)
+                .frame(height: PanelMetrics.rowHeight * 2
+                    + SpeakerLoudnessAdjustment.height(for: store.front)
+                    + SpeakerLoudnessAdjustment.height(for: store.back), alignment: .top)
                 .padding(.horizontal, Space.m + 2)
                 .padding(.bottom, Space.s)
             } else {
@@ -58,37 +60,67 @@ struct PairRow: View {
     let title: String
 
     var body: some View {
-        HStack(spacing: Space.m) {
-            Button { store.toggle(speaker) } label: {
-                HStack(spacing: Space.s) {
-                    StatusDot(tone: store.tone(for: speaker),
-                              pulsing: speaker.enabled && speaker.health == .connecting)
-                    Text(title)
-                        .font(.body13Medium)
-                        .foregroundStyle(speaker.enabled ? Color.paper : Color.paper38)
+        VStack(spacing: 0) {
+            HStack(spacing: Space.m) {
+                Button { store.toggle(speaker) } label: {
+                    HStack(spacing: Space.s) {
+                        StatusDot(tone: store.tone(for: speaker),
+                                  pulsing: speaker.enabled && speaker.health == .connecting)
+                        Text(title)
+                            .font(.body13Medium)
+                            .foregroundStyle(speaker.enabled ? Color.paper : Color.paper38)
+                    }
+                    .frame(width: 64, alignment: .leading)
+                    .contentShape(Rectangle())
                 }
-                .frame(width: 64, alignment: .leading)
-                .contentShape(Rectangle())
+                .buttonStyle(.plain)
+                .help(speaker.available ? "\(speaker.name) — click to switch \(speaker.enabled ? "off" : "on")"
+                                        : "\(speaker.name) is unavailable")
+                .accessibilityLabel("\(title) speakers")
+                .accessibilityValue(speaker.enabled ? "On" : "Off")
+
+                DALISlider(value: Binding(get: { speaker.relVolume },
+                                          set: { store.setRelVolume($0, for: speaker) }),
+                           live: store.isLit(speaker), enabled: speaker.enabled)
+                    .accessibilityLabel("\(title) volume")
+
+                Text("\(safeInt(speaker.relVolume))")
+                    .font(.readout)
+                    .foregroundStyle(speaker.enabled ? Color.paper62 : Color.paper38)
+                    .contentTransition(.numericText(value: speaker.relVolume))
+                    .animation(Motion.fade, value: safeInt(speaker.relVolume))
+                    .frame(width: 28, alignment: .trailing)
             }
-            .buttonStyle(.plain)
-            .help(speaker.available ? "\(speaker.name) — click to switch \(speaker.enabled ? "off" : "on")"
-                                    : "\(speaker.name) is unavailable")
-            .accessibilityLabel("\(title) speakers")
-            .accessibilityValue(speaker.enabled ? "On" : "Off")
-
-            DALISlider(value: Binding(get: { speaker.relVolume },
-                                      set: { store.setRelVolume($0, for: speaker) }),
-                       live: store.isLit(speaker), enabled: speaker.enabled)
-                .accessibilityLabel("\(title) volume")
-
-            Text("\(safeInt(speaker.relVolume))")
-                .font(.readout)
-                .foregroundStyle(speaker.enabled ? Color.paper62 : Color.paper38)
-                .contentTransition(.numericText(value: speaker.relVolume))
-                .animation(Motion.fade, value: safeInt(speaker.relVolume))
-                .frame(width: 28, alignment: .trailing)
+            .frame(height: PanelMetrics.rowHeight)
+            SpeakerLoudnessAdjustment(speaker: speaker)
+                .padding(.leading, 64 + Space.m)
         }
-        .frame(height: PanelMetrics.rowHeight)
+    }
+}
+
+/// Saved calibration must be visible where the user controls speaker volume.
+struct SpeakerLoudnessAdjustment: View {
+    @Environment(DALIStore.self) private var store
+    let speaker: RoomSpeaker
+
+    static func height(for speaker: RoomSpeaker?) -> CGFloat {
+        speaker.map { $0.gain != 1 ? 20 : 0 } ?? 0
+    }
+
+    var body: some View {
+        if speaker.gain != 1 {
+            HStack(spacing: Space.s) {
+                Text("Adjustment: \(safeInt((speaker.gain * 100).rounded()))%")
+                    .font(.caption).foregroundStyle(Color.paper62)
+                Spacer(minLength: 0)
+                Button("Reset") { store.setGain(1, for: speaker) }
+                    .buttonStyle(.plain).font(.captionMedium)
+                    .foregroundStyle(Color.paper)
+                    .accessibilityLabel("Reset \(speaker.name) loudness adjustment")
+                    .help("Set this speaker's adjustment to 100%")
+            }
+            .frame(height: 20)
+        }
     }
 }
 
@@ -291,6 +323,7 @@ struct SpeakerControlRow: View {
                     Text("Vol").font(.caption).foregroundStyle(Color.paper38)
                 }
                 .accessibilityLabel("\(speaker.name) volume")
+                SpeakerLoudnessAdjustment(speaker: speaker)
             }
         }
     }

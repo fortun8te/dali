@@ -138,6 +138,22 @@ struct AppControllerRegression {
                             "speaker slider routes through the real volume coordinator")
         let sliderReceivedAt = await transport.times().last!
         try expect(defaults.double(forKey: "dali.vol.Back fixture") == 65, "speaker slider persists into the injected suite")
+        let frontBeforeAdjustmentReset = store.effectiveVolume(store.front!)
+        let masterBeforeAdjustmentReset = store.systemVolume
+        store.setGain(0.84, for: store.back!)
+        try await waitUntil({ await transport.snapshot().last(where: { $0.id == "back" })?.value == 7 },
+                            "saved back attenuation reaches its actual receiver command")
+        store.setGain(1, for: store.back!)
+        try await waitUntil({ await transport.snapshot().last(where: { $0.id == "back" })?.value == 8 },
+                            "reset back adjustment restores its unattenuated receiver command")
+        try expect(store.back!.relVolume == 65 && store.back!.gain == 1 &&
+                   defaults.double(forKey: "dali.gain.Back fixture") == 1,
+                   "reset persists calibration without changing the speaker slider")
+        try expect(store.effectiveVolume(store.front!) == frontBeforeAdjustmentReset &&
+                   store.systemVolume == masterBeforeAdjustmentReset && store.captureMasterGain == 1,
+                   "reset back adjustment leaves front, master and PCM unchanged")
+        try expect(SpeakerPreferences(defaults: defaults).gain(name: "Back fixture") == 1,
+                   "reset adjustment is retained when preferences are reloaded")
         store.setGain(1.5, for: store.back!)
         try expect(defaults.double(forKey: "dali.gain.Back fixture") == 1.5, "calibration persists into the injected suite")
         store.setRelVolume(.nan, for: store.back!)
