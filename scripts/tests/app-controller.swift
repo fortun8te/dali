@@ -101,6 +101,8 @@ struct AppControllerRegression {
         for master in [0.01, 0.125, 0.5, 1.0] {
             store.systemVolume = master
             try expect(store.roomVolumePlan.hardware == hardware, "audible master changes keep fixed receiver balance")
+            try expect(abs(store.captureMasterGain - master * master) < 1e-12,
+                       "system master controls common signal gain with a quiet low end")
         }
         try await Task.sleep(for: .milliseconds(250))
         let masterWrites = await transport.snapshot()
