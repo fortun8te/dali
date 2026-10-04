@@ -885,9 +885,9 @@ final class DALIStore {
         syncBeacon.start()
         // Volume keys: when the Mac itself is silent (room-only), the hardware
         // volume keys steer the ROOM master via the system volume they change.
-        // Apply one shared PCM gain; the capture layer ramps it over 15 ms.
-        // Ordinary keys change no receiver controls. Zero additionally sends
-        // urgent receiver mute to cover audio already in the AirPlay pipeline.
+        // Restore V1's master-to-receiver volume response through the single
+        // V2 coordinator. Zero also mutes captured PCM and urgently mutes the
+        // receivers to cover audio already in the AirPlay pipeline.
         // @Sendable: CoreAudio invokes this on its own queue, so it must not
         // inherit this initializer's main-actor isolation (a runtime trap).
         // Keep a muted Mac muted while the asynchronous hardware snapshot is
@@ -927,7 +927,7 @@ final class DALIStore {
     }
 
     @ObservationIgnored private lazy var volumeObserver = SystemVolumeObserver()
-    /// Latest Mac master intent; PCM smoothing is owned by capture.
+    /// Latest Mac master intent; receiver requests are serialized by the coordinator.
     private var desiredSystemVolume: Double = 0.5
 
     private func startSysVolRamp() {

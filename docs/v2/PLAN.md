@@ -1,5 +1,7 @@
 # DALI V2 backend plan
 
+> October 4 follow-up: the user rejected fixed-receiver software master behavior. Current volume control restores V1 hardware master response. The original balance-drift issue remains open; see VOLUME.md for the current contract. The plan below records the initial architecture, not a claim that its volume design was accepted.
+
 Status: implementation plan, 3 October 2026. Target is the DALI macOS music app and its bundled OwnTone engine. This is not the unrelated Fortunate Leads project.
 
 ## Baseline and scope

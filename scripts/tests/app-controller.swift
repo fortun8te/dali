@@ -91,22 +91,22 @@ struct AppControllerRegression {
         store.systemVolume = 0.5
         try await waitUntil({ await transport.snapshot().count == 2 }, "initial receiver references are applied")
         try await Task.sleep(for: .milliseconds(150))
-        let baselineWrites = await transport.snapshot()
         let hardware = store.roomVolumePlan.hardware
-        try expect(hardware["front"] == 16 && hardware["back"] == 8, "saved sliders retain their reference interpretation")
-        let originalGain = store.captureMasterGain
-        store.systemVolume = 0.125
-        try expect(store.captureMasterGain < originalGain && store.captureMasterGain > 0,
-               "Mac volume attenuates common PCM gain")
-        for master in [0.01, 0.125, 0.5, 1.0] {
+        try expect(hardware["front"] == 10 && hardware["back"] == 5,
+                   "half Mac master restores V1 receiver commands")
+        // Independent expected values from V1 effectiveVolume, not the V2 policy.
+        for (master, front, back) in [(0.01, 1, 0), (0.125, 4, 2), (0.5, 10, 5), (1.0, 16, 8)] {
             store.systemVolume = master
-            try expect(store.roomVolumePlan.hardware == hardware, "audible master changes keep fixed receiver balance")
-            try expect(abs(store.captureMasterGain - master * master) < 1e-12,
-                       "system master controls common signal gain with a quiet low end")
+            try expect(store.roomVolumePlan.hardware == ["front": front, "back": back],
+                       "Mac master changes receiver commands as V1 did")
+            try expect(store.captureMasterGain == 1,
+                       "positive system master does not substitute a PCM curve for receiver volume")
+            try await waitUntil({
+                let writes = await transport.snapshot()
+                return writes.last(where: { $0.id == "front" })?.value == front &&
+                    writes.last(where: { $0.id == "back" })?.value == back
+            }, "Mac volume reaches both receivers through the production coordinator")
         }
-        try await Task.sleep(for: .milliseconds(250))
-        let masterWrites = await transport.snapshot()
-        try expect(masterWrites == baselineWrites, "master-only changes issue no receiver volume requests")
         try expect(store.captureMasterGain == 1, "full Mac volume has unity PCM gain")
 
         let beforeMute = await transport.snapshot().count
@@ -118,7 +118,7 @@ struct AppControllerRegression {
         try expect(store.statusText == "Muted" && store.roomChrome.menuLabel == "Room muted",
                    "zero master must not tell the user the room is playing")
         store.systemVolume = 0.5
-        try await waitUntil({ await transport.snapshot().count == beforeMute + 4 }, "unmute restores both fixed receiver references")
+        try await waitUntil({ await transport.snapshot().count == beforeMute + 4 }, "unmute restores V1 receiver commands for the current master")
         let gainBeforeDisable = store.captureMasterGain
         let backBeforeDisable = store.effectiveVolume(store.back!)
         store.toggle(store.front!)
@@ -129,12 +129,12 @@ struct AppControllerRegression {
                "disabling front cannot turn up the remaining back speaker")
         try expect(defaults.bool(forKey: "dali.on.Front fixture") == false, "speaker toggle uses injected preferences")
         store.toggle(store.front!)
-        try await waitUntil({ await transport.snapshot().last == RecordedVolumes.Write(id: "front", value: 16) },
-                            "re-enabled front restores its fixed reference")
+        try await waitUntil({ await transport.snapshot().last == RecordedVolumes.Write(id: "front", value: 10) },
+                            "re-enabled front restores its current master volume")
 
         let sliderIntentAt = ContinuousClock.now
         store.setRelVolume(65, for: store.back!)
-        try await waitUntil({ await transport.snapshot().last == RecordedVolumes.Write(id: "back", value: 13) },
+        try await waitUntil({ await transport.snapshot().last == RecordedVolumes.Write(id: "back", value: 8) },
                             "speaker slider routes through the real volume coordinator")
         let sliderReceivedAt = await transport.times().last!
         try expect(defaults.double(forKey: "dali.vol.Back fixture") == 65, "speaker slider persists into the injected suite")
@@ -151,9 +151,9 @@ struct AppControllerRegression {
         }, "selected-app source immediately submits its receiver reference plan")
         try expect(store.captureMasterGain == 1, "selected-app source switches the shared PCM gain to unity")
         store.source = .system
-        try await waitUntil({ await transport.snapshot().last(where: { $0.id == "front" })?.value == 16 },
+        try await waitUntil({ await transport.snapshot().last(where: { $0.id == "front" })?.value == 10 },
                             "system source immediately submits its receiver reference plan")
-        try expect(store.captureMasterGain < 1, "system source restores common PCM attenuation")
+        try expect(store.captureMasterGain == 1, "system source restores hardware master control without double attenuation")
         store.volumeLimit = 150
         try expect(store.volumeLimit == 100 && defaults.double(forKey: "dali.volumeLimit") == 100,
                "ceiling bounds and storage agree")
@@ -167,8 +167,8 @@ struct AppControllerRegression {
         try expect(store.captureMasterGain == 1 && defaults.string(forKey: "dali.sourceApp") == "Spotify",
                "Spotify source does not inherit system-master attenuation")
         store.source = .system
-        try expect(store.captureMasterGain < 1 && defaults.string(forKey: "dali.sourceApp") == "",
-               "system source restores Mac-master attenuation before capture starts")
+        try expect(store.captureMasterGain == 1 && defaults.string(forKey: "dali.sourceApp") == "",
+               "system source restores V1 master control before capture starts")
         store.delayTrimMs = 900
         try expect(store.delayTrimMs == 400 && defaults.double(forKey: "dali.delayTrimMs") == 400,
                "timing trim bounds and injected storage agree")
@@ -179,7 +179,8 @@ struct AppControllerRegression {
         try await Task.sleep(for: .milliseconds(400))
         await transport.pauseNextReply()
         let countBeforeStop = await transport.snapshot().count
-        store.setRelVolume(79, for: store.front!)
+        // Choose a step that changes the integer receiver command at half master.
+        store.setRelVolume(70, for: store.front!)
         try await waitUntil({ await transport.snapshot().count > countBeforeStop }, "delayed receiver command was sent")
         store.stopStream()
         try expect(store.phase == .idle, "actual store stop wins synchronously")

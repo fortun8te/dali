@@ -110,8 +110,18 @@ An isolated app-controller regression reproduced misleading Live/Playing labels 
 
 An actual converter fixture emits nonzero samples at the earlier logged 0.0921979 gain, and exact silence at zero while keeping source presence independent. Converter and capture lifecycle regressions passed. Both C volume fixture modes and two coordinator mute/restore regressions passed; no engine mute defect was reproduced. The full app compiled and 653 controller assertions passed. These changes correct status and close a diagnostic gap; they do not establish a fix for the earlier nonzero-master silence or end-to-end audibility.
 
-## Quiet master volume correction
+## Quiet master volume attempt, superseded after user feedback
 
 The first Mac master step (1/16), with both speakers at 100 and ceiling 20, previously retained 0.553447 sample amplitude. Two new regressions failed with 105 assertions before the fix. Shared PCM gain now equals master squared, independent of receiver references: 1% master gives 0.0001 amplitude and the first Mac step gives 0.00390625 at ceilings 20, 40 and 100. Speaker settings no longer alter the common master curve or another receiver’s reference. Full-master calibration and zero mute remain preserved.
 
 All 128 Swift tests and 657 isolated actual app-controller checks passed. The parent reviewed the policy and integration; GPT-6.1 sol implemented the policy and its regressions. Release compilation and existing-identity signing succeeded. This verifies sample gain and control behavior, not perceived loudness or physical playback. The rebuilt installation is left closed without post-build app verification.
+
+## V1 master response restoration
+
+The user reported that the quadratic PCM-master change remained too loud or disconnected from the Mac master. Existing user-run flight data at the first Mac step showed gain 0.00390625, source approximately -18.8 dBFS and output -66.9 dBFS, with hardware references 100/84. This confirms signal attenuation, not appropriate physical response. Comparison with the preserved V1 checkout shows V1 changed actual receiver commands with master^0.7 and did not attenuate captured PCM.
+
+The current policy restores that V1 arithmetic, including raw cap100 and ceiling before rounding. Positive master uses unity PCM; zero/cut retains PCM and receiver mute. This intentionally restores the requested V1 response and reopens the original balance-drift issue. No acoustic calibration or balance fix is claimed. The previous quadratic test suite checked an assumed curve, which did not establish the behavior the user wanted.
+
+Independent differential tests failed against the rejected policy and now match V1 across 720 input combinations. A production app-controller regression also failed on the original half-master commands before restoration. The full Swift suite passes 125 tests. The final sources compile successfully. No app launch or post-build playback verification is performed.
+
+Final integration passed 659 actual app-controller checks with isolated preferences and I/O. Existing-identity signing succeeded. The existing app is replaced with a rollback bundle retained and left closed. No live volume was set or post-build app test performed.
