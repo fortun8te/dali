@@ -70,7 +70,8 @@ final class EngineReapingTests: XCTestCase {
         let config = root.appendingPathComponent("unique.conf").path
         let fixture = Process()
         fixture.executableURL = binary
-        fixture.arguments = ["-f", "-c", config]
+        fixture.arguments = ["-f", "-c", config, "-s", OwnToneConfig.sqliteExtension(for: binary).path,
+                             "-w", OwnToneConfig.webRoot(for: binary).path]
         let output = Pipe()
         fixture.standardOutput = output
         try fixture.run()

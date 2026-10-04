@@ -28,6 +28,7 @@
 #include <limits.h>
 #include <errno.h>
 #include <time.h>
+#include <pthread.h>
 #include <sys/param.h>
 #include <sys/types.h>
 #include <sys/stat.h>
@@ -945,6 +946,34 @@ httpd_speaker_update_handler(short event_mask, void *ctx)
 
 /* ---------------------------- REQUEST CALLBACKS --------------------------- */
 
+// Shutdown must not free server requests/modules while queued handlers still
+// use them or need the HTTP thread to finish sending their replies.
+static pthread_mutex_t request_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t request_idle = PTHREAD_COND_INITIALIZER;
+static unsigned int requests_in_flight;
+static bool requests_stopping;
+
+static void
+request_finished(void)
+{
+  pthread_mutex_lock(&request_lock);
+  if (--requests_in_flight == 0)
+    pthread_cond_broadcast(&request_idle);
+  pthread_mutex_unlock(&request_lock);
+}
+
+// Called by the main shutdown thread while the HTTP and worker loops remain
+// alive, so admitted handlers can still send replies before their owners die.
+static void
+requests_drain(void)
+{
+  pthread_mutex_lock(&request_lock);
+  requests_stopping = true;
+  while (requests_in_flight)
+    pthread_cond_wait(&request_idle, &request_lock);
+  pthread_mutex_unlock(&request_lock);
+}
+
 // Worker thread, invoked by request_cb() below
 static void
 request_async_cb(void *arg)
@@ -956,34 +985,42 @@ request_async_cb(void *arg)
   // Some handlers require an evbase to schedule events
   hreq->evbase = worker_evbase_get();
   hreq->module->request(hreq);
+  request_finished();
 }
 
-// httpd thread
-static void
-request_cb(struct httpd_request *hreq, void *arg)
+// Returns true when ownership of completion passes to an async worker.
+static bool
+request_dispatch(struct httpd_request *hreq, void *arg)
 {
   if (is_cors_preflight(hreq, httpd_allow_origin))
     {
       httpd_send_reply(hreq, HTTP_OK, "OK", HTTPD_SEND_NO_GZIP);
-      return;
+      return false;
     }
   else if (!hreq->uri || !hreq->uri_parsed)
     {
       DPRINTF(E_WARN, L_HTTPD, "Invalid URI in request: '%s'\n", hreq->uri);
       httpd_redirect_to(hreq, "/");
-      return;
+      return false;
     }
   else if (!hreq->path)
     {
       DPRINTF(E_WARN, L_HTTPD, "Invalid path in request: '%s'\n", hreq->uri);
       httpd_redirect_to(hreq, "/");
-      return;
+      return false;
     }
 
   httpd_request_handler_set(hreq);
   if (hreq->module && hreq->is_async)
     {
-      worker_execute(request_async_cb, &hreq, sizeof(struct httpd_request *), 0);
+      if (worker_try_execute(request_async_cb, &hreq, sizeof(struct httpd_request *), 0))
+        return true;
+
+      // We are still on the HTTP thread; do not synchronously dispatch a
+      // reply back to that same thread after the worker rejected the task.
+      hreq->is_async = false;
+      httpd_send_error(hreq, HTTP_SERVUNAVAIL, "Server is busy");
+      return false;
     }
   else if (hreq->module)
     {
@@ -998,7 +1035,26 @@ request_cb(struct httpd_request *hreq, void *arg)
       serve_file(hreq);
     }
 
-  // Don't touch hreq here, if async it has been passed to a worker thread
+  return false;
+}
+
+// httpd thread
+static void
+request_cb(struct httpd_request *hreq, void *arg)
+{
+  pthread_mutex_lock(&request_lock);
+  if (requests_stopping)
+    {
+      pthread_mutex_unlock(&request_lock);
+      httpd_send_error(hreq, HTTP_SERVUNAVAIL, "Server is stopping");
+      return;
+    }
+  requests_in_flight++;
+  pthread_mutex_unlock(&request_lock);
+
+  // Handlers may free hreq before returning; only inspect the returned flag.
+  if (!request_dispatch(hreq, arg))
+    request_finished();
 }
 
 
@@ -1610,6 +1666,8 @@ void
 httpd_deinit(void)
 {
   listener_remove(httpd_speaker_update_handler);
+
+  requests_drain();
 
   // Give modules a chance to hang up connections nicely
   modules_deinit();

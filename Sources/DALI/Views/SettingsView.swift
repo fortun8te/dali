@@ -188,12 +188,15 @@ struct RoomSettings: View {
                         SliderRow(value: $store.volumeLimit, readout: "\(safeInt(store.volumeLimit))%", labelWidth: 96) {
                             Text("Volume limit").font(.body13).foregroundStyle(Color.paper)
                         }
+                        Text("Speaker loudness adjustment. 100% applies no adjustment.")
+                            .font(.caption).foregroundStyle(Color.paper62)
+                            .padding(.horizontal, Space.m)
                         ForEach(store.speakers.filter { $0.kind != .extra || $0.enabled }) { sp in
                             SliderRow(value: Binding(get: { (sp.gain - 0.25) / 3.75 * 100 },
                                                      set: { store.setGain(0.25 + $0 / 100 * 3.75, for: sp) }),
-                                      readout: String(format: "%.1f×", sp.gain), labelWidth: 96) {
+                                      readout: "\(safeInt((sp.gain * 100).rounded()))%", labelWidth: 96) {
                                 Text(sp.name).font(.body13).foregroundStyle(Color.paper)
-                                    .lineLimit(1).help("\(sp.name) loudness")
+                                    .lineLimit(1).help("\(sp.name) loudness adjustment")
                             }
                         }
                     }
