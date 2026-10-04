@@ -10,6 +10,10 @@ Mac volume changes again lower and raise the actual speaker commands through the
 
 V2 zero emits protocol mute (-144 dB). The existing 15 ms PCM ramp remains for mute/cut transitions. Source-silence detection uses pre-gain audio, so master mute cannot trigger stale-tap recovery. Control acceptance is not proof of sound or physical response time.
 
+## Visible speaker adjustments
+
+A non-neutral saved gain is shown beside the main front/back slider and in the speaker list as an adjustment percentage, with a per-speaker Reset action. Reset sets that gain to one through the existing coordinator, preserving the slider, other speakers and Mac master. Fine tuning uses the same rounded percentage instead of a one-decimal multiplier. These percentages describe saved settings, not measured acoustic output. No general preference migration or master-curve change is performed.
+
 ## Ownership and asynchronous behavior
 
 `RoomVolumeCoordinator` is the sole output-volume request owner. Startup silence, readiness restore, recovery, browser cuts and ordinary UI intent all use it. Desired values and engine-accepted values are separate. Sent requests drain; new intent replaces queued work. Session epochs reject stale receipts. A successful RTSP-backed HTTP response means control acceptance, not measured physical loudness. `/api/outputs` reports requested volume, so a matching poll never upgrades a failed or unknown write to acceptance.

@@ -125,3 +125,9 @@ The current policy restores that V1 arithmetic, including raw cap100 and ceiling
 Independent differential tests failed against the rejected policy and now match V1 across 720 input combinations. A production app-controller regression also failed on the original half-master commands before restoration. The full Swift suite passes 125 tests. The final sources compile successfully. No app launch or post-build playback verification is performed.
 
 Final integration passed 659 actual app-controller checks with isolated preferences and I/O. Existing-identity signing succeeded. The existing app is replaced with a rollback bundle retained and left closed. No live volume was set or post-build app test performed.
+
+## Visible speaker adjustment repair
+
+Both primary sliders were saved at 100, while the back speaker had a separate saved gain of 0.84. Read-only engine status showed front56/back47, consistent with that attenuation. Non-neutral adjustments now appear next to the main controls and speaker lists with an explicit per-speaker reset. Fine tuning shows a rounded percentage, exposing 84% rather than the old 0.8× readout. No master-policy change or general settings migration was made.
+
+Independent review found no blocking issues. The actual app-controller fixture passed 664 checks with isolated preferences and I/O. Resetting a back gain from 0.84 to1 changed its receiver command from7 to8 while preserving its slider, front, master and reloaded persistence. Final release compilation and existing-identity signing succeeded. The rebuilt app is installed in place and left closed, with no post-build app verification. The user's back-only saved reduction is reset to neutral after the app closes, conditional on the observed0.84 setting remaining unchanged; the previous value is retained for rollback. Physical balance across master levels remains unverified and unresolved.
