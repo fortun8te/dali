@@ -270,6 +270,15 @@ final class CaptureController: @unchecked Sendable {
     /// otherwise-invisible end-to-end backlog.
     var totalWritten: Int { lock.lock(); defer { lock.unlock() }; return fifo?.writtenBytes ?? 0 }
 
+    /// Drop PCM still queued ahead of the pipe. Called right before the engine
+    /// replays the pipe, so a restarted reader starts from live audio instead
+    /// of the backlog that built up while it was stalled. Returns bytes dropped.
+    @discardableResult
+    func discardQueuedAudio() -> Int {
+        lock.lock(); defer { lock.unlock() }
+        return fifo?.discardPending() ?? 0
+    }
+
     /// Set the varispeed drift-correction ratio (input frames consumed per output
     /// frame). >1 drains backlog (produce fewer frames), <1 fills it. Computed
     /// once/sec by DALIStore from OwnTone's real drain + playback clock.

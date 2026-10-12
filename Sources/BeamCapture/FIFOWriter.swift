@@ -106,6 +106,21 @@ public final class FIFOWriter: @unchecked Sendable {
         }
     }
 
+    // Latency recovery. PCM that queued here behind a stalled or full reader is
+    // already late; replaying it after the reader restarts would keep the room
+    // permanently behind the Mac (and browser video out of sync). Dropping it
+    // is a deliberate supersession, not a transport fault.
+    @discardableResult
+    public func discardPending() -> Int {
+        state.withLock { s in
+            guard !s.closed else { return 0 }
+            let bytes = s.pending
+            s.supersededBytes += bytes
+            s.frames = 0
+            return bytes
+        }
+    }
+
     public func write(_ data: Data, generation: Int? = nil) {
         guard !data.isEmpty else { return }
         let schedule = state.withLock { s -> Bool in

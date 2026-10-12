@@ -339,6 +339,10 @@ final class DALIStore {
     private var lastFlightFlags = ""
     private var aiSessionID = String(UUID().uuidString.prefix(8)).lowercased()
     private var timingController = RoomTimingController()
+    /// Notices a room stuck seconds behind the Mac after a stall (see
+    /// LatencyBacklogMonitor). Browser video follows the nominal delay, so an
+    /// uncleared backlog is exactly what puts the picture ahead of the sound.
+    private var backlogMonitor = LatencyBacklogMonitor()
     private var refill: RefillController { timingController.refill }
     private var driftFreeze: String { timingController.hold }
     private var flightApiBackoffUntil = Date.distantPast
@@ -405,6 +409,7 @@ final class DALIStore {
         lastStatsLogAt = Date(); lastDropped = capture.stats.dropped
         flightApiBackoffUntil = .distantPast
         resetDriftAnchors()
+        backlogMonitor = LatencyBacklogMonitor()
         let generation = streamGeneration
         aiEvent("stream_start", fields: ["speakers": sessionSpeakerSummary(),
                                         "start_buffer_ms": config.startBufferMs, "source": source.label])
@@ -445,6 +450,14 @@ final class DALIStore {
             controlBusy: busy || Date().timeIntervalSince(lastVolumeWriteAt) < 15)
         let result = timingController.update(sample, target: Double(config.startBufferMs) / 1_000)
         capture.setTargetRatio(result.ratio)
+        if !playerMode, !resumeInFlight,
+           backlogMonitor.update(dt: f.intervalSec, pendingBytes: f.pending,
+                                 playing: busy ? nil : ps.map { $0.state == "play" }) {
+            let queued = String(format: "%.2f", Double(f.pending) / LatencyBacklogMonitor.bytesPerSecond)
+            dlog("room stuck behind the Mac: \(queued)s queued behind a full engine buffer -> replaying the pipe")
+            aiEvent("latency_backlog_replay", level: "warn", fields: ["queued_sec": queued])
+            Task { [weak self] in await self?.resumePlaybackOnce(reason: "latency backlog") }
+        }
         if let event = result.event {
             aiEvent("refill_transition", fields: ["event": String(describing: event),
                                                   "state": refill.label, "hold": result.hold])
@@ -2374,7 +2387,17 @@ final class DALIStore {
                 }
             }
             guard streamIsCurrent(generation) else { return }
-            if let uri { try? await api.playPipe(uri: uri) }
+            if let uri {
+                // Whatever queued while the reader was stalled is already late.
+                // Replaying it would keep the room (and the browser picture,
+                // which follows the nominal delay) behind for the whole session.
+                let dropped = capture.discardQueuedAudio()
+                if dropped > 0 {
+                    dlog(String(format: "dropped %.2fs of stale queued audio before replaying the pipe",
+                                Double(dropped) / LatencyBacklogMonitor.bytesPerSecond))
+                }
+                try? await api.playPipe(uri: uri)
+            }
         }
         guard streamIsCurrent(generation) else { return }
         // Silence first, settle, then FADE IN (the old double pushVolumes landed
