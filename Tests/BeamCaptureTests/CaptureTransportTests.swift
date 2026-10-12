@@ -80,6 +80,25 @@ final class CaptureTransportTests: XCTestCase {
         XCTAssertTrue(bytes.allSatisfy { $0 == 2 })
     }
 
+    func testDiscardPendingDropsStaleBacklogWithoutCountingAFault() throws {
+        let (dir, path) = try fixture(); defer { try? FileManager.default.removeItem(at: dir) }
+        let queue = DispatchQueue(label: "test.fifo.discard")
+        queue.suspend()
+        let writer = FIFOWriter(path: path, capacityBytes: 4096, maximumAge: 2.5, queue: queue, now: { 1_000_000_000 })
+        writer.write(Data(repeating: 1, count: 2048))
+        XCTAssertEqual(writer.discardPending(), 2048)
+        writer.write(Data(repeating: 2, count: 1024))
+        XCTAssertEqual(writer.pendingBytes, 1024)
+        XCTAssertEqual(writer.supersededBytes, 2048)
+        XCTAssertEqual(writer.droppedBytes, 0)
+        XCTAssertFalse(writer.hasDroppedAudio)
+        queue.resume(); writer.waitForDrainForTesting()
+        let reader = open(path, O_RDONLY | O_NONBLOCK); defer { close(reader); writer.closePipe() }
+        var bytes = [UInt8](repeating: 0, count: 2048)
+        XCTAssertEqual(read(reader, &bytes, bytes.count), 1024)
+        XCTAssertTrue(bytes.prefix(1024).allSatisfy { $0 == 2 })
+        XCTAssertEqual(writer.discardPending(), 0)
+    }
     func testIncompleteStereoFrameIsRejectedWithoutMisalignment() throws {
         let (dir, path) = try fixture(); defer { try? FileManager.default.removeItem(at: dir) }
         let writer = FIFOWriter(path: path); defer { writer.closePipe() }
