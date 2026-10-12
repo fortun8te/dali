@@ -17,7 +17,18 @@ public final class FormatConverter {
     private var s16Scratch = [Int16]()
     private var rng: UInt32 = 0x9E3779B9      // xorshift32 state, persists across buffers
 
-    public init?(from inputFormat: AVAudioFormat) {
+    private var volume: PCMVolumeRamp
+    public var appliedMasterGain: Double { volume.applied }
+    // Source state before software master gain, for tap/silence recovery.
+    public private(set) var outputWasSilent = true
+    // Linear power only on the consumer thread. The controller combines these
+    // weighted by sample count and computes dB once per diagnostic snapshot.
+    public private(set) var sourceMeanSquare = 0.0
+    public private(set) var outputMeanSquare = 0.0
+    public private(set) var signalSampleCount = 0
+
+    public init?(from inputFormat: AVAudioFormat, initialGain: Double = 1) {
+        volume = PCMVolumeRamp(initialGain: initialGain)
         guard inputFormat.sampleRate.isFinite, inputFormat.sampleRate > 0,
               inputFormat.channelCount > 0,
               let out = AVAudioFormat(commonFormat: .pcmFormatInt16,
@@ -48,11 +59,12 @@ public final class FormatConverter {
     /// True when `format` has the rate and channel count this converter was built
     /// for. A mismatch means the device reconfigured and a new converter is needed.
     public func accepts(_ format: AVAudioFormat) -> Bool {
-        format.sampleRate == inFormat.sampleRate && format.channelCount == inFormat.channelCount
+        format == inFormat
     }
 
     /// Convert one buffer; returns interleaved s16le bytes ready for the pipe.
-    public func convert(_ buffer: AVAudioPCMBuffer) -> Data? {
+    public func convert(_ buffer: AVAudioPCMBuffer, masterGain: Double = 1) -> Data? {
+        sourceMeanSquare = 0; outputMeanSquare = 0; signalSampleCount = 0
         let inRate = buffer.format.sampleRate
         // A zero/NaN rate would make the capacity math inf/NaN, and
         // AVAudioFrameCount(inf) is a hard trap.
@@ -78,10 +90,27 @@ public final class FormatConverter {
         guard status != .error, outBuf.frameLength > 0,
               let ch = outBuf.floatChannelData else { return nil }
         let count = Int(outBuf.frameLength) * Int(outFormat.channelCount)
+        let samples = UnsafeMutableBufferPointer(start: ch[0], count: count)
+        var sourceSquares = 0.0
+        for sample in samples where sample.isFinite {
+            let value = Double(sample)
+            sourceSquares += value * value
+        }
+        sourceMeanSquare = sourceSquares / Double(count)
+        outputWasSilent = sourceSquares == 0
+        volume.apply(to: samples, channels: Int(outFormat.channelCount),
+                     sampleRate: outFormat.sampleRate, gain: masterGain)
         if s16Scratch.count < count { s16Scratch = [Int16](repeating: 0, count: count + 1024) }
         s16Scratch.withUnsafeMutableBufferPointer { dst in
             Self.quantize(UnsafeBufferPointer(start: ch[0], count: count), into: dst, rng: &rng)
         }
+        var outputSquares = 0.0
+        for index in 0..<count {
+            let value = Double(s16Scratch[index])
+            outputSquares += value * value
+        }
+        outputMeanSquare = outputSquares / (Double(count) * 32768.0 * 32768.0)
+        signalSampleCount = count
         return s16Scratch.withUnsafeBytes { Data(bytes: $0.baseAddress!, count: count * MemoryLayout<Int16>.size) }
     }
 

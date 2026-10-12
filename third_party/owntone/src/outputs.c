@@ -1035,6 +1035,7 @@ outputs_device_volume_set(struct output_device *device, output_status_cb cb)
   if (!device->session)
     return 0; // Device isn't active
 
+  device->volume_control_failed = false;
   ret = outputs[device->type]->device_volume_set(device, callback_add(device, cb));
 
   return ret; // We don't change device state just because of a failed volume change

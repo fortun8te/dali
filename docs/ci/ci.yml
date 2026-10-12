@@ -15,19 +15,18 @@ jobs:
           node-version: '22'
       - name: Extension regression tests
         run: node --test --test-reporter=spec chrome-extension/tools/harness/regressions.mjs
-      - name: Validate distributable extension
-        run: python3 scripts/package-extension.py build/DALI-Video-Sync.zip
+      - name: Production C engine regression tests
+        run: node scripts/tests/airplay-backpressure.mjs
+      - name: Bundled engine source and patch hashes
+        run: python3 scripts/engine-source-provenance.py
   macos:
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
-      - name: App and engine regression tests
-        run: swift test
-      - name: Onboarding and managed update tests
-        run: bash scripts/tests/onboarding.sh
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
       - name: Install project generator
         run: brew install xcodegen
-      - name: Compile macOS app
-        run: |
-          xcodegen generate
-          xcodebuild -project DALI.xcodeproj -scheme DALI -configuration Release -destination 'platform=macOS' CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO build
+      - name: Complete V2 validation gate
+        run: bash scripts/check.sh

@@ -1390,7 +1390,18 @@ playback_cb(int fd, short what, void *arg)
   if (ret <= 0)
     DPRINTF(E_LOG, L_PLAYER, "Error reading timer\n");
   else if (overrun > 0)
-    overrun--;
+    {
+      // Previously deferred Linux ticks must be repaid too, rather than
+      // accumulating forever while only the new timerfd expiration is read.
+      if (player_tick_interval.tv_nsec > 0)
+        {
+          overrun += pb_tick_debt_ns / (uint64_t)player_tick_interval.tv_nsec;
+          pb_tick_debt_ns %= (uint64_t)player_tick_interval.tv_nsec;
+        }
+      overrun--;
+    }
+  else
+    skip_tick = true;
 #else
   // DALI patch — THE FIX FOR THE BUFFER RATCHET. Read before touching.
   //
@@ -1840,19 +1851,27 @@ device_streaming_cb(struct output_device *device, enum output_device_state statu
 static void
 device_volume_cb(struct output_device *device, enum output_device_state status)
 {
+  // A media-preserving control failure must still fail the volume command.
+  // Keep an earlier failure when a command targets more than one output.
+  int retval = commands_exec_returnvalue(cmdbase) < 0 ? -1 : 0;
+
   if (!device)
     {
       DPRINTF(E_LOG, L_PLAYER, "Output device disappeared before command completion!\n");
+      retval = -1;
       goto out;
     }
   else if (status == OUTPUT_STATE_FAILED)
     {
       DPRINTF(E_LOG, L_PLAYER, "The %s device '%s' failed during execution of volume command\n", device->type_name, device->name);
+      retval = -1;
       goto out;
     }
 
   DPRINTF(E_DBG, L_PLAYER, "Callback from %s device %s to device_volume_cb (status %d)\n", device->type_name, device->name, status);
 
+  if (device->volume_control_failed)
+    retval = -1;
   outputs_device_cb_set(device, device_streaming_cb);
 
  out:
@@ -1861,7 +1880,7 @@ device_volume_cb(struct output_device *device, enum output_device_state status)
   if (outputs_sessions_count() == 0)
     pb_suspend();
 
-  commands_exec_end(cmdbase, 0);
+  commands_exec_end(cmdbase, retval);
 }
 
 static void

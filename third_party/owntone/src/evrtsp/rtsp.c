@@ -1483,8 +1483,18 @@ event_debug(("%s: TEST", __func__));
 	TAILQ_INSERT_TAIL(&evcon->requests, req, next);
 
 	/* If the connection object is not connected; make it so */
-	if (!evrtsp_connected(evcon))
-		return (evrtsp_connection_connect(evcon));
+	if (!evrtsp_connected(evcon)) {
+		int result = evrtsp_connection_connect(evcon);
+		if (result < 0) {
+			/* Ownership transferred on enqueue. A caller may keep its
+			 * media session alive on control failure, so no queued request
+			 * may outlive the caller's failed callback context. */
+			TAILQ_REMOVE(&evcon->requests, req, next);
+			req->evcon = NULL;
+			evrtsp_request_free(req);
+		}
+		return (result);
+	}
 
 	/*
 	 * If it's connected already and we are the first in the queue,

@@ -1,0 +1,2180 @@
+{
+  "schema": 1,
+  "upstream_repository": "https://github.com/owntone/owntone-server",
+  "upstream_commit": "84e3755198c44c36ddf91e9919634807d68f69f9",
+  "patch_sha256": "df905103c9a5efa4970aa02f7baf9d72be71e9f5326f25546ffec79a29364ab0",
+  "files": {
+    ".clang-format": {
+      "sha256": "3163969118efe7fdb50355d2797ecc0a37b211c9bb5f0c51186e579ce2a0af64",
+      "executable": false
+    },
+    ".dev/Makefile": {
+      "sha256": "b633fbc96b53df3f2756e7b19236190aa29f5fd1aadadadd206410bf64b86ffc",
+      "executable": false
+    },
+    ".dev/devcontainer/.scripts/init-devcontainer-cli.sh": {
+      "sha256": "94b1f3f46b9665c6301c0cb4dd9ac8efd97810b7809a93201b2de5ff701d8585",
+      "executable": true
+    },
+    ".dev/devcontainer/.scripts/install-devcontainer-tools.sh": {
+      "sha256": "4639a12f72d8f0fbb4e56726507639baf1ea67a810fb90226c55aa4a27edf754",
+      "executable": true
+    },
+    ".dev/devcontainer/data/devcontainer-owntone.conf": {
+      "sha256": "88a6968849967b4bdc32f2f8feee05defc7d0ce0ac19a0c223acd7fcacc58532",
+      "executable": false
+    },
+    ".dev/devcontainer/devcontainer.env": {
+      "sha256": "05103525daae15ed9c4816ed9aa0501e20e8300d12d7a896be3c27f5103cfff5",
+      "executable": false
+    },
+    ".dev/devcontainer/ubuntu/Dockerfile": {
+      "sha256": "ee9e3f6cfdf30f6330703f28fe21c34247bd04584b9a2909a094c04aadf4fcb7",
+      "executable": false
+    },
+    ".dev/devcontainer/ubuntu/devcontainer.json": {
+      "sha256": "561d7de49758f0fdd26aed65fd413d29ab9452dc45347263e3d78371d34f5825",
+      "executable": false
+    },
+    ".dev/vscode/c_cpp_properties.json": {
+      "sha256": "e26cb9a937e8ffe9c443bc7ba4ada05655cdd46933e0bdb21795e6530522fa91",
+      "executable": false
+    },
+    ".dev/vscode/launch.json": {
+      "sha256": "bb112a8672eaac6155f4341ecc6dc44a2d9710029575d4b67a4cc03482e86d97",
+      "executable": false
+    },
+    ".dev/vscode/settings.json": {
+      "sha256": "9ce79fc071f56f3e685a5a029365c5c52cd353a2487e26cf2d7ca48edb1fcb0f",
+      "executable": false
+    },
+    ".dev/vscode/tasks.json": {
+      "sha256": "01c69ab3efc6bdcd27bba0985e02fe8c2787a67db75077bdc8eb0086212fefaa",
+      "executable": false
+    },
+    ".github/ISSUE_TEMPLATE/bug_report.md": {
+      "sha256": "706d52657cfff666212960c011ace258488bc3f3b861cd5180ac4355c69c139d",
+      "executable": false
+    },
+    ".github/ISSUE_TEMPLATE/other-issue.md": {
+      "sha256": "ab470fc268173f1f6df72b9fb197a3b6c70a63f7f2a7f65a8762bb2bcc500c4a",
+      "executable": false
+    },
+    ".github/codeql/codeql-config.yml": {
+      "sha256": "67c72aeb7d772dc870554e4a3b022ae42e1f180315eb886972be5639769852d7",
+      "executable": false
+    },
+    ".github/workflows/build_htdocs.yml": {
+      "sha256": "a4f52737bd62b91f6483b5b445b5949db0f1de7cf6a528d875a6e979240b7936",
+      "executable": false
+    },
+    ".github/workflows/codeql-analysis.yml": {
+      "sha256": "c3d0cea97057967666e093d7d707bab112c71557a6661c02cc40fbd18841af14",
+      "executable": false
+    },
+    ".github/workflows/freebsd.yml": {
+      "sha256": "920ffa4720b1dfad1493b22ff751406101a16a33ef000314ac24a3778749d528",
+      "executable": false
+    },
+    ".github/workflows/gh-pages.yml": {
+      "sha256": "06f8f7255effd1259299a855bd493f3ae8cc8659014b10879186e83127479a69",
+      "executable": false
+    },
+    ".github/workflows/macos.yml": {
+      "sha256": "0c0bae498f914c11ee5d32678666249b96d24ca7f77113f22e75e2cf0d4226d5",
+      "executable": false
+    },
+    ".github/workflows/macos_12.yml": {
+      "sha256": "443b6cac2aeada71e259770ec53f00f188c1a08266d3cba4afbcd14f4ee97a2d",
+      "executable": false
+    },
+    ".github/workflows/ubuntu.yml": {
+      "sha256": "b4f44fe48463e3040b16b8d4be31f7ff9eccae62853fd24413b3d722d8bc0b8a",
+      "executable": false
+    },
+    ".github/workflows/webui_lint.yml": {
+      "sha256": "b7f106645f8343a611f32f7600427de452fc028fad4c55f65b28b4605dec805f",
+      "executable": false
+    },
+    ".gitignore": {
+      "sha256": "07f0401bf8ca5f7653bfb15812d07fc4fc6114a801cd2b585abcb48e75ea8e29",
+      "executable": false
+    },
+    ".travis.yml": {
+      "sha256": "9d6af6043e049a64edfdda060540177716012983faed5b2845d4cdc86ecb1ca7",
+      "executable": false
+    },
+    "AUTHORS": {
+      "sha256": "646e48316717f92ee967f204ace846f9dcf0eba8287d8f6201269cf5411d00be",
+      "executable": false
+    },
+    "COPYING": {
+      "sha256": "ab15fd526bd8dd18a9e77ebc139656bf4d33e97fc7238cd11bf60e2b9b8666c6",
+      "executable": false
+    },
+    "ChangeLog": {
+      "sha256": "fa04bffb402f54768c1a177e18d371ecfadfba3c38fabdefde63df48ab80d4cb",
+      "executable": false
+    },
+    "INSTALL.md": {
+      "sha256": "511ba0d91e49c4daacfdc11d2319c5541d83c64e1297b6f962687f71752d255d",
+      "executable": false
+    },
+    "Makefile.am": {
+      "sha256": "ebd3ff31ed9848694082b5b7f789dacae9715e67de1c95b45cd78cad385c3703",
+      "executable": false
+    },
+    "NEWS": {
+      "sha256": "0be0e9d5081e3de8df825b4ce1564946d5790f43c6155b271b6c508b6bca540b",
+      "executable": false
+    },
+    "README.md": {
+      "sha256": "f4664cc230d2b8225872ae43cde34aa209691e5cb2eb9eafe5deea3d2ffdd1e4",
+      "executable": false
+    },
+    "UPGRADING": {
+      "sha256": "956e33fcd6a4c191287d42b56ed69dd646497d32915bed4fa03b457685c51d29",
+      "executable": false
+    },
+    "_config.yml": {
+      "sha256": "89500f4d9d2bb727f973ace596b9ea2e58553acd80c41d95c3c2658f45095560",
+      "executable": false
+    },
+    "build-aux/config.rpath": {
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "executable": false
+    },
+    "configure.ac": {
+      "sha256": "9b55ce08179b2854a0c8054e0546ead277b1822a47588354b72ec6dfe6cc032e",
+      "executable": false
+    },
+    "docs/advanced/multiple-instances.md": {
+      "sha256": "1e6994dd96f1bc017b8a879d69eeab574ddd74bf744b334cb37ce6284c390383",
+      "executable": false
+    },
+    "docs/advanced/outputs-alsa.md": {
+      "sha256": "29727135a142005a3070fed5c1784ca96477a7701016c07cbbde383f9efd5724",
+      "executable": false
+    },
+    "docs/advanced/outputs-pulse.md": {
+      "sha256": "03362146693ca7e56dc0e6448f3d83eae9c29c6153a447d69b1eeceab24256d7",
+      "executable": false
+    },
+    "docs/advanced/radio-streams.md": {
+      "sha256": "dfc3faff4438c4223151539a28da4547c1f43494c7e7057420dcf9824324effe",
+      "executable": false
+    },
+    "docs/advanced/remote-access.md": {
+      "sha256": "e095d9954f16272ae5e99ad07124df425d8f038cd5c205fa99efc32ec6442609",
+      "executable": false
+    },
+    "docs/artwork.md": {
+      "sha256": "1a8aed863489340bb4cf6cd56472fdac1fe3f95a29e7edfe189640e916ad103d",
+      "executable": false
+    },
+    "docs/assets/extra.css": {
+      "sha256": "79032ab673b663b7bf862a0c7556732ee7e4ee7a64b7e5aa826e4ac61697b0d3",
+      "executable": false
+    },
+    "docs/assets/extra.js": {
+      "sha256": "6c62abb2ac64f8180fa79b325fd484b59477f1d35bb8cc5d5409fd423dfbc0aa",
+      "executable": false
+    },
+    "docs/assets/favicon.ico": {
+      "sha256": "e8d7b6f959e0d52964ce2dc4d3709870007b881256ef549825a712105c4926b9",
+      "executable": false
+    },
+    "docs/assets/images/screenshot-audiobooks-authors.png": {
+      "sha256": "0b1740b18e15786b1bc1f08a222d39eba4671e07c7d7c52543c6b26dce6771e2",
+      "executable": false
+    },
+    "docs/assets/images/screenshot-audiobooks-books.png": {
+      "sha256": "31efee80226f5eed970ec634b03e27c2818636c20e4919a4c94a64146721de55",
+      "executable": false
+    },
+    "docs/assets/images/screenshot-files.png": {
+      "sha256": "19c37dddcc1b72d5897641150e05ba6b2f028fb7458029d913c143f691c5cfe6",
+      "executable": false
+    },
+    "docs/assets/images/screenshot-menu.png": {
+      "sha256": "0c6e967d0343953efda97422c5e59b942ffd64363ba43e2b743af98eb9f11558",
+      "executable": false
+    },
+    "docs/assets/images/screenshot-music-album.png": {
+      "sha256": "854682721bdbfce9880934166908f242587754a508e2039167ec08627e74dde8",
+      "executable": false
+    },
+    "docs/assets/images/screenshot-music-albums-options.png": {
+      "sha256": "0b4ae8c47c09c119c79a47aefebb1c1501a375c2831af821af3c1147f69e9399",
+      "executable": false
+    },
+    "docs/assets/images/screenshot-music-albums.png": {
+      "sha256": "786ee2a5d85f60147349b4f151b9f3817108f08f0690ddf5a17f9134a094b6ed",
+      "executable": false
+    },
+    "docs/assets/images/screenshot-music-artist.png": {
+      "sha256": "079dfe7cf41a8a05c1951020745bd1b2a8fd8b37dd31bcf816fe34b8109d60c5",
+      "executable": false
+    },
+    "docs/assets/images/screenshot-music-artists.png": {
+      "sha256": "7797e4f1e5d0f7ff7274be5046166779ce5d4035098d87a34fd47120f3234b71",
+      "executable": false
+    },
+    "docs/assets/images/screenshot-music-browse.png": {
+      "sha256": "3126d713dffc784ed7b2ee20461f6df230d359447f8bf270960477ea49d438a7",
+      "executable": false
+    },
+    "docs/assets/images/screenshot-music-spotify.png": {
+      "sha256": "db0b3eb2767df269e05a497aed36dc5a38e110454a40ddd6aa6336396cf72454",
+      "executable": false
+    },
+    "docs/assets/images/screenshot-now-playing.png": {
+      "sha256": "78317846433826c7662bb391adc8fb64e608ac7f2aeba34e024aaedc4db4ea0b",
+      "executable": false
+    },
+    "docs/assets/images/screenshot-outputs.png": {
+      "sha256": "49c26d2d27e7d765f139a6bf03683a9110e9d15e58fc82f06fce9355bef01960",
+      "executable": false
+    },
+    "docs/assets/images/screenshot-podcast.png": {
+      "sha256": "ba9c9ba73769ffa6379a935e7da8624bd472b95b4725dbbfcb5d4f7a707521ec",
+      "executable": false
+    },
+    "docs/assets/images/screenshot-podcasts.png": {
+      "sha256": "6e440e77393b208536ebae211b8a7df3ff5457c11e5349d56b97c5a479abe39d",
+      "executable": false
+    },
+    "docs/assets/images/screenshot-queue.png": {
+      "sha256": "642fab7b5fb15673c87519621ee742b41ab4d34d18fc49593408827b8c5fd6d6",
+      "executable": false
+    },
+    "docs/assets/images/screenshot-search.png": {
+      "sha256": "96808cbf4d78f031aec70c1f99f187a27eab2cc20b9940fdf3d8ce1d0e718145",
+      "executable": false
+    },
+    "docs/assets/logo.svg": {
+      "sha256": "27e8441254b4e39cb9ac8902b427e81688480751504f95f652570485f1be7f1d",
+      "executable": false
+    },
+    "docs/audio-outputs/airplay.md": {
+      "sha256": "d5d7bf51f4909a810d5204503a33312efeb0617677f13f8ef457624f4baae39c",
+      "executable": false
+    },
+    "docs/audio-outputs/chromecast.md": {
+      "sha256": "a01ee50d2d6986773966c9952bfd29fc5cafd31529fd4279267fdee97dd027d3",
+      "executable": false
+    },
+    "docs/audio-outputs/local-audio.md": {
+      "sha256": "1e94dbc1b404ddc7085eb4ebd2eeb9f94b2a02151816d6f8805159f9c664aa5c",
+      "executable": false
+    },
+    "docs/audio-outputs/mobile.md": {
+      "sha256": "b362dcacee0458553d05acf3cacf063b8e484dffb349db9fb9c98ef0fe0ecdbf",
+      "executable": false
+    },
+    "docs/audio-outputs/roku.md": {
+      "sha256": "885b3809cef65e27e531960a6fd885deef1fe4b6d1cd31f46ba7caec6410e91d",
+      "executable": false
+    },
+    "docs/audio-outputs/streaming.md": {
+      "sha256": "17cff2030ca051a4fd4de713a1e7a9688dcc545a110f82ccc09ee26cbc2e5848",
+      "executable": false
+    },
+    "docs/audio-outputs/web.md": {
+      "sha256": "4c9c6d8bfbbc83045a8b0255530f1de8203975c8fd65cbde783e4592879bfa5f",
+      "executable": false
+    },
+    "docs/building.md": {
+      "sha256": "afb54f88ebc3780d76da60a74ba742a0d032aab216d824da6e6b660028e4d6c4",
+      "executable": false
+    },
+    "docs/changelog.md": {
+      "sha256": "de95c83e7b6fc390a50106f8bfb556d969c041eaa2f726e591dc2ebb73ef6c56",
+      "executable": false
+    },
+    "docs/configuration.md": {
+      "sha256": "c6c808562a23166312461499b746757c8dd78d2e4e7ce6fdeadb7481e74a32e6",
+      "executable": false
+    },
+    "docs/control-clients/cli-api.md": {
+      "sha256": "79cb7f26701d8ce4d85b63eb971b7358d5260db30f7bb16bb73c08d82a1b57d0",
+      "executable": false
+    },
+    "docs/control-clients/desktop.md": {
+      "sha256": "9cd4d19ec58a5323bd07f54e6622e709428571c1c8c5773f2653a31628a72b29",
+      "executable": false
+    },
+    "docs/control-clients/mobile.md": {
+      "sha256": "cf5f9c5ea1d931526285137514cf828a1b1f2529832c421b46bb9684b2f507fa",
+      "executable": false
+    },
+    "docs/control-clients/smartwatch.md": {
+      "sha256": "303e17fd272c7a944976a4563abfc6580ef65d592937048966812f0d88288a28",
+      "executable": false
+    },
+    "docs/control-clients/web.md": {
+      "sha256": "3f9fa860b995483c9a4d03761aeaf7d906243f08575cca707e248f4c92588eb4",
+      "executable": false
+    },
+    "docs/development.md": {
+      "sha256": "3cba73c79ff3e7e6db75f0ff609ad469249c0cf99700d2deb8403e2248a819cc",
+      "executable": false
+    },
+    "docs/getting-started.md": {
+      "sha256": "d4ad88d4cfbb8a57b5fb85dcd30c48f134b09049a2962643c42ed54c50911b58",
+      "executable": false
+    },
+    "docs/index.md": {
+      "sha256": "0f6703f41c8bd4a649aefa1cea88e21831518e88637ecdda3e475849198c8242",
+      "executable": false
+    },
+    "docs/installation.md": {
+      "sha256": "540830cba44818d3daff8f139900df007cc68de92c1f095a434a67c9ed00b51d",
+      "executable": false
+    },
+    "docs/integrations/lastfm.md": {
+      "sha256": "af88788ef788634d82fe0639057059e660a6fe139ff160a07cf94140bff6f55f",
+      "executable": false
+    },
+    "docs/integrations/spotify.md": {
+      "sha256": "d2a323dd0570966ab8fbbca6eb8d7a6802bb4565466997e56e78c42acb62d150",
+      "executable": false
+    },
+    "docs/json-api.md": {
+      "sha256": "fdb036565aed0ebb0c55650c7cc62be055da54d14dca9aa524adf94dcbb46708",
+      "executable": false
+    },
+    "docs/library.md": {
+      "sha256": "446c2d621d53977d21c1a9323b4db2ffa8c34ca002192a1f8aad7ab31338cabc",
+      "executable": false
+    },
+    "docs/media-clients.md": {
+      "sha256": "ac236642fde5004b3553be0f834a27c0b80b903a250dce1f30859b61d9aa6060",
+      "executable": false
+    },
+    "docs/playlists.md": {
+      "sha256": "ab3051e607d6094b6996e7d74aac123c6c46949eb80068f39e318c59a8e6fab2",
+      "executable": false
+    },
+    "docs/smart-playlists.md": {
+      "sha256": "d40c64fbf42366b610ef8969a60e99349bcc3d067cc9be18350e0682c2059230",
+      "executable": false
+    },
+    "htdocs/Makefile.am": {
+      "sha256": "058843008c5800cb6fd38e2cbcad2541393851015e05d039a71d248db3be92be",
+      "executable": false
+    },
+    "htdocs/android-chrome-192x192.png": {
+      "sha256": "d25c3e4b25916acbc03c2fc978fb6bd3085e6ea8e73c53ebf3f3d310cf5329e9",
+      "executable": false
+    },
+    "htdocs/android-chrome-512x512.png": {
+      "sha256": "cce175dcaec55e38bb2d8fe60d6c6de121f1dedd75c13e084363cea077a91b6f",
+      "executable": false
+    },
+    "htdocs/apple-touch-icon.png": {
+      "sha256": "a697b7a21f77af203c4d1a92bd70d1d162571c6254c17aa16ce23be367d3f9fb",
+      "executable": false
+    },
+    "htdocs/assets/index.css": {
+      "sha256": "b0e33a3031a627d7c6e2e27b268e2863ad3875f2f2ffe9c98d384ec55d814d38",
+      "executable": false
+    },
+    "htdocs/assets/index.js": {
+      "sha256": "f907ea44840f5c821703370697d4d5e45cc0c597e82919518c120f95145d0b22",
+      "executable": false
+    },
+    "htdocs/browserconfig.xml": {
+      "sha256": "c348b0d6df3d900efef7ae4b4dfc8b62b1737b04d09d4584fef243211c266866",
+      "executable": false
+    },
+    "htdocs/favicon-16x16.png": {
+      "sha256": "fe96f5bac740c0aa615d3a395b1f7c4a874b963eac6d45722e24b958c0ff6abd",
+      "executable": false
+    },
+    "htdocs/favicon-32x32.png": {
+      "sha256": "1e80dbf96e6ab226f4c0f97691cc2132a3a0e996386628526db021ca1a6a48a3",
+      "executable": false
+    },
+    "htdocs/favicon.ico": {
+      "sha256": "e8d7b6f959e0d52964ce2dc4d3709870007b881256ef549825a712105c4926b9",
+      "executable": false
+    },
+    "htdocs/index.html": {
+      "sha256": "f36a28376cb44ce66a0a3afec2131160796a3d89524845ccd7b2758dc8740fc6",
+      "executable": false
+    },
+    "htdocs/logo.svg": {
+      "sha256": "27e8441254b4e39cb9ac8902b427e81688480751504f95f652570485f1be7f1d",
+      "executable": false
+    },
+    "htdocs/mstile-150x150.png": {
+      "sha256": "0363be5107d7045316c553dd4ed345e543c7f0e924986154fa1b3d8ad077c859",
+      "executable": false
+    },
+    "htdocs/safari-pinned-tab.svg": {
+      "sha256": "7e4213641c7617caf7f9202da2b83dbb7b844513a87bd710afb62c52fd6a6098",
+      "executable": false
+    },
+    "htdocs/site.webmanifest": {
+      "sha256": "8952c0853af2067c72d17c9ede0099e1f76869c2158e6b8e945a178aad6ef521",
+      "executable": false
+    },
+    "m4/.gitignore": {
+      "sha256": "ffdc17ee7b8a7d08a72600d11fe68894b1b45b5cdb5073e4b5fd93156e471bfb",
+      "executable": false
+    },
+    "m4/ax_prog_bison.m4": {
+      "sha256": "ef6ed4e9e19c279552fc4337ba5b97613f5bb36a757301abd18df99a59122df1",
+      "executable": false
+    },
+    "m4/ax_prog_flex.m4": {
+      "sha256": "6a590dfb6516159a9a242306e11dd6515e9b206a8c14a35b10cd4b23dd1e11f3",
+      "executable": false
+    },
+    "m4/owntone_checks.m4": {
+      "sha256": "86f33a69b5408417bf1b853db1e2152fefd04bf552c168340db436b4a9f92f05",
+      "executable": false
+    },
+    "mkdocs.sh": {
+      "sha256": "d06e78217866e723ceb5ea74fc76cdb48437d20389b77eff173cbe462833fbe0",
+      "executable": true
+    },
+    "mkdocs.yml": {
+      "sha256": "b70e75b8ab540c4ac077fc69d25c0355f8b1db63ee26f8c256049bf4cb7178bc",
+      "executable": false
+    },
+    "owntone.8": {
+      "sha256": "7d081aa5176ff8da21e4844f01954f5d09f915cd45fa7663cc5744116f981646",
+      "executable": false
+    },
+    "owntone.conf.in": {
+      "sha256": "a53a80cbc75f063df5736df47297b317285c2676b38e259136f63840188c4376",
+      "executable": false
+    },
+    "owntone.service.in": {
+      "sha256": "5190c72d49b0265f60929f87017cac82efb89b33a3b50c806d5f5cddb3718a72",
+      "executable": false
+    },
+    "owntone.spec.in": {
+      "sha256": "8edb9fcefdbc89b3cba4042186c69cff40cccec0439326e6e04eab8cf32c01ba",
+      "executable": false
+    },
+    "owntone@.service.in": {
+      "sha256": "32d3e462d8e4aea5e31c60afdfd56680ef2635f63a408af09aa072b1ea49d1e8",
+      "executable": false
+    },
+    "scripts/freebsd_install.sh": {
+      "sha256": "2a93d0edcd4a2ed5408da2bbbf30b5f8cc1858aafcc4911f01f80defee692e1e",
+      "executable": true
+    },
+    "scripts/freebsd_start.sh": {
+      "sha256": "53a7f6b53631a427513a8d890ca06de1955d0a443eeda9918dea1c4853c6c53e",
+      "executable": true
+    },
+    "scripts/pairinghelper.sh": {
+      "sha256": "aed136c1ce219a5bd6c1d0408e09a7fad9cf00348fdc0d9378ae8833cd71c3fb",
+      "executable": true
+    },
+    "sqlext/Makefile.am": {
+      "sha256": "a9cfa88c3d4de21bc356ae602a6c95d16e1b234b2767c57cdea326dac0a199ac",
+      "executable": false
+    },
+    "sqlext/sqlext.c": {
+      "sha256": "d2c758b0c8fd3706ce8b4ba123602eed1880a5190717ac4a3b475c1ee6b7f826",
+      "executable": false
+    },
+    "src/.gitignore": {
+      "sha256": "6e913ce797b6da3f603e8a876be1d34e5f46d691e17311ad95945b99fa8d3ec5",
+      "executable": false
+    },
+    "src/Makefile.am": {
+      "sha256": "4affc312a7c221c62ee8787ca33516720d7e6de95ca0620054ac5f173ad97d79",
+      "executable": false
+    },
+    "src/artwork.c": {
+      "sha256": "2d32179a4bdd1bf61060ce2d10c75d238503c1601cf1148b6bbde79d5a3b94ec",
+      "executable": false
+    },
+    "src/artwork.h": {
+      "sha256": "62ab33e067424300bed0dda9cf6720bc151ace24ae0d174ebbffc92592e1bafd",
+      "executable": false
+    },
+    "src/cache.c": {
+      "sha256": "0a4fa2949932f3afd3b92499975ab5b223589b786727d36b0e55122e3150d497",
+      "executable": false
+    },
+    "src/cache.h": {
+      "sha256": "88b8e02b92ef54ebc675b76a2d66b6879b1cd5ca08781796558eb5f826301946",
+      "executable": false
+    },
+    "src/commands.c": {
+      "sha256": "2e263a94b8f1cb4b77f8bcf0e626b5cd9608ea950c89d9ff4636bdac7d6bcd30",
+      "executable": false
+    },
+    "src/commands.h": {
+      "sha256": "530fe27e38d6597705859496a28ec1833f9b07c0413ec2a699057969a354b44e",
+      "executable": false
+    },
+    "src/conffile.c": {
+      "sha256": "e97ef3506dc3be9e83092d9b80baa19e28dbaa421a13e1e9f6820a71a9651248",
+      "executable": false
+    },
+    "src/conffile.h": {
+      "sha256": "edb6e51a2a840c1ab6ee06dbb9bbd1cb370f8e6e1e54582dedcbf13501ed8151",
+      "executable": false
+    },
+    "src/daap_query.gperf": {
+      "sha256": "2ec36571ddc4abc0fc99bbf8df74231e09a03cc65810146086dd42cabe89611d",
+      "executable": false
+    },
+    "src/dacp_prop.gperf": {
+      "sha256": "255fa50137ed1fcf34073eb303593c788628f8475f427a33a1a3e0d41303e96c",
+      "executable": false
+    },
+    "src/db.c": {
+      "sha256": "4220e69969568e1e020b03b0a9d8201a28b53cb96be88921aff67fa381fef325",
+      "executable": false
+    },
+    "src/db.h": {
+      "sha256": "bce1cab64ed54f65ae753ff3e759f41665b11ec37f406fcc99d7fb5e94d17771",
+      "executable": false
+    },
+    "src/db_init.c": {
+      "sha256": "3d4060408c59a07ea5873c0856a4a6613f0ff8ce37dd220490dcafb8a9a27f21",
+      "executable": false
+    },
+    "src/db_init.h": {
+      "sha256": "7b009fb4c0b3116e673c444f28d2c329cb31dbe1399cd578ba01db484f95bbbe",
+      "executable": false
+    },
+    "src/db_upgrade.c": {
+      "sha256": "9168ea4288b4658825f8be9f6a3be4474c57515b74810881c9b23b0cf489203f",
+      "executable": false
+    },
+    "src/db_upgrade.h": {
+      "sha256": "b2e0c4046cb4825aa4f79854a128e8a3ab7489a9b6450cc32076520ae1965442",
+      "executable": false
+    },
+    "src/dmap_common.c": {
+      "sha256": "d3a6ebcd7129ed34a751414c3c76997d0a4a19922742b0fb2e9dc2153c9c883d",
+      "executable": false
+    },
+    "src/dmap_common.h": {
+      "sha256": "ee94f2830c75222e4dc3b5c17b83ac3e513deb8e36a0a2a7d2cdec34917d1dd5",
+      "executable": false
+    },
+    "src/dmap_fields.gperf": {
+      "sha256": "0933d099e6c9ddc0f717df6bd2f8f75cb79dfd703e51bca44aef96741adcabcb",
+      "executable": false
+    },
+    "src/evrtsp/evrtsp.h": {
+      "sha256": "6d0c725154a64c8af28afe6a6296375674fa7f3f21cb71a69ee9026e0f21f604",
+      "executable": false
+    },
+    "src/evrtsp/log.h": {
+      "sha256": "cc1781a5ec4618ce0bf8c6979c792302514c443c74b90d50c7b56aa1144c2e8f",
+      "executable": false
+    },
+    "src/evrtsp/rtsp-internal.h": {
+      "sha256": "02874b27308db1903f01217266245de31fc752975dc2398f7c77a93c3e4a87ca",
+      "executable": false
+    },
+    "src/evrtsp/rtsp.c": {
+      "sha256": "ee8f883b0e8731410dbe21d269479dbfd149baee4899017c9276dd8de9b0160a",
+      "executable": false
+    },
+    "src/evthr.c": {
+      "sha256": "83302df71372646bda062af030f709b4992552fd1dfedef776a8a25255e35521",
+      "executable": false
+    },
+    "src/evthr.h": {
+      "sha256": "93128a531f7d14378cf10f1c38037e207f45da3e0398c676dd4811c6448b59e1",
+      "executable": false
+    },
+    "src/http.c": {
+      "sha256": "96570ade7e145836d9457ea103e41760cadb54779d8a8b261f0866a0ba86dc5a",
+      "executable": false
+    },
+    "src/http.h": {
+      "sha256": "c5954c1bff92d1c4fdd0aec20d0dd6c2885f624e3631199eeb283c1b53119f37",
+      "executable": false
+    },
+    "src/httpd.c": {
+      "sha256": "b5bc547e814b5642857a1f8b36d89c79398ca90dff99c7822f3143c455db03a0",
+      "executable": false
+    },
+    "src/httpd.h": {
+      "sha256": "6d2bdd38204bbf70776bde2bda715cc44923227e1c120db2864a1681b825f373",
+      "executable": false
+    },
+    "src/httpd_artworkapi.c": {
+      "sha256": "30286a361be891515812a719f05ba752c2bd5963cad3755a096533ec45665d1a",
+      "executable": false
+    },
+    "src/httpd_daap.c": {
+      "sha256": "4c836df2e7b54be53be40c1eda8c05f66d51c7ecbd915e9aff799271065c3083",
+      "executable": false
+    },
+    "src/httpd_daap.h": {
+      "sha256": "68761b6467dfb5a6246ff3ca5b561edcf44efeb45da3e8f62efd95c041222078",
+      "executable": false
+    },
+    "src/httpd_dacp.c": {
+      "sha256": "4f341a7e62b76ee240e2637fa5278c9726eed409dee99433399ea52be7e2207a",
+      "executable": false
+    },
+    "src/httpd_internal.h": {
+      "sha256": "893874f56862c828c5ec9d8b461f4761ff79aa4c11a60f8346184fdcf7847d58",
+      "executable": false
+    },
+    "src/httpd_jsonapi.c": {
+      "sha256": "abb0d8c908a889571a0c2baa1e6048491130dc5297b5adfe14fbcc7dd427307e",
+      "executable": false
+    },
+    "src/httpd_libevhttp.c": {
+      "sha256": "eac74633bc5cc28e12c523785d208c294c987c8dc21cada4d76fd786aa097781",
+      "executable": false
+    },
+    "src/httpd_oauth.c": {
+      "sha256": "f3488942419de01a3b0809b082621596535a83c037d88e71e2b2197d54d64f40",
+      "executable": false
+    },
+    "src/httpd_rsp.c": {
+      "sha256": "c45bcfd12cba1afa8bf180e983044a4d9d55a84181a45e55d45918617373a076",
+      "executable": false
+    },
+    "src/httpd_streaming.c": {
+      "sha256": "cc225eaea11acd12578565d7dd04eba842861d5c6b2cdda3d88e8123c2bbb527",
+      "executable": false
+    },
+    "src/input.c": {
+      "sha256": "3692eef786f5043eb4eef548abf7b618d93bcad71074440e6e535422a25a487b",
+      "executable": false
+    },
+    "src/input.h": {
+      "sha256": "3e27bd31ee9e5ce30ae5f0c1097ca8a1759b80cf5ecf263a1f2791c3995581c2",
+      "executable": false
+    },
+    "src/inputs/file.c": {
+      "sha256": "8201bfc93c95cc87eedc1f26f328ab2f040ed9d8e2891f5891d2291b69081117",
+      "executable": false
+    },
+    "src/inputs/http.c": {
+      "sha256": "e36e14579b0879b95a2de79bc931b17f5e0e7da1fb2738ef056ca35e068806a4",
+      "executable": false
+    },
+    "src/inputs/librespot-c/.gitignore": {
+      "sha256": "2873f95853d81041f35fda65305423effa59fef84920b241210cbc3b3f0b5163",
+      "executable": false
+    },
+    "src/inputs/librespot-c/LICENSE": {
+      "sha256": "508a77d2e7b51d98adeed32648ad124b7b30241a8e70b2e72c99f92d8e5874d1",
+      "executable": false
+    },
+    "src/inputs/librespot-c/Makefile.am": {
+      "sha256": "2e5c86366c30c7ff3aecda48d37c2e6bd8351128d8c3bc08aa237aeac30c0efc",
+      "executable": false
+    },
+    "src/inputs/librespot-c/README.md": {
+      "sha256": "a1d9eb500f25e1e167e9a4b68a939c5c12979b96c039403ee0e62841d4c0f4fd",
+      "executable": false
+    },
+    "src/inputs/librespot-c/configure.ac": {
+      "sha256": "682dcdfc247a0e2ed74ea7859d6f34ac90720f3539bc904b3bcd5eeee0971689",
+      "executable": false
+    },
+    "src/inputs/librespot-c/librespot-c.h": {
+      "sha256": "9f9d4c6951bcf5dc475b1ab95cb135ed9198c04806528a5bae72fb4996a139af",
+      "executable": false
+    },
+    "src/inputs/librespot-c/src/channel.c": {
+      "sha256": "66d68c79d0e17698ad8000e9a4150a537801e1e4b7f591957421d982a4d0a1b7",
+      "executable": false
+    },
+    "src/inputs/librespot-c/src/channel.h": {
+      "sha256": "44fe3c41b35c8e026b747492aed8f32a1f8d1c0ca20c4a47cfacfa8152b76f45",
+      "executable": false
+    },
+    "src/inputs/librespot-c/src/commands.c": {
+      "sha256": "86c0eb2b4603d372cebb253f1562ca05c5a8fbcc5bd67f8df183a38e5dd1f4d0",
+      "executable": false
+    },
+    "src/inputs/librespot-c/src/commands.h": {
+      "sha256": "530fe27e38d6597705859496a28ec1833f9b07c0413ec2a699057969a354b44e",
+      "executable": false
+    },
+    "src/inputs/librespot-c/src/connection.c": {
+      "sha256": "8b4c396ab2ec1c214c477cb711da6cac7d93b13a4f95cb037dcedc6ad9c63ff2",
+      "executable": false
+    },
+    "src/inputs/librespot-c/src/connection.h": {
+      "sha256": "c4bce5a12a2d0db646d6f0b3d63b42e67a9b857b507e1bb6b870f78a340dce70",
+      "executable": false
+    },
+    "src/inputs/librespot-c/src/crypto.c": {
+      "sha256": "a4d0aa56a7beb378131c0f33e2800e8e41c3a6f6961e8f9c0421793a9809e98c",
+      "executable": false
+    },
+    "src/inputs/librespot-c/src/crypto.h": {
+      "sha256": "63c636c76c67585b6a62bd955eaf46433bfbf65bc23aaa41a9cc69ea0d4feda8",
+      "executable": false
+    },
+    "src/inputs/librespot-c/src/http.c": {
+      "sha256": "7e7c7ca0c8140aaa3d239db2b28a729a1046a52e3e25c5f6bc205059a2a5b33e",
+      "executable": false
+    },
+    "src/inputs/librespot-c/src/http.h": {
+      "sha256": "d88334a416d8918eec06c779556be96d1d004cc544a22f3dc120c13aa6ec6436",
+      "executable": false
+    },
+    "src/inputs/librespot-c/src/librespot-c-internal.h": {
+      "sha256": "8b6c0f9b1b1d8924398f0b84bd8b95e6f00c04b883c1dc0a67dc2684be9752c8",
+      "executable": false
+    },
+    "src/inputs/librespot-c/src/librespot-c.c": {
+      "sha256": "e8f0b0b11562f385224b247df66f19b5ff45dcfe0cb2c33d7c984ebdeebf9c00",
+      "executable": false
+    },
+    "src/inputs/librespot-c/src/proto/authentication.pb-c.c": {
+      "sha256": "57680d1f7a04db0d2a69348836962ed8ca81976d058a170041fe1281e352e651",
+      "executable": false
+    },
+    "src/inputs/librespot-c/src/proto/authentication.pb-c.h": {
+      "sha256": "50e82303c2e5dcb65f52ee3ffb66109badc90dff977c0e59d09921e081cf3e07",
+      "executable": false
+    },
+    "src/inputs/librespot-c/src/proto/authentication.proto": {
+      "sha256": "4e43976ad853701a1d2ceaa9010a4b7a445ca1eb01bcfe6a7f28a2824a7a2cc2",
+      "executable": false
+    },
+    "src/inputs/librespot-c/src/proto/clienttoken.pb-c.c": {
+      "sha256": "fba5e24b14c2609d46f9be2f67ce7052e69d3fa1b31cde47e661f818ad467637",
+      "executable": false
+    },
+    "src/inputs/librespot-c/src/proto/clienttoken.pb-c.h": {
+      "sha256": "039c48a23bb41ad99c23d99f7dcd154b5103756360e76be7911953c2b792fa7c",
+      "executable": false
+    },
+    "src/inputs/librespot-c/src/proto/clienttoken.proto": {
+      "sha256": "da0ab78f2cc90d328a86615badcef468594b345a9daf9ba4dd83025dc636849f",
+      "executable": false
+    },
+    "src/inputs/librespot-c/src/proto/connectivity.pb-c.c": {
+      "sha256": "ccd340111c4b2b194d5a5300084511c6630d6832d4945a2e09b5244f53bb0c2e",
+      "executable": false
+    },
+    "src/inputs/librespot-c/src/proto/connectivity.pb-c.h": {
+      "sha256": "fdfe0fca32129babc773a28ee214dd81b3a62d6f72bdb4cc00df712d21497b72",
+      "executable": false
+    },
+    "src/inputs/librespot-c/src/proto/connectivity.proto": {
+      "sha256": "a624092aa6705dc997c64aa04da37cf13577d39651e050b0e3a0f79f49892f20",
+      "executable": false
+    },
+    "src/inputs/librespot-c/src/proto/entity_extension_data.pb-c.c": {
+      "sha256": "82c101ff473f6fb24e7c21f7a0fb40768dd7a6e580d1f536c7214c41aed1dc56",
+      "executable": false
+    },
+    "src/inputs/librespot-c/src/proto/entity_extension_data.pb-c.h": {
+      "sha256": "f7415db9a48a9547ff5ba8074e8485a31f69451930e7f8df6a79813f5a37683d",
+      "executable": false
+    },
+    "src/inputs/librespot-c/src/proto/entity_extension_data.proto": {
+      "sha256": "84885cd92472b7f31264979292c44a6d5e914f963b4eb0d814355d5f82ce0d7a",
+      "executable": false
+    },
+    "src/inputs/librespot-c/src/proto/extended_metadata.pb-c.c": {
+      "sha256": "214e9e9d103315459d7f4e7fbca4c126f11e43c7ea8e11206c143391d18786aa",
+      "executable": false
+    },
+    "src/inputs/librespot-c/src/proto/extended_metadata.pb-c.h": {
+      "sha256": "66e125c4dc80978d0712eef7e6739bd5d4d6998b079c3374d4fa4708fcdd6275",
+      "executable": false
+    },
+    "src/inputs/librespot-c/src/proto/extended_metadata.proto": {
+      "sha256": "ac46f85ea6a6b728d59d30be8dbb98ed5433ff59c85846e44b5cf7085010e541",
+      "executable": false
+    },
+    "src/inputs/librespot-c/src/proto/extension_kind.pb-c.c": {
+      "sha256": "6760bd7a976d21d1fe361e2b49083573c1837d8a08f18f8cb7e82114d1fb449e",
+      "executable": false
+    },
+    "src/inputs/librespot-c/src/proto/extension_kind.pb-c.h": {
+      "sha256": "25c0f6ba9d18046efd1ed628643f3c63a27e4dee5b2496b1c993b792b6e18d20",
+      "executable": false
+    },
+    "src/inputs/librespot-c/src/proto/extension_kind.proto": {
+      "sha256": "9aafa9ea7b4db5eefc6bf644164bf3ac09b61cde218cb78bc6633da993342000",
+      "executable": false
+    },
+    "src/inputs/librespot-c/src/proto/google_any.pb-c.c": {
+      "sha256": "d23fc85b2a5292e5c991b0abe956c2398169c87993080e777c1cd515c0e5f2e5",
+      "executable": false
+    },
+    "src/inputs/librespot-c/src/proto/google_any.pb-c.h": {
+      "sha256": "100a9d85b5deb18f7e53c83a975d86a12760ba74ced7c2da387b5391f482dd31",
+      "executable": false
+    },
+    "src/inputs/librespot-c/src/proto/google_any.proto": {
+      "sha256": "286904b6aa8d3c63e096b590ac551867020d5e73c7c02ba3d1329b84c443fbde",
+      "executable": false
+    },
+    "src/inputs/librespot-c/src/proto/google_duration.pb-c.c": {
+      "sha256": "4b574b28c0ffd5da2467ae7e28ac475a0319edce3fc06a84bb7a87203c94bbd7",
+      "executable": false
+    },
+    "src/inputs/librespot-c/src/proto/google_duration.pb-c.h": {
+      "sha256": "c43fddfc86f41b89e28e22ee79e704e0546cfe585d73417f7e8c2925a3fd28cc",
+      "executable": false
+    },
+    "src/inputs/librespot-c/src/proto/google_duration.proto": {
+      "sha256": "18889ee1ba7cffa0e34b2c02e7cf507f7ef51ada9281e1f663944967684dfc38",
+      "executable": false
+    },
+    "src/inputs/librespot-c/src/proto/keyexchange.pb-c.c": {
+      "sha256": "a9ac5aeed96d5e53d44ce8f5d882f8dab6c3fa2ba239b8abdfa7402da9f70426",
+      "executable": false
+    },
+    "src/inputs/librespot-c/src/proto/keyexchange.pb-c.h": {
+      "sha256": "26a1cae464ea5e3a01d781b133c1fd9e327e41a8c509cdac9d36826cdeae3c48",
+      "executable": false
+    },
+    "src/inputs/librespot-c/src/proto/keyexchange.proto": {
+      "sha256": "b35079001a06840cb8220dfc2254d73ece9d6b150b9964620dee3ed5d25d659b",
+      "executable": false
+    },
+    "src/inputs/librespot-c/src/proto/login5.pb-c.c": {
+      "sha256": "b38289b60befa00ce54c8b30abf1374e022949e23a3cea0c65077c9d668a2349",
+      "executable": false
+    },
+    "src/inputs/librespot-c/src/proto/login5.pb-c.h": {
+      "sha256": "62d1e604921e4fa9bafdecd3f10afddf89e8ae9b092434b698aeca85a919bb77",
+      "executable": false
+    },
+    "src/inputs/librespot-c/src/proto/login5.proto": {
+      "sha256": "1630c893873fc6418233a250e69644c802afcd61867352ffba808c9aebfff162",
+      "executable": false
+    },
+    "src/inputs/librespot-c/src/proto/login5_challenges_code.pb-c.c": {
+      "sha256": "1c1122b5cb8ab56b50310f87431229a039f26d8ee074ae8ce07978f0a168adad",
+      "executable": false
+    },
+    "src/inputs/librespot-c/src/proto/login5_challenges_code.pb-c.h": {
+      "sha256": "8ab36825141a4b9eab898c93cdab4d638f522596f58b3989eabdb8f789945a4a",
+      "executable": false
+    },
+    "src/inputs/librespot-c/src/proto/login5_challenges_code.proto": {
+      "sha256": "8ccd634392e20df327097230e4bbd4884bdd2bac0078d844cd92ffae89ecad5d",
+      "executable": false
+    },
+    "src/inputs/librespot-c/src/proto/login5_challenges_hashcash.pb-c.c": {
+      "sha256": "5a50496dadabc30a585f348b75b1a7f017eab0ef0e8bfb11e3d489011b65ec4c",
+      "executable": false
+    },
+    "src/inputs/librespot-c/src/proto/login5_challenges_hashcash.pb-c.h": {
+      "sha256": "a351bbd200215e034be8a2f55944a69a0d95fb2e4e82c9e16fddf21e4ff3b90d",
+      "executable": false
+    },
+    "src/inputs/librespot-c/src/proto/login5_challenges_hashcash.proto": {
+      "sha256": "792c3025407a13c3ae226703e7f3a2cbacbbc756fe2c4c9b50acac70a45dc20e",
+      "executable": false
+    },
+    "src/inputs/librespot-c/src/proto/login5_client_info.pb-c.c": {
+      "sha256": "58b1bb33b7dde42d1555a723ee2369ce7b1038b48188ed885511f91fb817d026",
+      "executable": false
+    },
+    "src/inputs/librespot-c/src/proto/login5_client_info.pb-c.h": {
+      "sha256": "e834e4add72259a354cceae1a2417d457a4be5ac493a51e964ad2e395230359d",
+      "executable": false
+    },
+    "src/inputs/librespot-c/src/proto/login5_client_info.proto": {
+      "sha256": "ea23c4ee2680d5d9535b4d9b057e61d5dc51245c06f7b86fc1e63ac8a4b1de6f",
+      "executable": false
+    },
+    "src/inputs/librespot-c/src/proto/login5_credentials.pb-c.c": {
+      "sha256": "b79a0a3a7efae62cb05fe8b5ba9ef3f537cf3847e669d5c28a1f40764758f378",
+      "executable": false
+    },
+    "src/inputs/librespot-c/src/proto/login5_credentials.pb-c.h": {
+      "sha256": "aeb00dc3ea581877f890e3a4ed8db606f9c709d3cdbde44bf57f4862ffd091e8",
+      "executable": false
+    },
+    "src/inputs/librespot-c/src/proto/login5_credentials.proto": {
+      "sha256": "03cf9a6404d76f44b862bc45c8b1bf280d3f271518a291498a26ddf4eff6dcec",
+      "executable": false
+    },
+    "src/inputs/librespot-c/src/proto/login5_identifiers.pb-c.c": {
+      "sha256": "3674758e108a93f04e3893f87b8a55b4e75b295bc31d355b4e8c9d48c297bbee",
+      "executable": false
+    },
+    "src/inputs/librespot-c/src/proto/login5_identifiers.pb-c.h": {
+      "sha256": "8176f31244193dfea70b3ea82224c6b550458fa88f62aa4bba519511b48570f8",
+      "executable": false
+    },
+    "src/inputs/librespot-c/src/proto/login5_identifiers.proto": {
+      "sha256": "fbb5f2acd91b778ce7759ef297cb4c6878fb1418da8e99463dbb26f383b6cbf8",
+      "executable": false
+    },
+    "src/inputs/librespot-c/src/proto/login5_user_info.pb-c.c": {
+      "sha256": "5624a1d415cdbb6c07887241af62d22f01bdb3b88c9ba49f15f57e835a618d11",
+      "executable": false
+    },
+    "src/inputs/librespot-c/src/proto/login5_user_info.pb-c.h": {
+      "sha256": "b1fc0cc5ab69d7ed356450eab2a93adb114f9612afd3b0d0c8ae3f71687c76cb",
+      "executable": false
+    },
+    "src/inputs/librespot-c/src/proto/login5_user_info.proto": {
+      "sha256": "d22be3618c1da5072f41e2f52780bf2d851d63c0d372078e7b8daaa27d6afc69",
+      "executable": false
+    },
+    "src/inputs/librespot-c/src/proto/mercury.pb-c.c": {
+      "sha256": "0ceb3f9d808522c60566bcd5b498f7c339adfeeed680d4afe8c514b9074d90a1",
+      "executable": false
+    },
+    "src/inputs/librespot-c/src/proto/mercury.pb-c.h": {
+      "sha256": "0c6fc5b8465246b7f1e72420ca17137cf39406f39bf51d7baff37e2645c07134",
+      "executable": false
+    },
+    "src/inputs/librespot-c/src/proto/mercury.proto": {
+      "sha256": "00609c24d8f14cf6d3e957b29746dd1b7a87cdf90099fccb2366a5cc68746514",
+      "executable": false
+    },
+    "src/inputs/librespot-c/src/proto/metadata.pb-c.c": {
+      "sha256": "bf2d28d4a903f5cd01d3d564cb3f4bbb0c295ae1d419b76f786cbdfc003c2631",
+      "executable": false
+    },
+    "src/inputs/librespot-c/src/proto/metadata.pb-c.h": {
+      "sha256": "91d763fb3e5a674764494d6ab236fffb8d9c0151beba07fbb8e692817b63be0e",
+      "executable": false
+    },
+    "src/inputs/librespot-c/src/proto/metadata.proto": {
+      "sha256": "49624c26f25ffaa8c2c825e909f13cfa61e4c685f5623e4a16046067a4739639",
+      "executable": false
+    },
+    "src/inputs/librespot-c/src/proto/spirc.proto": {
+      "sha256": "bd34fe7bb78b71d8d69be06f2d5ada04dc703d942f807456d49077c05c9c3691",
+      "executable": false
+    },
+    "src/inputs/librespot-c/src/proto/storage_resolve.pb-c.c": {
+      "sha256": "cd594a54ff1f88d5d1ffe737f693979f493217bf668b00499347f852acb2c549",
+      "executable": false
+    },
+    "src/inputs/librespot-c/src/proto/storage_resolve.pb-c.h": {
+      "sha256": "abc83b5d1becd57635b00d49a0d1d6651783edbdc2704169ed3561ffdfb4632e",
+      "executable": false
+    },
+    "src/inputs/librespot-c/src/proto/storage_resolve.proto": {
+      "sha256": "274fc551063354239e1dfa7e2384863f4023fcf603594ab89bb8173f859779da",
+      "executable": false
+    },
+    "src/inputs/librespot-c/src/shannon/Shannon.h": {
+      "sha256": "394214b002ab6a270b025dd3bece6d5a1f3cf6d22a8134f8accbaf3b16465899",
+      "executable": false
+    },
+    "src/inputs/librespot-c/src/shannon/ShannonFast.c": {
+      "sha256": "3937f22f119418ccfaf858c5db06f09d035a8a7e6f9637f8e2690da9fa1f744b",
+      "executable": false
+    },
+    "src/inputs/librespot-c/src/shannon/ShannonInternal.h": {
+      "sha256": "f7bc3557a9cfb5e8298af361a276bae784f19a1be4b1c4314c1eca8720152192",
+      "executable": false
+    },
+    "src/inputs/librespot-c/tests/.gitignore": {
+      "sha256": "49789e7c809eb38ea34864b00e2cfd68825e0c07cd7b7d0c6fe2642ac87a919c",
+      "executable": false
+    },
+    "src/inputs/librespot-c/tests/Makefile.am": {
+      "sha256": "c9a954c994853e1f4151fbb3f26a5b0b8cb4edcbd6b1fd305035340eb0b2cba0",
+      "executable": false
+    },
+    "src/inputs/librespot-c/tests/test1.c": {
+      "sha256": "c2e47ffa87f44382d3a1cd20023bd7245f0837c22a559915dd639c9a22325181",
+      "executable": false
+    },
+    "src/inputs/librespot-c/tests/test2.c": {
+      "sha256": "95c6e1de2d0aaa13c132bcdd707b0951dd3402883cdc28d66c6f9640f917418a",
+      "executable": false
+    },
+    "src/inputs/pipe.c": {
+      "sha256": "d148673e05627137aa9ecfc91d35d1a56d3a40c699727956b6c39452b0da1b54",
+      "executable": false
+    },
+    "src/inputs/spotify.c": {
+      "sha256": "1db07b0e61ee527cd7b5c8bfa84ed3bca3d64e281aeae4ad6b24173166ff4e89",
+      "executable": false
+    },
+    "src/inputs/spotify.h": {
+      "sha256": "43eea7f25623ecee1e80b5fe69bfcd9903cc65dd9b1b9fdd1a22adbbb35d5315",
+      "executable": false
+    },
+    "src/inputs/spotify_librespotc.c": {
+      "sha256": "a8756f321d24d3abb8847e317dd50b53ac6b2278fa49cd1c3c907c9d4fccd096",
+      "executable": false
+    },
+    "src/inputs/timer.c": {
+      "sha256": "7c3c55c407e751e9cd7def1634eae99201c661cd2012879fa43f67bd910af163",
+      "executable": false
+    },
+    "src/lastfm.c": {
+      "sha256": "495584591ba36e7dd200674528e492d2c72d5b1d6b370493cb94884d8b1cd5e4",
+      "executable": false
+    },
+    "src/lastfm.h": {
+      "sha256": "7e517b8f1f8b2d8a9b970354d2369ebb261bb9f05fd870592335302fd863d0bf",
+      "executable": false
+    },
+    "src/libairptp/.gitignore": {
+      "sha256": "41723fa1633301366e27c744b7d8ef20b8af261d50f135c880b67029eb64ff1b",
+      "executable": false
+    },
+    "src/libairptp/LICENSE": {
+      "sha256": "a3892205a83d512c2d2a4a1d8ecf24c49a9aa0e845cf9a94067920be9c7686d8",
+      "executable": false
+    },
+    "src/libairptp/Makefile.am": {
+      "sha256": "e7609a748bc89a4fd51e169f697e445ce15161da6d578eff0e2d8489dc17bc29",
+      "executable": false
+    },
+    "src/libairptp/README.md": {
+      "sha256": "5e737b4349d90b157d9f5b50da456dfb8b211f3a616515481a810dcaf11cfc7e",
+      "executable": false
+    },
+    "src/libairptp/airptp.h": {
+      "sha256": "6c1c871a896c6de44a4e59e7729a8b951dcef8527dfc743f73e282011ec665a1",
+      "executable": false
+    },
+    "src/libairptp/configure.ac": {
+      "sha256": "1476e5d2e7529ff28bd9df89ba0c61ab4ec4a7293d6769d39d97eeaeead6cd9b",
+      "executable": false
+    },
+    "src/libairptp/daemon/.gitignore": {
+      "sha256": "7379f5175f3bdca627ddeade6599bc607fc3da2442e2ebc7c82c301366d824a0",
+      "executable": false
+    },
+    "src/libairptp/daemon/Makefile.am": {
+      "sha256": "9792c334833e0b9bae2647a0b754d90799495cd4cec4a8409f5793abe5128278",
+      "executable": false
+    },
+    "src/libairptp/daemon/airptpd.c": {
+      "sha256": "0bf153e949aaa7041719906d1ade8ecc23f2a801468983d3ed8d8a57ab8634fd",
+      "executable": false
+    },
+    "src/libairptp/daemon/airptpd.service.in": {
+      "sha256": "74d3b1c3434a01e58f08f529487e4a2c26243902129314c07f540f274805948d",
+      "executable": false
+    },
+    "src/libairptp/src/Makefile.am": {
+      "sha256": "9fad4fe110790b4e6298dcc10acffcd714f19c6e933c74eaece9385d853b7ff9",
+      "executable": false
+    },
+    "src/libairptp/src/airptp.c": {
+      "sha256": "261f35339fe76e7657567a6dd5bf866e7e1963fca0bbd58e6ee03084b0988384",
+      "executable": false
+    },
+    "src/libairptp/src/airptp_internal.h": {
+      "sha256": "d4defece935e4f78622ca0fd425ca1c0accbce92912955135b1a22ab8205d233",
+      "executable": false
+    },
+    "src/libairptp/src/daemon.c": {
+      "sha256": "6961cb020a98e56dc91a0e51b7269a8f1118f9b2d98468b37093edd3aa767343",
+      "executable": false
+    },
+    "src/libairptp/src/daemon.h": {
+      "sha256": "926dcbfacc784961b749dd7c85f082e6eecbe9ac90846f6fa1b2d7e566e412f7",
+      "executable": false
+    },
+    "src/libairptp/src/ptp_definitions.h": {
+      "sha256": "c68799b82a534c88b335b75c941dfc4933b668a2476fad519407399ade4b1a62",
+      "executable": false
+    },
+    "src/libairptp/src/ptp_msg_handle.c": {
+      "sha256": "2dc890213c8aff53a9f65e9bacc579d71a97c58759f2bbb9bb261e6f5b425626",
+      "executable": false
+    },
+    "src/libairptp/src/ptp_msg_handle.h": {
+      "sha256": "9d4252344f7aedc41084b8f16183eee98ace5d570181c2822188b84f60a1faa5",
+      "executable": false
+    },
+    "src/libairptp/src/utils.c": {
+      "sha256": "2cb9593908ef7f365232196e806e0746ebb06bae6b2c2977423c4f38e6fd50fe",
+      "executable": false
+    },
+    "src/libairptp/src/utils.h": {
+      "sha256": "737d508c106e8435bb7951539669d0ab3193a47f4d07c6ba02b94ae66a8d4dbe",
+      "executable": false
+    },
+    "src/libairptp/tests/.gitignore": {
+      "sha256": "c7cf100b22c2faab503749f9d6e47111345f7227aa5cdd12d7cb6fd93020ee1e",
+      "executable": false
+    },
+    "src/libairptp/tests/Makefile.am": {
+      "sha256": "21689f2a25d5e923e76baeeb36a0c5f6e24e41a1fce57f2ec67a8cf8f9e301f4",
+      "executable": false
+    },
+    "src/libairptp/tests/client.c": {
+      "sha256": "06aed2d6e088465ef6dd03e127cf76ca1c87221e8339b2cf931d623393320b25",
+      "executable": false
+    },
+    "src/libairptp/tests/daemon.c": {
+      "sha256": "f915aa5b3df919801b2ff879dc2f9d401932b72258c6108312075c7c8bcf68fc",
+      "executable": false
+    },
+    "src/libairptp/tests/test1.c": {
+      "sha256": "6571a94421ba34bba5f87dcb26cdc90ad569b09ecde2f88cfe17909caf217968",
+      "executable": false
+    },
+    "src/library/filescanner.c": {
+      "sha256": "48cfe3afdeff7ce72353718717b7e30493c77a823bf461389ce398f81bfc71bf",
+      "executable": false
+    },
+    "src/library/filescanner.h": {
+      "sha256": "4a7b21b7586b10f202cc5dafb49e5301f7f5af8253ac9856d98742021c1f16be",
+      "executable": false
+    },
+    "src/library/filescanner_ffmpeg.c": {
+      "sha256": "2161aab70f0e6ab5f7dceeeb2c2b434b046179c38cd9ed615317d53da32c90ae",
+      "executable": false
+    },
+    "src/library/filescanner_itunes.c": {
+      "sha256": "9b504562cb4cd24a43e156d663a2c07861dfbcdd8b96a7149f3c11eac15554b5",
+      "executable": false
+    },
+    "src/library/filescanner_mountwatch.c": {
+      "sha256": "be4137f286c39579f1c729ba3409c1f0593d0be0e3fa0669da169d1d8c67a20d",
+      "executable": false
+    },
+    "src/library/filescanner_playlist.c": {
+      "sha256": "6ada6a90c90fcbd838cf320daa29162fd8b5d3e3741a4bdd6011225aad9f4a12",
+      "executable": false
+    },
+    "src/library/filescanner_smartpl.c": {
+      "sha256": "b8199cbaa70cc6d75047fe6802e64653ee07a6b68edf9a43332e0db212404b91",
+      "executable": false
+    },
+    "src/library/rssscanner.c": {
+      "sha256": "268bb3d3915bfbe5e980f6426f623c490f9181e584a25d370a1b7212bd7e3c9f",
+      "executable": false
+    },
+    "src/library/spotify_webapi.c": {
+      "sha256": "2a227856958b969e75c0a10f1ff95328e909b6ffc84fd58cb520d36ad288a682",
+      "executable": false
+    },
+    "src/library/spotify_webapi.h": {
+      "sha256": "85365518c5dee4fc6aada5edf7101c7b8bc25e17ad3a4e268bec05c5b117c7a9",
+      "executable": false
+    },
+    "src/library.c": {
+      "sha256": "18c48f30119af9b4d3509a46797da362964a3792d06c8c7d10e23fae0789ace6",
+      "executable": false
+    },
+    "src/library.h": {
+      "sha256": "f8658503ef7af7b2469383b7830195b5702b75ce4f22124d9c84a7021be9f3c5",
+      "executable": false
+    },
+    "src/listenbrainz.c": {
+      "sha256": "2cacd09f09e5838ba96155b1f37730aed20622cf7957ade1c4f4ebb596f8b29c",
+      "executable": false
+    },
+    "src/listenbrainz.h": {
+      "sha256": "712e057e56a47b5e4e0663e2fc4b49318ea1627a7775f7819ba109d50ebba3bd",
+      "executable": false
+    },
+    "src/listener.c": {
+      "sha256": "398dfa8b124bb9ff6db9b474e2463e683cd3d93e98675c33b669c4d172dd8efa",
+      "executable": false
+    },
+    "src/listener.h": {
+      "sha256": "ce1f184267bde86f09eb39641ab016fd2c5248d56c0209927eeb48415e1d1430",
+      "executable": false
+    },
+    "src/logger.c": {
+      "sha256": "04861becfa9cfbb57b69806a1c380bbde8fd0e72327d136e8bf46633b1ad0939",
+      "executable": false
+    },
+    "src/logger.h": {
+      "sha256": "3866c3e0663c2d8e4d8301b32cb711a0091a43a0b86efe6707497d099740365e",
+      "executable": false
+    },
+    "src/main.c": {
+      "sha256": "0542224b59af33da12527fcc301cf4d20ff86b68cba3a42691dbcedc01db12ac",
+      "executable": false
+    },
+    "src/mdns.h": {
+      "sha256": "ca126e736e368260fc19f4eeeb43786b17cc0311d00e6e432726d4f51ca97961",
+      "executable": false
+    },
+    "src/mdns_avahi.c": {
+      "sha256": "8deaee533a3b041e4d8a53f2880930c5ead3728db69285086c5eb3b1922da706",
+      "executable": false
+    },
+    "src/mdns_dnssd.c": {
+      "sha256": "6705d2584e8003bec5c57f9960b7b5c2e1c565083645bd36653ae29d1aa30927",
+      "executable": false
+    },
+    "src/misc.c": {
+      "sha256": "d4101404f50aafe83aa759c5aba09b3a7dfd1263ec76de1b96920997a3cd4701",
+      "executable": false
+    },
+    "src/misc.h": {
+      "sha256": "cee50ff17f0b5bdd14b045b97540961ef690121e418aa66dfecb20e486984cd6",
+      "executable": false
+    },
+    "src/misc_json.c": {
+      "sha256": "e0c07145e21fbc2782c6cb61dfbd62eec986b68be880984d3ff5315a7dea4860",
+      "executable": false
+    },
+    "src/misc_json.h": {
+      "sha256": "26ccf03068ecaf028ae90dcadd0d2521c304923a57927736c5618e9e4c4e743c",
+      "executable": false
+    },
+    "src/misc_xml.c": {
+      "sha256": "b32ef717eca4f0b7df33ac337c0c743fcfc5ca4eb7ac576ea9b729e410744cf9",
+      "executable": false
+    },
+    "src/misc_xml.h": {
+      "sha256": "d2d65f109e9be29b0b84334ecf3dac2a36d4ebf869da03349021e0d69e3d43f3",
+      "executable": false
+    },
+    "src/mpd.c": {
+      "sha256": "b70cdfd61e6f1481280534de7ce31db659635c4fbc584745df4748bcad8e8904",
+      "executable": false
+    },
+    "src/mpd.h": {
+      "sha256": "adc12bce5b6f679bce7dfc1b14da6630fbae746330bc4ffe6dba63e11976d13d",
+      "executable": false
+    },
+    "src/outputs/airplay.c": {
+      "sha256": "e1dacfd2904af43729bc798f718c885e46ddb59a5b94f221fce8478de775b6c4",
+      "executable": false
+    },
+    "src/outputs/airplay_events.c": {
+      "sha256": "38d3dce1d5a7b445c81c4453f063e4e3893e5723b864936ee84ac0ab73a58944",
+      "executable": false
+    },
+    "src/outputs/airplay_events.h": {
+      "sha256": "3d0be350cc254e83584cdf62e27527e4f054acdd2195a78f03aaf834498e6ebc",
+      "executable": false
+    },
+    "src/outputs/alsa.c": {
+      "sha256": "015260e879b337ff2a9775586418d1427f0d32f42a3a0e2cf44d2054a8baee66",
+      "executable": false
+    },
+    "src/outputs/cast.c": {
+      "sha256": "ecd7c75c03f1d7fa492d9d3a3007b2ed84de39fe23c1a9bf4361b960d7c77921",
+      "executable": false
+    },
+    "src/outputs/cast_channel.pb-c.c": {
+      "sha256": "166b6b48621314a1fd276b7cb9ca03ffe475dbe94821dd88eaf0da755484834a",
+      "executable": false
+    },
+    "src/outputs/cast_channel.pb-c.h": {
+      "sha256": "d9118f9ac68311d5d20b035730be4521b24a4a4c7bd2775548e1cff5784451f2",
+      "executable": false
+    },
+    "src/outputs/cast_channel.v0.pb-c.c": {
+      "sha256": "4d03db796833f88039eb9f363fc374e2898645bd58678ad3b5c29d94f7448123",
+      "executable": false
+    },
+    "src/outputs/cast_channel.v0.pb-c.h": {
+      "sha256": "ba06dbbd7bbc061258bc3c4ee73478bc40493b922ec9866a2bf8e9ea79ac8ebd",
+      "executable": false
+    },
+    "src/outputs/dummy.c": {
+      "sha256": "ef1ecede339b3230ac81e5711b9fd8e4ca4e77ba19572b74021463cde381987d",
+      "executable": false
+    },
+    "src/outputs/fifo.c": {
+      "sha256": "f7051bb61917c688b3487ae216cf6b0a6072b1796073668632450785cf472e8e",
+      "executable": false
+    },
+    "src/outputs/plist_wrap.h": {
+      "sha256": "ac63a52e7d8f5652ab361bfc2798d59077cf8ad50359da22a253213dd868426e",
+      "executable": false
+    },
+    "src/outputs/pulse.c": {
+      "sha256": "700478d6242760e3ae4b0464ab81dfe721a67365df84cb3f75a88f583435e33a",
+      "executable": false
+    },
+    "src/outputs/raop.c": {
+      "sha256": "0c793354854784794dfcea758f1eb244ffbfa2cbb0ba053ab65ace6293961128",
+      "executable": false
+    },
+    "src/outputs/rcp.c": {
+      "sha256": "9518e3f2574b4680b893475b1388a41035c60adfb9b08a25cf1e0051b6041934",
+      "executable": false
+    },
+    "src/outputs/rtp_common.c": {
+      "sha256": "dd72387fed5284c65d053460aa88be703ecdfa184b41e0ebf6e07b9675c92f01",
+      "executable": false
+    },
+    "src/outputs/rtp_common.h": {
+      "sha256": "af5b0d9b5defbf3cd7dabe7b1eddf95e42c976e16ce4991d4abb886243a1794a",
+      "executable": false
+    },
+    "src/outputs/streaming.c": {
+      "sha256": "262c72e80c7502ee4f568e388bea926b5292e6c1bada5aefde9aa647ac6aaa90",
+      "executable": false
+    },
+    "src/outputs.c": {
+      "sha256": "beb47cdf9f11aec3396f5749327df3681a5314ed2e438f5f2d389904a86cece8",
+      "executable": false
+    },
+    "src/outputs.h": {
+      "sha256": "65ebb629131d06207dcea9016b3f4ba145401cd671f8fed8a85f64f69e7284d3",
+      "executable": false
+    },
+    "src/pair_ap/pair-internal.h": {
+      "sha256": "9f1dafb2792db2c18a1347cf0e8fb64dc3ed6f12037bd8251d4daac5d7219dd1",
+      "executable": false
+    },
+    "src/pair_ap/pair-tlv.c": {
+      "sha256": "32c3a77e6244dc44338e866f950a42bbd379ba4479c88b8e1343071db9e47025",
+      "executable": false
+    },
+    "src/pair_ap/pair-tlv.h": {
+      "sha256": "b4565d5d0e2e2ad016756d827d2652893602e022889877d229d85373c7357fcd",
+      "executable": false
+    },
+    "src/pair_ap/pair.c": {
+      "sha256": "1bf53b7ef14c3c8ab8dbb0a9edef5128bfa8888f1dc7b0db11c0307b8d8d0029",
+      "executable": false
+    },
+    "src/pair_ap/pair.h": {
+      "sha256": "74e9b76234cd88d3ac5f81c643ec132032643b6a40b30e00c2fb719fc5e6a607",
+      "executable": false
+    },
+    "src/pair_ap/pair_fruit.c": {
+      "sha256": "d37ab36f63015613ea7fa4d82e74a62c4cfd32356d1eb5e0e93e44f23baa73d0",
+      "executable": false
+    },
+    "src/pair_ap/pair_homekit.c": {
+      "sha256": "51c94f98620712bfadbcb0cf26b8231fc005c5379bf0cb0134053870b0e9ec46",
+      "executable": false
+    },
+    "src/parsers/.gitignore": {
+      "sha256": "d96267f34cc2c5adc0a6a5d8af13f426fbe0668357ccbb085fc598a4d0e20d26",
+      "executable": false
+    },
+    "src/parsers/daap_lexer.l": {
+      "sha256": "4fdc0bf20d71598cbe150036d37e799e1d4ef132c168efccfe7c88847ff99ac2",
+      "executable": false
+    },
+    "src/parsers/daap_parser.y": {
+      "sha256": "f163b0d662b7588b5f2c46c5d28437d70019a4de1ee03a266f112e72640f968b",
+      "executable": false
+    },
+    "src/parsers/mpd_lexer.l": {
+      "sha256": "c77bc872c78e26beaaf56054e7099b1ddfd3611d9e3024560be6786e3249d3f6",
+      "executable": false
+    },
+    "src/parsers/mpd_parser.y": {
+      "sha256": "2668aabf1bf0d5481290bbfd72fa61d10a43f8ce17e57ed9535cca238ea0d051",
+      "executable": false
+    },
+    "src/parsers/rsp_lexer.l": {
+      "sha256": "fe7644a026b821d4a83322ce4e2ec054af7eb0ab082c6efd9f58dddf2b221745",
+      "executable": false
+    },
+    "src/parsers/rsp_parser.y": {
+      "sha256": "81b5da3965e3ade128859a3318d8f29ab71db0c7de42388f38680ef6848248e9",
+      "executable": false
+    },
+    "src/parsers/smartpl_lexer.l": {
+      "sha256": "436943b222cbe966474bea46beb285f414b56c9d68e376897727cfe7fb32f070",
+      "executable": false
+    },
+    "src/parsers/smartpl_parser.y": {
+      "sha256": "59b9892cc89394831489597d8a8cbeb4ad70b0c88cc9b0fd71b7b52d8e714bbe",
+      "executable": false
+    },
+    "src/player.c": {
+      "sha256": "aa195424400d0a4a1e0232f752e2eed5aebedf922408ba93811b4f3b68e09dc7",
+      "executable": false
+    },
+    "src/player.h": {
+      "sha256": "99f05f08839a01d1771065330b76c25e1f96b458ac49657095dd52b87ccceff0",
+      "executable": false
+    },
+    "src/ptpd.c": {
+      "sha256": "4cfe74b33df39d93f49f96f5d201056121202e084c1aff53514c6fa3fe377b35",
+      "executable": false
+    },
+    "src/ptpd.h": {
+      "sha256": "2d54dd16517acfd8430e1fcc17a2023915c158e9de5b748c4c81ce0c5ad5b122",
+      "executable": false
+    },
+    "src/remote_pairing.c": {
+      "sha256": "6ae604aeede8299c1779b6806c79d57b72831b9dfd549746c600f00f1412d35b",
+      "executable": false
+    },
+    "src/remote_pairing.h": {
+      "sha256": "72bb28966719384ffa6a8d8923d2377c02eb30e8f9ccfb0d0a8c58178525b0e1",
+      "executable": false
+    },
+    "src/rng.c": {
+      "sha256": "dd3384fb804fdffd5602c229231585ebcf452114916faabbc2ad3b6d51936cfa",
+      "executable": false
+    },
+    "src/rng.h": {
+      "sha256": "fbaf049d4d0c0be3db63a1d72431ef8190d9b193b3e2aee1b9b061cf03ef49ba",
+      "executable": false
+    },
+    "src/settings.c": {
+      "sha256": "0ed1adc60853f8d80f148fef9ff8238514954801c5e0c6d2e5a5faaf69304dfb",
+      "executable": false
+    },
+    "src/settings.h": {
+      "sha256": "75e1464de54dbe4b8cc57b707a313dc6d0891fe60f9feed2727ad493106c5f94",
+      "executable": false
+    },
+    "src/smartpl_query.c": {
+      "sha256": "1dd06dc0f405bdc43e7ce7782c700b9570a7dce8f792f26e5c9c714642b6193b",
+      "executable": false
+    },
+    "src/smartpl_query.h": {
+      "sha256": "039f4c7ef6ea7a0b7e32d6b185d8affb8233ccd18e9279d1cbabf156eae741c1",
+      "executable": false
+    },
+    "src/transcode.c": {
+      "sha256": "527c976c16b0b1c2a469d61517c6ac5ad612203940a72fb4138c65e99021bc67",
+      "executable": false
+    },
+    "src/transcode.h": {
+      "sha256": "6394e90f4994f1ae88808eac89f7287dae80cb473feef4ea88769f1964a74430",
+      "executable": false
+    },
+    "src/websocket.c": {
+      "sha256": "ab6ff18362ca630f7dd2f1a1a8ab907816a66af5a289290421387a4c3c780b80",
+      "executable": false
+    },
+    "src/websocket.h": {
+      "sha256": "0e6b9f80a5ed0ee29557edcd7ec4a3cb809d3b95cb72fe924de2b31d5e08166d",
+      "executable": false
+    },
+    "src/worker.c": {
+      "sha256": "68b3f3ec0f2c349a92df8489f8c2c8db80574d2b71be87d619012ca0c1b44bca",
+      "executable": false
+    },
+    "src/worker.h": {
+      "sha256": "ad2e05a5bc8beaa25c8b918f13283f38bb3010cc68299fcb00c71e49a4e84aa0",
+      "executable": false
+    },
+    "web-src/.gitignore": {
+      "sha256": "6df398a488b1b6118777b07cd25936d771ce99b67b1d7d60acb01f0cb0b4d40d",
+      "executable": false
+    },
+    "web-src/.prettierrc.json": {
+      "sha256": "e72d9011a8a32254fdfcf8a9ea6ddd5fdd00eea00a60f5c6453487182369e785",
+      "executable": false
+    },
+    "web-src/eslint.config.js": {
+      "sha256": "7f91a3e3563b9b8ca34b917df25c486c780e87f39c42867d995218e58e6b98e4",
+      "executable": false
+    },
+    "web-src/index.html": {
+      "sha256": "044c4186a49899bc2f159b60fbe4d2f6fb73291e24f252f5e2650037bf9fda18",
+      "executable": false
+    },
+    "web-src/jsconfig.json": {
+      "sha256": "99b9e425cef4ee7482a533943601a9ef0feff46aa89fcc679d4fca342315e024",
+      "executable": false
+    },
+    "web-src/package-lock.json": {
+      "sha256": "8f7636b4d5a1b0427df2047ef228221c3af97c7d420962d971e8337b69cf42b3",
+      "executable": false
+    },
+    "web-src/package.json": {
+      "sha256": "08ebf5fc546e359c9a1ff9efffebe5f67f33f6180862dc34cd1bf9b41eaea864",
+      "executable": false
+    },
+    "web-src/public/android-chrome-192x192.png": {
+      "sha256": "d25c3e4b25916acbc03c2fc978fb6bd3085e6ea8e73c53ebf3f3d310cf5329e9",
+      "executable": false
+    },
+    "web-src/public/android-chrome-512x512.png": {
+      "sha256": "cce175dcaec55e38bb2d8fe60d6c6de121f1dedd75c13e084363cea077a91b6f",
+      "executable": false
+    },
+    "web-src/public/apple-touch-icon.png": {
+      "sha256": "a697b7a21f77af203c4d1a92bd70d1d162571c6254c17aa16ce23be367d3f9fb",
+      "executable": false
+    },
+    "web-src/public/browserconfig.xml": {
+      "sha256": "c348b0d6df3d900efef7ae4b4dfc8b62b1737b04d09d4584fef243211c266866",
+      "executable": false
+    },
+    "web-src/public/favicon-16x16.png": {
+      "sha256": "fe96f5bac740c0aa615d3a395b1f7c4a874b963eac6d45722e24b958c0ff6abd",
+      "executable": false
+    },
+    "web-src/public/favicon-32x32.png": {
+      "sha256": "1e80dbf96e6ab226f4c0f97691cc2132a3a0e996386628526db021ca1a6a48a3",
+      "executable": false
+    },
+    "web-src/public/favicon.ico": {
+      "sha256": "e8d7b6f959e0d52964ce2dc4d3709870007b881256ef549825a712105c4926b9",
+      "executable": false
+    },
+    "web-src/public/logo.svg": {
+      "sha256": "27e8441254b4e39cb9ac8902b427e81688480751504f95f652570485f1be7f1d",
+      "executable": false
+    },
+    "web-src/public/mstile-150x150.png": {
+      "sha256": "0363be5107d7045316c553dd4ed345e543c7f0e924986154fa1b3d8ad077c859",
+      "executable": false
+    },
+    "web-src/public/safari-pinned-tab.svg": {
+      "sha256": "7e4213641c7617caf7f9202da2b83dbb7b844513a87bd710afb62c52fd6a6098",
+      "executable": false
+    },
+    "web-src/public/site.webmanifest": {
+      "sha256": "8952c0853af2067c72d17c9ede0099e1f76869c2158e6b8e945a178aad6ef521",
+      "executable": false
+    },
+    "web-src/src/App.vue": {
+      "sha256": "1323d272a86718638b2c08df079bab65c01ec9988b15f9cc60aabde5f3faeb5a",
+      "executable": false
+    },
+    "web-src/src/api/configuration.js": {
+      "sha256": "250cc97cc0045740e6ba3da632027bcb2847aafe1d6ac529cbd4a516ebaa7f0d",
+      "executable": false
+    },
+    "web-src/src/api/index.js": {
+      "sha256": "3d4579e38954d3d1ba4caa277e5df9f5935e5748bead92263852e5c9e5e99db8",
+      "executable": false
+    },
+    "web-src/src/api/library.js": {
+      "sha256": "8c4a7ccbe7291851ef1efa5a3942d116077e05bb75429beeb1be87d0fd7170fc",
+      "executable": false
+    },
+    "web-src/src/api/outputs.js": {
+      "sha256": "b0e60c9c09c02bdfd545d95f557b637ea66d7066fa381ef4e5633020b2165d7a",
+      "executable": false
+    },
+    "web-src/src/api/player.js": {
+      "sha256": "a09abbdc6c6f3bf88a0961cca0f29c0de64639706f734a98e0da34c00db46e33",
+      "executable": false
+    },
+    "web-src/src/api/queue.js": {
+      "sha256": "9546cc8a17543ad9f98782cf03b5d4f1e351c14595268574a6dbae9a850413ff",
+      "executable": false
+    },
+    "web-src/src/api/remotes.js": {
+      "sha256": "ce9c48bb0f58fcf427ce4714382630f867545bda0356daeccf51023e03681883",
+      "executable": false
+    },
+    "web-src/src/api/services.js": {
+      "sha256": "29edbcf964718faa32537501af3c75b787dfb00d8faeb755509558b9c36da59d",
+      "executable": false
+    },
+    "web-src/src/api/settings.js": {
+      "sha256": "c1b90f7795171849b675b6f139f3b8a89b930561fb036c363d77034bc668dd0b",
+      "executable": false
+    },
+    "web-src/src/components/ControlButton.vue": {
+      "sha256": "e049aa019031def5b7c046bf489ec2fbb851bbadbb53c0b5ad03560924f3950e",
+      "executable": false
+    },
+    "web-src/src/components/ControlDropdown.vue": {
+      "sha256": "1722b3b647e495cc41cd53a001b3606b2d23b7d10c409173008824f6e055c7f7",
+      "executable": false
+    },
+    "web-src/src/components/ControlImage.vue": {
+      "sha256": "81178803c021050fa9957fc02a885a70e077ae54d1e66351a5fbd0bfd6f4cef1",
+      "executable": false
+    },
+    "web-src/src/components/ControlIntegerField.vue": {
+      "sha256": "7680c3beacfa7e75d77f3a164838f86c74684bb67a4fe571b740c4d10fa981b3",
+      "executable": false
+    },
+    "web-src/src/components/ControlLink.vue": {
+      "sha256": "f6a56e5899e70546aa04b726f68f36f08d204a031e4ccab85fdd7f8181b33174",
+      "executable": false
+    },
+    "web-src/src/components/ControlMainVolume.vue": {
+      "sha256": "a8008a48d7e4b913d24b9f34aeff7e10f6373195ed5d204b41a3009892ccb4f5",
+      "executable": false
+    },
+    "web-src/src/components/ControlOutputVolume.vue": {
+      "sha256": "170c99b159d8f9cc9d82b693dd012fe90d70c786190f5d8a5494771f2320cd12",
+      "executable": false
+    },
+    "web-src/src/components/ControlPinField.vue": {
+      "sha256": "22d3ea9f529da954626a157500fcb9f6bf3da2b19ff4b2f9b57efa3728759ec4",
+      "executable": false
+    },
+    "web-src/src/components/ControlPlayerBack.vue": {
+      "sha256": "40b4fd97505744500053c47a5aa1da8ab8758019b5ed53f3caf75ce5e2514e1e",
+      "executable": false
+    },
+    "web-src/src/components/ControlPlayerConsume.vue": {
+      "sha256": "9654884ad4ac5078865ab3f8b50d2df4770f6d197935c2c8876dbb9ef4482249",
+      "executable": false
+    },
+    "web-src/src/components/ControlPlayerForward.vue": {
+      "sha256": "4c0a8e1a5ee465a159a66fa0e0b402f06be020475b73aa9ce6b7239a719d7108",
+      "executable": false
+    },
+    "web-src/src/components/ControlPlayerLyrics.vue": {
+      "sha256": "5e89112667c3a96bbae1f06803ca4a5187b6600244e89d21388ef8d3b200844a",
+      "executable": false
+    },
+    "web-src/src/components/ControlPlayerNext.vue": {
+      "sha256": "65b853357f49af609e26bd35106992c99dc4dce9aec42d74a81e652be7875929",
+      "executable": false
+    },
+    "web-src/src/components/ControlPlayerPlay.vue": {
+      "sha256": "59f64039d929a81795839a25daa7d69ec90aacab060ea3bd6946b3fb86016ccc",
+      "executable": false
+    },
+    "web-src/src/components/ControlPlayerPrevious.vue": {
+      "sha256": "047f2b105ecb86aa99352819d152def5bd446862402010fac29c34983f8fb1ad",
+      "executable": false
+    },
+    "web-src/src/components/ControlPlayerRepeat.vue": {
+      "sha256": "44fd5f29126a30c44c0b533a8921aab48b8b2fbd5c92540c98bf8fce160e1e4e",
+      "executable": false
+    },
+    "web-src/src/components/ControlPlayerShuffle.vue": {
+      "sha256": "cd2ac44db35b344171d60b889070cd816e4e6c54ec9e30d937d2e453348da120",
+      "executable": false
+    },
+    "web-src/src/components/ControlProgress.vue": {
+      "sha256": "39d065ccfa63ca69060d7a54b1cc0ce1be0ab17958aec4dfe94f77716d2f4479",
+      "executable": false
+    },
+    "web-src/src/components/ControlSetting.vue": {
+      "sha256": "2dd7dff8175f2e768386f67b25c8a3fc84930d10c9f5578079173d793ae3111d",
+      "executable": false
+    },
+    "web-src/src/components/ControlSettingIntegerField.vue": {
+      "sha256": "47bed52bc414879a24d8aee8ec9f29251bd609aea78af971d9d37f207db107f6",
+      "executable": false
+    },
+    "web-src/src/components/ControlSettingSwitch.vue": {
+      "sha256": "422710388ed13f37b928634d4b0b333bee1335656bde646ac2a0665f63d66491",
+      "executable": false
+    },
+    "web-src/src/components/ControlSettingTextField.vue": {
+      "sha256": "71b1da585e2f2ea5839e2d3d8c43118484e1fe540fb2a4e79b63d19ab8420015",
+      "executable": false
+    },
+    "web-src/src/components/ControlSlider.vue": {
+      "sha256": "95cba5459a8f40bcbf8d67d3a9c245d0cf48921f058d93ae8503ecc79efbed5a",
+      "executable": false
+    },
+    "web-src/src/components/ControlStreamVolume.vue": {
+      "sha256": "1c0e93f09d0f216247bdf9891c1e5b4d3a874352686df686276ded7884e3fc2e",
+      "executable": false
+    },
+    "web-src/src/components/ControlSwitch.vue": {
+      "sha256": "65e26666f7781d4f529c9103a82b55638d120ae336387564e2f5d115ed6c298a",
+      "executable": false
+    },
+    "web-src/src/components/ControlTabList.vue": {
+      "sha256": "67ce56e60763d133b5bac070becac86065965fad04c8b1d4b1b363c318f24212",
+      "executable": false
+    },
+    "web-src/src/components/ControlUrlField.vue": {
+      "sha256": "9d38687af587415cb20230c46633236475bf47eb97338c09f0c320f823138f03",
+      "executable": false
+    },
+    "web-src/src/components/ListAlbums.vue": {
+      "sha256": "d5aa430c67cbef6f31b325dfded2dc483475da427f9eb189bde41fa57b2839bc",
+      "executable": false
+    },
+    "web-src/src/components/ListAlbumsSpotify.vue": {
+      "sha256": "8df1d348421dbb4b62025658335c6a668d91a4741db41286cf861022db6ddb4a",
+      "executable": false
+    },
+    "web-src/src/components/ListArtists.vue": {
+      "sha256": "f4a6780c1f848886e0316233cab7a707dccd546b25d5ec94c992397b23c6b49d",
+      "executable": false
+    },
+    "web-src/src/components/ListArtistsSpotify.vue": {
+      "sha256": "341858462f2fc0d15b1b365a08e0f838c37eea076773a2c223d65bfdca3774cb",
+      "executable": false
+    },
+    "web-src/src/components/ListAudiobooksSpotify.vue": {
+      "sha256": "beda67f9ffa391638d1ff453c5b97d0109177cc570808de0f96a17614717d711",
+      "executable": false
+    },
+    "web-src/src/components/ListChaptersSpotify.vue": {
+      "sha256": "aad772392fe4454fd277a69b77522d03ef55637257875412e245d203d40b335e",
+      "executable": false
+    },
+    "web-src/src/components/ListComposers.vue": {
+      "sha256": "2dde8f955f499af623d54254d822a3f6b20bcd60144e18b21f720f9bdf2bcd18",
+      "executable": false
+    },
+    "web-src/src/components/ListDirectories.vue": {
+      "sha256": "41c27cc5c615f207de084275347c03a81bbd1fedfa1be6b76f9a43ed612c1215",
+      "executable": false
+    },
+    "web-src/src/components/ListGenres.vue": {
+      "sha256": "2c86799be0209295b9cc343cf3924562b3f93fd800f7cc4e918398f65771223b",
+      "executable": false
+    },
+    "web-src/src/components/ListIndexButtons.vue": {
+      "sha256": "44499317dd7e1d4244ebdf58a8af1b592051b12e2b149944be8796a04d156f79",
+      "executable": false
+    },
+    "web-src/src/components/ListItem.vue": {
+      "sha256": "97ad9bf4dfc6c3c297482f0a03b7df2f8ccbedfa9c7a1b2d4a20041aec753479",
+      "executable": false
+    },
+    "web-src/src/components/ListItemQueueItem.vue": {
+      "sha256": "07a2d5688893e6194e949aa0bba383b96994e23353089f19a258491cb3146134",
+      "executable": false
+    },
+    "web-src/src/components/ListNotifications.vue": {
+      "sha256": "f3812bc51dd355776ca68bd8f61072dfad02d476c6bab26281ca09e2d740de22",
+      "executable": false
+    },
+    "web-src/src/components/ListOptions.vue": {
+      "sha256": "634f30f0ad8aef03236036d4ece59ebfd8f50af74950d5df90e45c33490c4c25",
+      "executable": false
+    },
+    "web-src/src/components/ListPlaylists.vue": {
+      "sha256": "a81c80b3a664f3bcf52684ca8f47025cb5f2f42a76adbf933ce6bb455b16a797",
+      "executable": false
+    },
+    "web-src/src/components/ListPlaylistsSpotify.vue": {
+      "sha256": "b301059b26b39a5b813084f7195e55a4e2c1b83f01645d6ba8c77f09961f85cc",
+      "executable": false
+    },
+    "web-src/src/components/ListProperties.vue": {
+      "sha256": "2d2eeb50a361f5e54ed672d1e3f1b0860e2979b814b7a213d1ead2d7d284d1cc",
+      "executable": false
+    },
+    "web-src/src/components/ListTracks.vue": {
+      "sha256": "3916dea29579da859146c0159e8a026930dd91bf5e05b5ce63c69119e3b166f2",
+      "executable": false
+    },
+    "web-src/src/components/ListTracksSpotify.vue": {
+      "sha256": "981314e3aa7b74832b002563709ddcc231fc8579ef103be7566fed8eb6942d20",
+      "executable": false
+    },
+    "web-src/src/components/LoaderListItem.vue": {
+      "sha256": "8d4f22183702923cfde7fe4a94adb76e062f9b19d8ccfea44df1fe5ea17edc1a",
+      "executable": false
+    },
+    "web-src/src/components/ModalDialog.vue": {
+      "sha256": "b78e7117e734ae4bed34a65285600c8a0f4aff1b376c1c63754b89a89a3c4ecb",
+      "executable": false
+    },
+    "web-src/src/components/ModalDialogAddRss.vue": {
+      "sha256": "85dafe97528ed322453c41436b1872be6877adcc4f31cc1f082783500b436932",
+      "executable": false
+    },
+    "web-src/src/components/ModalDialogAddStream.vue": {
+      "sha256": "6c638b3112d06f2d8d9cd6f48ded8d0f8d46b866c20cd869914e0ada68a0ea6e",
+      "executable": false
+    },
+    "web-src/src/components/ModalDialogAlbum.vue": {
+      "sha256": "a7f3cee9c89ccceef89f9838d07868d168ce09b9b24d0e5ae4145afddc239966",
+      "executable": false
+    },
+    "web-src/src/components/ModalDialogAlbumSpotify.vue": {
+      "sha256": "68ed946e9f34cdcc76e3b7f3873ee8d26596dbdb9c0d464ed120623344033da2",
+      "executable": false
+    },
+    "web-src/src/components/ModalDialogArtist.vue": {
+      "sha256": "31c1e8ca998c76bafae3779e86b13c47446a2b16f54e8079364a5c81334e16b6",
+      "executable": false
+    },
+    "web-src/src/components/ModalDialogArtistSpotify.vue": {
+      "sha256": "ab136612bd876ac20462cab9c9fa274f5b81decf3ffd571f48db6819fb2803bc",
+      "executable": false
+    },
+    "web-src/src/components/ModalDialogAudiobookSpotify.vue": {
+      "sha256": "21547d168ce5c78dadf8622d541a2a4d184883db1f95cf105802f5a28f18fcb7",
+      "executable": false
+    },
+    "web-src/src/components/ModalDialogComposer.vue": {
+      "sha256": "a8dff3e0a4907a6b1454608a6ff02938e6fdc819ebf0b943031a8b7c06d6ec29",
+      "executable": false
+    },
+    "web-src/src/components/ModalDialogDirectory.vue": {
+      "sha256": "cdd524119714fd7abf2ec0472177f8805bd2ff1b9b12b10b97b7c8222013312c",
+      "executable": false
+    },
+    "web-src/src/components/ModalDialogGenre.vue": {
+      "sha256": "79f4051986b445129c3a578304c9d2e723b034751ec2f657522761a3fa10e538",
+      "executable": false
+    },
+    "web-src/src/components/ModalDialogPlayable.vue": {
+      "sha256": "1e2f03f775c213cccb0d6fda9c885d52c3884fb0c45723b786901296c522b991",
+      "executable": false
+    },
+    "web-src/src/components/ModalDialogPlaylist.vue": {
+      "sha256": "dfd44f22993797710432fcec19ff4a05a1c1a0074535a514702cae381ce3925a",
+      "executable": false
+    },
+    "web-src/src/components/ModalDialogPlaylistSave.vue": {
+      "sha256": "a098198ed40a3e6c6b83a3e483b8dae82227435f07846fbf9579fe2fcf97f1ca",
+      "executable": false
+    },
+    "web-src/src/components/ModalDialogPlaylistSpotify.vue": {
+      "sha256": "fecfa29533364704739aa2265e1e1c87430a43d74caef2cc2ec46b4ce9c61343",
+      "executable": false
+    },
+    "web-src/src/components/ModalDialogQueueItem.vue": {
+      "sha256": "47898f6d5941352dab60f65db6c21838fa015e1e21d0f6fb187c9b40e76fe3d1",
+      "executable": false
+    },
+    "web-src/src/components/ModalDialogRemotePairing.vue": {
+      "sha256": "183c1fbd9b45d6389b837c232df2250004b00a98408225a992588ad24c5b4f98",
+      "executable": false
+    },
+    "web-src/src/components/ModalDialogTrack.vue": {
+      "sha256": "88ac3cf6a2614c4d9f0354c10688c47a94451e75cedecf31ce4dbce221a0a820",
+      "executable": false
+    },
+    "web-src/src/components/ModalDialogTrackSpotify.vue": {
+      "sha256": "88e8dc285333e026badc444fad652c137be384c9b7cf8dd06fbdf00571a447d1",
+      "executable": false
+    },
+    "web-src/src/components/ModalDialogUpdate.vue": {
+      "sha256": "9dacbcb0d77925aef349bf847860605069efaf64065b32808a3eb42ef7deda2e",
+      "executable": false
+    },
+    "web-src/src/components/NavbarBottom.vue": {
+      "sha256": "972d53f64a88b2d40d884b0f8e1f619e4bda20964c422cd47f3a78de856fa179",
+      "executable": false
+    },
+    "web-src/src/components/NavbarTop.vue": {
+      "sha256": "3ff4b7ed281eab54448e80f51aca9fb4cacbd5efa3eeadb750d764716614396e",
+      "executable": false
+    },
+    "web-src/src/components/PaneHero.vue": {
+      "sha256": "da9de231745ea7c843d7853605dd44e2d2c1eeb8d4fe69450bd4f3a12d984541",
+      "executable": false
+    },
+    "web-src/src/components/PaneLyrics.vue": {
+      "sha256": "37a9c4164e9a158759b9dc3f04bec26ab2784c8d0042e2e2abc17032a334aad5",
+      "executable": false
+    },
+    "web-src/src/components/PaneTitle.vue": {
+      "sha256": "c9bfe0093987b758c375b05713d65c8c3b030deef6ae889e039fdbfeb07c2e89",
+      "executable": false
+    },
+    "web-src/src/components/TabsAudiobooks.vue": {
+      "sha256": "9898273c332dfa8ca5c3ffbf9c61e28a067aeea5db50a96b003dcf909520032b",
+      "executable": false
+    },
+    "web-src/src/components/TabsMusic.vue": {
+      "sha256": "bf2eb1361a73977090505c12c8a60a606afa4a856fd04e0d338c335bc083bc4b",
+      "executable": false
+    },
+    "web-src/src/components/TabsSearch.vue": {
+      "sha256": "e238544f99f03a1abf000df8c5617e26464fa8d8a2b93a0f368a863e06fe416d",
+      "executable": false
+    },
+    "web-src/src/components/TabsSettings.vue": {
+      "sha256": "1f51a73cf9e4131f04b3f888374a319e20b7d8f4e5799e0ea47f8a4c3592b2ad",
+      "executable": false
+    },
+    "web-src/src/i18n/de.json": {
+      "sha256": "6e402c814d50b15f08af966448b2fe332359a9fa8a3fad2288d7b6cead669ba1",
+      "executable": false
+    },
+    "web-src/src/i18n/en.json": {
+      "sha256": "7421880bf0c77f1b05cd6b20893a80f53812b97de5db124bfb0c45aaabf6f950",
+      "executable": false
+    },
+    "web-src/src/i18n/fr.json": {
+      "sha256": "2ec00bd927ee6d12a17d6e65446375b2559af901807567c0c31b155c928fba8b",
+      "executable": false
+    },
+    "web-src/src/i18n/index.js": {
+      "sha256": "6a8021b6ffb4f5a4fcbb0fc6ec3d0486f1f5b45abfe7a78a9e1d8e0672552207",
+      "executable": false
+    },
+    "web-src/src/i18n/zh-CN.json": {
+      "sha256": "52a1af75aca3b581b1d40050524b1f8583888747bb731b392ef8623fe899264b",
+      "executable": false
+    },
+    "web-src/src/i18n/zh-TW.json": {
+      "sha256": "718ea56ceb0f0d42031434b43b52d6d55867093fd07045774853482bd04baeca",
+      "executable": false
+    },
+    "web-src/src/icons.js": {
+      "sha256": "3958bc0be2ebab934d59f16378a4409c4ffd96fac88876eb0e524ebdb95c43fb",
+      "executable": false
+    },
+    "web-src/src/lib/Audio.js": {
+      "sha256": "6cfc93b87ea467c8688da81de67d72946e3b36f173d8a378fd05520046432c27",
+      "executable": false
+    },
+    "web-src/src/lib/DraggableList.js": {
+      "sha256": "67dbe4aef753ec09e3a1d2fe89ea7542d85a19c025667943c29bbbe32433b83c",
+      "executable": false
+    },
+    "web-src/src/lib/Formatters.js": {
+      "sha256": "f734acff354d95edf317c506809b30f61d632653ff4ba05daff53d056204f749",
+      "executable": false
+    },
+    "web-src/src/lib/GroupedList.js": {
+      "sha256": "1ae34a10954bb96aed2d7f35d0d1bf0c937b34760617191315aa32999b9122cf",
+      "executable": false
+    },
+    "web-src/src/lib/SVGRenderer.js": {
+      "sha256": "8d4aa55d6a995884f657909ab9ba8926b8c1cdb6cdbd4121cce677bf7370ef98",
+      "executable": false
+    },
+    "web-src/src/main.js": {
+      "sha256": "67b3e8ee7919fb4f5d18c4ea1ea813df43df7660ca75b88ef5c5a510ab2542b8",
+      "executable": false
+    },
+    "web-src/src/pages/PageAbout.vue": {
+      "sha256": "b8d186e60178e7beeb00b934f34e1c23ddf5e4eec53ed3fb783e4f030a7a96f5",
+      "executable": false
+    },
+    "web-src/src/pages/PageAlbum.vue": {
+      "sha256": "6e755fef463f2f720607ee7733b11650bce9049a094e918d23a44131cdea1bec",
+      "executable": false
+    },
+    "web-src/src/pages/PageAlbumSpotify.vue": {
+      "sha256": "bdb44b5a13801f522a7298e7c9ebfffbaa4c0ef1deae1b760311b8490e7193d2",
+      "executable": false
+    },
+    "web-src/src/pages/PageAlbums.vue": {
+      "sha256": "42569d91279e5ab024a9fe4d6d5ab50c89efcac5cc031b98931bdb2d082435a7",
+      "executable": false
+    },
+    "web-src/src/pages/PageArtist.vue": {
+      "sha256": "3955bd938ce3da9238367ac2889712ecdf765be7f8966fdd58c5495dfa7a8ff2",
+      "executable": false
+    },
+    "web-src/src/pages/PageArtistSpotify.vue": {
+      "sha256": "0cacdeca0b9c27b04300be4c8f3bc78f9a08094374fe55a876948c2c70fe2c5e",
+      "executable": false
+    },
+    "web-src/src/pages/PageArtistTracks.vue": {
+      "sha256": "6c44e77c9e089f1ae97e4085c35300677d97e008d84120e66df0abf2f5b6f83d",
+      "executable": false
+    },
+    "web-src/src/pages/PageArtists.vue": {
+      "sha256": "6b894fd60769ff8918c11db9a450c1845e7a9621afdc1ea4d4d876ccd609c9e0",
+      "executable": false
+    },
+    "web-src/src/pages/PageAudiobookAlbum.vue": {
+      "sha256": "2f4fb189819aef06079cc1d73f44f18b9b5476adcce7703e070e0117a456d9db",
+      "executable": false
+    },
+    "web-src/src/pages/PageAudiobookAlbumSpotify.vue": {
+      "sha256": "793cdee19fb3a96bba57098d797f13a78eda09e6c0d7bc09c8f27bc76a397b88",
+      "executable": false
+    },
+    "web-src/src/pages/PageAudiobookAlbums.vue": {
+      "sha256": "1bad5df49b1442c32f2040a538efc1a907f5e6b80111259045d1cceaec1ab8bd",
+      "executable": false
+    },
+    "web-src/src/pages/PageAudiobookArtist.vue": {
+      "sha256": "0fd3d4d50cc39f4821056968efd2d5bf0ba5912ac83391c182755ea1953a202d",
+      "executable": false
+    },
+    "web-src/src/pages/PageAudiobookArtists.vue": {
+      "sha256": "d695ee8a22bcb5b9976048d4fa036149b6ec07999d5b039bab78ffbab1913ca6",
+      "executable": false
+    },
+    "web-src/src/pages/PageAudiobookGenres.vue": {
+      "sha256": "8483fd23183f86b8e3d29842670d22cec2319eb31b61361cd8134ec7fceaff3d",
+      "executable": false
+    },
+    "web-src/src/pages/PageAudiobookSpotify.vue": {
+      "sha256": "d73952adcc169e013d86df9ce365322079bc20e1b6f3174eb50e4f49e9393b81",
+      "executable": false
+    },
+    "web-src/src/pages/PageAudiobookSpotifySavedAudiobooks.vue": {
+      "sha256": "544c21109d030b7ff670a53056c12e2777aa5c866c7a3dafe80b3c3cd1c8870d",
+      "executable": false
+    },
+    "web-src/src/pages/PageComposerAlbums.vue": {
+      "sha256": "bb460d8eb33a1f63193cc876380057c97fdf1e2465c1e0c0d8bed531d0aee633",
+      "executable": false
+    },
+    "web-src/src/pages/PageComposerTracks.vue": {
+      "sha256": "007cc0b14e6a7a61f5f7c964be263436b2d838b1c19e7140af06929b227b6aea",
+      "executable": false
+    },
+    "web-src/src/pages/PageComposers.vue": {
+      "sha256": "3af0ba029c2fe0be5df4cd4a2c7770eaa607f035d17102fc1624e949ad79c93b",
+      "executable": false
+    },
+    "web-src/src/pages/PageFiles.vue": {
+      "sha256": "0117d4803f03cd1e95aa5249ce9b22b237e6b080274e85c5ccf48ec2d56e34cf",
+      "executable": false
+    },
+    "web-src/src/pages/PageGenreAlbums.vue": {
+      "sha256": "33b4224600094b83231de266c0f3e36e1f189470fd8969d50ff7de265591a7d6",
+      "executable": false
+    },
+    "web-src/src/pages/PageGenreTracks.vue": {
+      "sha256": "459bf782e1b34528dfd7cc09d29f879e14012c2922e3c8675cf56909f02f12ec",
+      "executable": false
+    },
+    "web-src/src/pages/PageGenres.vue": {
+      "sha256": "fac6c2cd5df21adc8efef1dc4e28da67805f016aae2d093cc4a161e21ce40f5e",
+      "executable": false
+    },
+    "web-src/src/pages/PageMusic.vue": {
+      "sha256": "4bc1ba19d557ca0ebf976a94509f2d4e461f8842332ee31f1d34f81bb79c99c1",
+      "executable": false
+    },
+    "web-src/src/pages/PageMusicRecentlyAdded.vue": {
+      "sha256": "d57481d14d9f34f5f659cf1774728ef2d557a9ef4c37aeee91e29a9704343332",
+      "executable": false
+    },
+    "web-src/src/pages/PageMusicRecentlyPlayed.vue": {
+      "sha256": "652a49250fce14e2354aa9b72076a71e284f3703b94a1f36fa097f80663b8fbf",
+      "executable": false
+    },
+    "web-src/src/pages/PageMusicSpotify.vue": {
+      "sha256": "2e7d8e6d3616eb3e0a9930554ad81142134efc75282114943c3819785a345d6d",
+      "executable": false
+    },
+    "web-src/src/pages/PageMusicSpotifyFeaturedPlaylists.vue": {
+      "sha256": "ce3b8bff2c17301e032cc7abf342eba1cd3c345a83ab321b8a21703b9de508a1",
+      "executable": false
+    },
+    "web-src/src/pages/PageMusicSpotifyFollowedArtists.vue": {
+      "sha256": "5901052af83a973b9f489f88ef5f361f500ff68debc31fe1dc6f1f9929552bc4",
+      "executable": false
+    },
+    "web-src/src/pages/PageMusicSpotifyNewReleases.vue": {
+      "sha256": "f5cf3685bd6bc64924a5bffb09f3b7200bda66557115e9200b78ee393f7e3f95",
+      "executable": false
+    },
+    "web-src/src/pages/PageOutputs.vue": {
+      "sha256": "d948d3514e39301c9cd2f0df50bda853c2ecae1ecde7ee5ebda135edb92742c8",
+      "executable": false
+    },
+    "web-src/src/pages/PagePlayer.vue": {
+      "sha256": "3f547c3a7d08158ef89bafb5d84250e809381f50e053e1cf48ddb0d84341c5f8",
+      "executable": false
+    },
+    "web-src/src/pages/PagePlaylistFolder.vue": {
+      "sha256": "3f837e7e8b1367d7439d22251d516359becaede26a18bf3157be59d99acb0aa7",
+      "executable": false
+    },
+    "web-src/src/pages/PagePlaylistTracks.vue": {
+      "sha256": "19143fbcb7de0a0381c5b92fc9b00c0ace66686497bfb1532b9283ed21397101",
+      "executable": false
+    },
+    "web-src/src/pages/PagePlaylistTracksSpotify.vue": {
+      "sha256": "10d101e4c91823df56de6c8a71bd2ddcb8717120535a34fb7d44b65b2d9af036",
+      "executable": false
+    },
+    "web-src/src/pages/PagePodcast.vue": {
+      "sha256": "4e52bf68f96dc6d0ceeb255e76fe45ea77a553d049c4404a7ffd0245a07ac274",
+      "executable": false
+    },
+    "web-src/src/pages/PagePodcasts.vue": {
+      "sha256": "17573c6973a27a85470b2170260dc1ca4b524d8b66fca908e588fd19fd800199",
+      "executable": false
+    },
+    "web-src/src/pages/PageQueue.vue": {
+      "sha256": "8b1c9b76d38c6f8dc622746c7027449fd235e844b2cd6381fdc9524ff7d2bbc8",
+      "executable": false
+    },
+    "web-src/src/pages/PageRadioStreams.vue": {
+      "sha256": "9df3c705f51d2acea0127c6376d65bbc15716c92eab32da8f841392fc0150ffd",
+      "executable": false
+    },
+    "web-src/src/pages/PageSearchLibrary.vue": {
+      "sha256": "8caf69e245be637ced326aa123069e64dda4163858df063e0300fa20efd49540",
+      "executable": false
+    },
+    "web-src/src/pages/PageSearchSpotify.vue": {
+      "sha256": "b80c95bf2aa9502e50aba64040889750352be3f2831610122e3f73905ca542d4",
+      "executable": false
+    },
+    "web-src/src/pages/PageSettingsArtwork.vue": {
+      "sha256": "c50b84f6b034560162a31b79b0e2eec00f1cfc7a288737ecd83b94e6eed95886",
+      "executable": false
+    },
+    "web-src/src/pages/PageSettingsDevices.vue": {
+      "sha256": "dfa367ecf3b9d0ce5b43a8dce169c32442f834f3c60507c968489aa8afe2f421",
+      "executable": false
+    },
+    "web-src/src/pages/PageSettingsOnlineServices.vue": {
+      "sha256": "6d917fc6d6ea18172e52ced03f3b721f8792b90cc421f831fd7bfe4ef7a195fe",
+      "executable": false
+    },
+    "web-src/src/pages/PageSettingsWebinterface.vue": {
+      "sha256": "82e95babb6084c81b48a0d7a7ed1f0a0949c794f85f4ff1cdf0456b3221aec9d",
+      "executable": false
+    },
+    "web-src/src/router/index.js": {
+      "sha256": "8733b131724451e0985da1e0531566a920af54e6ebc6b46d85f48cb5e500d583",
+      "executable": false
+    },
+    "web-src/src/stores/configuration.js": {
+      "sha256": "97b368bf7e625a22bd234b09c6e0483888659675fa85a369b83ca19125c8dcc5",
+      "executable": false
+    },
+    "web-src/src/stores/library.js": {
+      "sha256": "65fad4a28c818804c5c6b0028e1a097440b0ddb23dbccf1085a83c24796454b5",
+      "executable": false
+    },
+    "web-src/src/stores/notifications.js": {
+      "sha256": "9285500a815e047c6c0ec2ba6b6b11cd9893cc7692f80a681ead1c5b5150dea8",
+      "executable": false
+    },
+    "web-src/src/stores/outputs.js": {
+      "sha256": "97d4152000b73f2478a0fce44fba864289284b52a7372da96769cc8cc725deca",
+      "executable": false
+    },
+    "web-src/src/stores/player.js": {
+      "sha256": "4a63d361ac8fbfac7ff00a8a06e5a761169f81d46e6a4deb009fddfa97701a10",
+      "executable": false
+    },
+    "web-src/src/stores/queue.js": {
+      "sha256": "27e1874f84c66f4ba5ee02ac20989d17061819e805c1d54ac0d8bbe95cb29bb8",
+      "executable": false
+    },
+    "web-src/src/stores/remotes.js": {
+      "sha256": "b325a2113e2628207e24d3cbed877d96baab7fa85d0153404e6eaf2f656caedb",
+      "executable": false
+    },
+    "web-src/src/stores/search.js": {
+      "sha256": "d19a09744f653409d1ea660b263a07aac00c47ae371c9d36554df90302113234",
+      "executable": false
+    },
+    "web-src/src/stores/services.js": {
+      "sha256": "3b5710323ceb8ac85dd8b1c1e71de21215eea690b58ce24709d43805a168b7a2",
+      "executable": false
+    },
+    "web-src/src/stores/settings.js": {
+      "sha256": "426354ee12d390be1c0bf43e7f505933a480016c19a258ab413b1f3227b9c450",
+      "executable": false
+    },
+    "web-src/src/stores/ui.js": {
+      "sha256": "95a04456d0d29ed299821d018721a0445aeffea78f357d3d383ab0c81129d99f",
+      "executable": false
+    },
+    "web-src/src/styles.scss": {
+      "sha256": "20891dc2194bc41bd8252232c7460e09bc663b0bee30099c5dfccb695b363d9b",
+      "executable": false
+    },
+    "web-src/src/templates/ContentWithHeading.vue": {
+      "sha256": "97f005965f0fa98f5a868d99f56305102ee5ff2f07159f5d1b2cf8e409c207b5",
+      "executable": false
+    },
+    "web-src/src/templates/ContentWithHero.vue": {
+      "sha256": "113c1ecdf5dfefff790e94f1698a1d3c5c101ad8d08c44181bd178eda698f966",
+      "executable": false
+    },
+    "web-src/src/templates/ContentWithSearch.vue": {
+      "sha256": "a8f4cfc6bbd6b5541176ee51b9061034bfb02ac79c2a67d02696f9a87228acaa",
+      "executable": false
+    },
+    "web-src/vite.config.js": {
+      "sha256": "ef9c86fb513b622aaa885f2cd8e3f4edd695f9e3cdec5b9ff6337692318a0f2b",
+      "executable": false
+    }
+  }
+}

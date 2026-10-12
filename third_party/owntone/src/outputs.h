@@ -125,6 +125,8 @@ struct output_device
   int volume;
   int relvol;
   int max_volume;
+  // Control error is separate from connected/streaming media state.
+  bool volume_control_failed;
 
   // Quality of audio output
   struct media_quality quality;

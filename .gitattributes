@@ -5,3 +5,6 @@ docs/images/** binary
 *.js text eol=lf
 *.mjs text eol=lf
 *.sh text eol=lf
+
+# Unified patch context must retain upstream whitespace.
+engine/patches/*.patch -whitespace

@@ -33,6 +33,7 @@ extension DALIStore {
         case .idle: return "Ready"
         case .starting: return "Connecting"
         case .live: return "Live"
+        case .muted: return "Muted"
         case .catchingUp: return "Catching up"
         case .speakerOut: return "Speaker out"
         case .error: return "Needs you"
@@ -42,7 +43,7 @@ extension DALIStore {
     var statusTone: StatusDot.Tone {
         switch roomChrome {
         case .live, .catchingUp, .starting: return .live
-        case .idle: return .idle
+        case .idle, .muted: return .idle
         case .speakerOut, .error: return .trouble
         }
     }
