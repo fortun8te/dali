@@ -90,7 +90,34 @@ private struct CaptureLifecycleTests {
         try await signalSnapshotsDistinguishMuteSilenceAndMissingMeasurements()
         try await stopCannotWaitForHardware()
         try await failedStartCanRetryAndSilenceIsPaced()
+        try await slowTapStartIsNotMistakenForAStall()
         print("PASS: production CaptureController lifecycle, stale conversion, mute/rebuild/source, stop latency and paced silence")
+    }
+
+    /// The stall clock used to be seeded before the HAL work and read straight
+    /// after it, so a tap that took longer than the limit to START was rebuilt
+    /// the instant it returned (the field showed exactly "no tap callbacks for
+    /// 4s" with the first bytes). It must count from when the tap went live, and
+    /// a tap that then really stays silent must still be rebuilt.
+    static func slowTapStartIsNotMistakenForAStall() async throws {
+        let fixture = try PipeFixture(), factory = TapFactory()
+        factory.configure = { tap in tap.onStart = { Thread.sleep(forTimeInterval: 0.6) } }
+        let events = Mutex<[String]>([])
+        let capture = CaptureController(makeTap: { factory.make() }, observeWake: false,
+                                        stallRebuildAfter: 0.4)
+        capture.onEvent = { message in events.withLock { $0.append(message) } }
+        try await capture.startAsync(fifoPath: fixture.path)
+        try await Task.sleep(for: .milliseconds(150))
+        try expect(!events.withLock { $0.contains { $0.hasPrefix("capture_recovery") } },
+                   "A slow tap start was rebuilt as if its callbacks had stalled")
+        try expect(capture.secondsSinceLastBuffer < 0.4,
+                   "Start time counted as time without callbacks: \(capture.secondsSinceLastBuffer)")
+        try expect(factory.count == 1, "Slow start produced a second tap")
+        // Positive control: this tap never calls back, so it is rebuilt once the
+        // limit has passed since it went live.
+        try await eventually { events.withLock { $0.contains { $0.hasPrefix("capture_recovery") } } }
+        try await eventually { factory.count == 2 }
+        capture.stop()
     }
 
     static func stopWhileStarting() async throws {

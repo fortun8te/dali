@@ -36,8 +36,10 @@ final class CaptureController: @unchecked Sendable {
     private let observeWake: Bool
     private let beforePublish: (@Sendable () -> Void)?
     init(makeTap: @escaping @Sendable () -> any CaptureTap = { ProcessTap() },
-         observeWake: Bool = true, beforePublish: (@Sendable () -> Void)? = nil) {
+         observeWake: Bool = true, beforePublish: (@Sendable () -> Void)? = nil,
+         stallRebuildAfter: Double = 4.0) {
         self.makeTap = makeTap; self.observeWake = observeWake; self.beforePublish = beforePublish
+        self.stallRebuildAfter = stallRebuildAfter
     }
     private var desiredMasterGain = 1.0
     func setMasterGain(_ value: Double) {
@@ -84,6 +86,17 @@ final class CaptureController: @unchecked Sendable {
     // slow-building stutters/stops).
     private var silenceTimer: DispatchSourceTimer?
     private var lastBufferMono = 0.0             // monotonic secs of last tap buffer, 0 = none yet
+    /// When the current tap finished starting. `lastBufferMono` is seeded BEFORE
+    /// the HAL work begins (it also paces the pipe's silence), and creating the
+    /// tap and aggregate device can take several seconds on the first start after
+    /// launch or wake. The stall watchdogs count from here at the earliest, so a
+    /// slow-but-healthy start is not read as "no callbacks for 4 s" and answered
+    /// with a second, redundant tap rebuild (seen 2026-10-11 15:15 and 17:25, each
+    /// logging exactly "no tap callbacks for 4s" as the start returned).
+    private var tapLiveMono = 0.0
+    /// Seconds without a callback before the first stall rebuild (doubles on the
+    /// second). A parameter only so tests need not wait the production 4 s.
+    private let stallRebuildAfter: Double
     private var lastFillMono = 0.0               // monotonic secs of last silence top-up
     private var feedingSilence = false
     // (The Varispeed resampler is owned by the consumer thread's handler closure,
@@ -229,7 +242,13 @@ final class CaptureController: @unchecked Sendable {
     var secondsSinceLastBuffer: Double {
         lock.lock(); defer { lock.unlock() }
         guard lastBufferMono > 0 else { return 0 }
-        return max(0, Self.monoNow() - lastBufferMono)
+        return max(0, Self.monoNow() - callbackClockStart)
+    }
+
+    /// Where the "no callbacks" clock starts: the later of the last buffer and the
+    /// moment the live tap finished starting. Caller holds `lock`.
+    private var callbackClockStart: Double {
+        tap != nil ? max(lastBufferMono, tapLiveMono) : lastBufferMono
     }
 
     /// One consistent reading for the room canvas: the peak of each band since
@@ -414,6 +433,7 @@ final class CaptureController: @unchecked Sendable {
                 lock.unlock(); throw CancellationError()
             }
             tap = candidate
+            tapLiveMono = Self.monoNow()
             startSilenceKeepaliveLocked(session: session)
             lock.unlock()
             installWakeObserver()
@@ -491,7 +511,9 @@ final class CaptureController: @unchecked Sendable {
             guard _isRunning, activeToken == token, sessionGeneration == session else {
                 lock.unlock(); candidate.stop(); return false
             }
-            tap = candidate; lock.unlock()
+            tap = candidate
+            tapLiveMono = Self.monoNow()
+            lock.unlock()
             return true
         } catch {
             candidate.stop()
@@ -873,10 +895,11 @@ final class CaptureController: @unchecked Sendable {
             // here after 4 s, then 8 s; after that DALIStore's own >10 s
             // watchdog escalates to a full stream restart.
             var stallReason: String?
+            let silentFor = now - callbackClockStart
             if tap != nil, !recoveryScheduled, stallAttempts < 2,
-               stalled > 4.0 * pow(2.0, Double(stallAttempts)) {
+               silentFor > stallRebuildAfter * pow(2.0, Double(stallAttempts)) {
                 stallAttempts += 1
-                stallReason = String(format: "no tap callbacks for %.0fs", stalled)
+                stallReason = String(format: "no tap callbacks for %.0fs", silentFor)
             }
             lock.unlock()
             if let stallReason { requestRecovery(stallReason, after: 0, session: session) }
@@ -895,6 +918,7 @@ final class CaptureController: @unchecked Sendable {
         recoveryScheduled = false; _isRunning = false
         lastFillMono = 0
         lastBufferMono = 0
+        tapLiveMono = 0
         feedingSilence = false
         bytesWritten = 0
         targetRatio = 1.0

@@ -43,6 +43,26 @@ public final class RoomSessionController {
         case reset(Set<String>)
         case reassert(attempt: Int, missing: Set<String>)
         case hardRejoin(Set<String>)
+
+        /// Which recovery step ran. The app logged `String(describing:)` of the
+        /// event under the key "event", which the log writer then overwrote with
+        /// the record's own name, so every startup_recovery line in dali-ai.jsonl
+        /// said only that a recovery happened, never which one.
+        public var step: String {
+            switch self {
+            case .reset: "reset"
+            case .reassert(let attempt, _): "reassert\(attempt)"
+            case .hardRejoin: "hard_rejoin"
+            }
+        }
+
+        /// The outputs that had not come up when this step began, sorted.
+        public var missingIDs: [String] {
+            switch self {
+            case .reset(let missing), .hardRejoin(let missing): missing.sorted()
+            case .reassert(_, let missing): missing.sorted()
+            }
+        }
     }
 
     /// Passed to operations with their own awaits, such as Spotify setup or tap

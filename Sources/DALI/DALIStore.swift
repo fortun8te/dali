@@ -7,6 +7,7 @@ import Foundation
 import SwiftUI
 import Observation
 import Network
+import SystemConfiguration
 
 enum StreamPhase: Equatable {
     case idle
@@ -868,6 +869,7 @@ final class DALIStore {
             return
         }
 
+        logLaunch()
         Task { await bootEngine() }
         reapEngineOnQuit(confPath: cfg.confFile.path)
         startIdleGuard()
@@ -950,18 +952,44 @@ final class DALIStore {
 
     // MARK: engine lifecycle
 
+    /// One line a person (or an AI) can read to answer "which launch was this
+    /// and how long did it take to become ready". The debug log carries only the
+    /// time of day, so the date and build go here, once per launch.
+    private func logLaunch() {
+        let info = Bundle.main.infoDictionary
+        let version = info?["CFBundleShortVersionString"] as? String ?? "dev"
+        let build = info?["CFBundleVersion"] as? String ?? "?"
+        let pid = getpid()
+        dlog("launch \(ISO8601DateFormatter().string(from: Date())) v\(version) build \(build) pid \(pid)")
+        aiEvent("app_launch", fields: ["version": version, "build": build, "pid": Int(pid)])
+    }
+
+    private var launchToReadyMs: Int? {
+        StartupTiming.processStart().map { StartupTiming.milliseconds(from: $0) }
+    }
+
     private func bootEngine() async {
         do {
             try await supervisor.start()
             lastEngineStartAt = Date()
+            let engineMs = launchToReadyMs
             ptpDegraded = await supervisor.ptpAvailable == false
             if ptpDegraded { dlog("PTP degraded — front/back sync may drift (NTP-only)") }
             await refreshSpeakers()
+            let found = speakers.filter { $0.available }.count
+            if let engineMs, let total = launchToReadyMs {
+                dlog("ready: engine answering \(StartupTiming.label(milliseconds: engineMs)) after launch, \(found) speaker(s) listed after \(StartupTiming.label(milliseconds: total))")
+                aiEvent("engine_ready", fields: ["engine_ms": engineMs, "ready_ms": total,
+                                                 "speakers_listed": found, "ptp": !ptpDegraded])
+            }
             await reconcileEngineState()
             await loadLibrary()
         } catch {
             // A late boot failure must not overwrite a session the user has
             // already started (startStream boots the engine itself if needed).
+            dlog("engine failed to start \(launchToReadyMs.map { StartupTiming.label(milliseconds: $0) } ?? "?") after launch: \(error)")
+            aiEvent("engine_start_failed", level: "error",
+                    fields: ["ms": launchToReadyMs ?? -1, "error": String(describing: error)])
             guard !phase.isOn else { return }
             phase = .error("The audio engine could not start.\n\(error)")
         }
@@ -1156,7 +1184,11 @@ final class DALIStore {
     /// the main actor every health poll — cache it.
     private func hostName() -> String {
         if let c = hostNameCache, Date().timeIntervalSince(c.at) < 300 { return c.name }
-        let name = Host.current().localizedName ?? ""
+        // The computer name comes straight from the system configuration store:
+        // local, instant, and identical to `Host.current().localizedName` on
+        // this Mac. Host.current() stays as the fallback only.
+        let name = (SCDynamicStoreCopyComputerName(nil, nil) as String?)
+            ?? Host.current().localizedName ?? ""
         hostNameCache = (name, Date())
         return name
     }
@@ -1239,6 +1271,7 @@ final class DALIStore {
         resolveSavedSource()
         let sessionSource = source
         let precedingTeardown = teardownTask
+        let requestedAt = Date()
         dlog("start requested (\(reason))")
         sessionMembership.reset()
         streamGeneration += 1
@@ -1337,7 +1370,7 @@ final class DALIStore {
             pipeTrackURI: { try await self.api.pipeTrackURI(named: "beam.pipe") },
             playPipe: { try await self.api.playPipe(uri: $0) },
             didTearDown: { self.lastTeardownAt = Date() },
-            event: { self.aiEvent("startup_recovery", level: "warn", fields: ["event": String(describing: $0)]) }
+            event: { self.noteStartupRecovery($0) }
         )
         Task { @MainActor in
             guard phase == .starting, gen == streamGeneration else { return }
@@ -1354,17 +1387,41 @@ final class DALIStore {
                 enforceZeroOffsets(force: true)
                 phase = .streaming
                 startHealthLoop(); startLevelLoop(); startFlightRecorder()
+                let readyMs = StartupTiming.milliseconds(from: requestedAt)
+                dlog("stream live \(StartupTiming.label(milliseconds: readyMs)) after start (\(reason)); \(result.readyIDs.count) of \(result.plan.ids.count) speaker(s) up")
+                aiEvent("stream_ready", fields: ["ms": readyMs, "reason": reason,
+                                                 "ready": result.readyIDs.count, "wanted": result.plan.ids.count])
                 await fadeIn()
             } catch let error as ProcessTap.TapError {
                 guard gen == streamGeneration else { return }
+                noteStartFailure(error, after: requestedAt, reason: reason)
                 markHealth(of: sessionSpeakers().map(\.id), .off)
                 phase = .error("DALI needs permission to capture your Mac's audio. (\(error.stage))")
             } catch {
                 guard gen == streamGeneration else { return }
+                noteStartFailure(error, after: requestedAt, reason: reason)
                 markHealth(of: sessionSpeakers().map(\.id), .off)
                 phase = .error("Could not start the stream.\n\(error.localizedDescription)")
             }
         }
+    }
+
+    /// A failed start used to leave nothing in either log (`stream_start` is
+    /// written only once a start has succeeded, and the V2 recovery steps wrote
+    /// no readable line), so a 60-second spinner that ended in an error could
+    /// not be reconstructed afterwards.
+    private func noteStartFailure(_ error: Error, after requestedAt: Date, reason: String) {
+        let ms = StartupTiming.milliseconds(from: requestedAt)
+        dlog("start failed after \(StartupTiming.label(milliseconds: ms)) (\(reason)): \(error.localizedDescription)")
+        aiEvent("stream_start_failed", level: "error",
+                fields: ["ms": ms, "reason": reason, "error": String(describing: error)])
+    }
+
+    private func noteStartupRecovery(_ event: RoomSessionController.Event) {
+        let names = event.missingIDs.map { id in speakers.first { $0.id == id }?.name ?? id }
+        dlog("startup recovery \(event.step): not ready yet: \(names.joined(separator: ", "))")
+        aiEvent("startup_recovery", level: "warn",
+                fields: ["step": event.step, "missing": names])
     }
 
     private var teardownTask: Task<Void, Never>?
