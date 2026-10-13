@@ -170,17 +170,20 @@ struct SpeakerLoudnessAdjustment: View {
                 Text("Adjustment: \(safeInt((speaker.gain * 100).rounded()))% (fixed)")
                     .font(.caption).foregroundStyle(Color.paper62)
                 Spacer(minLength: 0)
-                Button("Leveling") { store.setLevelCurveOn(true, for: speaker) }
-                    .buttonStyle(.plain).font(.captionMedium)
-                    .foregroundStyle(Color.paper)
-                    .accessibilityLabel("Use \(speaker.name) leveling curve again")
+                // Reset sits left of the switch: the "Fixed" button that was just pressed
+                // lived at the right edge, so a second click there must never reset the gain.
                 if speaker.gain != 1 {
                     Button("Reset") { store.setGain(1, for: speaker) }
                         .buttonStyle(.plain).font(.captionMedium)
                         .foregroundStyle(Color.paper)
                         .accessibilityLabel("Reset \(speaker.name) loudness adjustment")
                         .help("Set this speaker's fixed adjustment to 100%")
+                        .padding(.trailing, Space.m)
                 }
+                Button("Leveling") { store.setLevelCurveOn(true, for: speaker) }
+                    .buttonStyle(.plain).font(.captionMedium)
+                    .foregroundStyle(Color.paper)
+                    .accessibilityLabel("Use \(speaker.name) leveling curve again")
             }
             .frame(height: 20)
         } else if speaker.gain != 1 {
