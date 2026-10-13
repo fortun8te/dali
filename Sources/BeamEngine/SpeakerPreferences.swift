@@ -30,6 +30,23 @@ public struct SpeakerPreferences {
                      fallback: 1, range: 0.25...4)
     }
 
+    /// The master-volume curve available for a speaker: a saved
+    /// `dali.curve.<name>` (percent per Mac volume step 1...n) if valid, else the
+    /// built-in measured one. Reading never writes or removes anything.
+    public func levelCurve(name: String) -> SpeakerLevelCurve? {
+        if let saved = defaults.array(forKey: "dali.curve.\(name)") as? [Double],
+           let curve = SpeakerLevelCurve(percentPerStep: saved) {
+            return curve
+        }
+        return SpeakerLevelCurve.builtIn(forSpeakerNamed: name)
+    }
+
+    /// Whether the curve (rather than the fixed saved gain) drives this speaker.
+    /// On unless the user switched it off with `dali.curveOn.<name>`.
+    public func levelCurveActive(name: String) -> Bool {
+        defaults.object(forKey: "dali.curveOn.\(name)") as? Bool ?? true
+    }
+
     /// Keep selected speakers visible across app relaunches even when discovery
     /// has not found them yet. A missing speaker must not make the room look healthy.
     public var rememberedNames: Set<String> {

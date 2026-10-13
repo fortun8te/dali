@@ -18,8 +18,8 @@ struct RoomCard: View {
                     if let back = store.back { PairRow(speaker: back, title: "Back") }
                 }
                 .frame(height: PanelMetrics.rowHeight * 2
-                    + SpeakerLoudnessAdjustment.height(for: store.front)
-                    + SpeakerLoudnessAdjustment.height(for: store.back), alignment: .top)
+                    + SpeakerLoudnessAdjustment.height(for: store.front, in: store)
+                    + SpeakerLoudnessAdjustment.height(for: store.back, in: store), alignment: .top)
                 .padding(.horizontal, Space.m + 2)
                 .padding(.bottom, Space.s)
             } else {
@@ -98,17 +98,52 @@ struct PairRow: View {
     }
 }
 
-/// Saved calibration must be visible where the user controls speaker volume.
+/// Calibration must be visible where the user controls speaker volume. A speaker
+/// on a master-volume curve shows the percentage it has at the current Mac volume
+/// and can switch to its fixed saved adjustment without losing either.
 struct SpeakerLoudnessAdjustment: View {
     @Environment(DALIStore.self) private var store
     let speaker: RoomSpeaker
 
-    static func height(for speaker: RoomSpeaker?) -> CGFloat {
-        speaker.map { $0.gain != 1 ? 20 : 0 } ?? 0
+    @MainActor static func height(for speaker: RoomSpeaker?, in store: DALIStore) -> CGFloat {
+        speaker.map {
+            store.followsLevelCurve($0) || ($0.levelCurve != nil && !$0.levelCurveOn) || $0.gain != 1 ? 20 : 0
+        } ?? 0
     }
 
     var body: some View {
-        if speaker.gain != 1 {
+        if store.followsLevelCurve(speaker) {
+            HStack(spacing: Space.s) {
+                Text("Leveling: \(safeInt((store.effectiveGain(speaker) * 100).rounded()))% at this volume")
+                    .font(.caption).foregroundStyle(Color.paper62)
+                    .help("Follows the Mac volume step by step, smoothly between steps")
+                Spacer(minLength: 0)
+                Button("Fixed") { store.setLevelCurveOn(false, for: speaker) }
+                    .buttonStyle(.plain).font(.captionMedium)
+                    .foregroundStyle(Color.paper)
+                    .accessibilityLabel("Use \(speaker.name) fixed loudness adjustment instead of the leveling curve")
+                    .help("Use the saved fixed adjustment (\(safeInt((speaker.gain * 100).rounded()))%) instead")
+            }
+            .frame(height: 20)
+        } else if speaker.levelCurve != nil && !speaker.levelCurveOn {
+            HStack(spacing: Space.s) {
+                Text("Adjustment: \(safeInt((speaker.gain * 100).rounded()))% (fixed)")
+                    .font(.caption).foregroundStyle(Color.paper62)
+                Spacer(minLength: 0)
+                Button("Leveling") { store.setLevelCurveOn(true, for: speaker) }
+                    .buttonStyle(.plain).font(.captionMedium)
+                    .foregroundStyle(Color.paper)
+                    .accessibilityLabel("Use \(speaker.name) leveling curve again")
+                if speaker.gain != 1 {
+                    Button("Reset") { store.setGain(1, for: speaker) }
+                        .buttonStyle(.plain).font(.captionMedium)
+                        .foregroundStyle(Color.paper)
+                        .accessibilityLabel("Reset \(speaker.name) loudness adjustment")
+                        .help("Set this speaker's fixed adjustment to 100%")
+                }
+            }
+            .frame(height: 20)
+        } else if speaker.gain != 1 {
             HStack(spacing: Space.s) {
                 Text("Adjustment: \(safeInt((speaker.gain * 100).rounded()))%")
                     .font(.caption).foregroundStyle(Color.paper62)

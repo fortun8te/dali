@@ -30,6 +30,8 @@ struct RoomSpeaker: Identifiable, Equatable {
     var relVolume: Double   // 0...100, the speaker's own slider
     var gain: Double = 1.0  // calibration multiplier (0.25...4): balances an
                             // amp+passive front against a self-amped Sonos
+    var levelCurve: SpeakerLevelCurve? = nil  // measured gain by Mac volume step, if any
+    var levelCurveOn: Bool = true             // curve (true) or the fixed `gain` above drives it
     var offsetMs: Int = 0   // sync trim (±ms, positive = plays later); engine-persisted
     var health: Health
     var available: Bool = true
@@ -1138,6 +1140,8 @@ final class DALIStore {
                 enabled: wasEnabled,
                 relVolume: preferences.volume(name: o.name),
                 gain: preferences.gain(name: o.name),
+                levelCurve: preferences.levelCurve(name: o.name),
+                levelCurveOn: preferences.levelCurveActive(name: o.name),
                 offsetMs: o.offset_ms ?? 0,   // engine persists this in its own DB
                 health: existing?.health ?? .off))
         }
@@ -1154,7 +1158,10 @@ final class DALIStore {
             list.append(RoomSpeaker(
                 id: "unavailable:\(name)", name: name, type: "AirPlay", kind: kind,
                 enabled: enabled, relVolume: preferences.volume(name: name),
-                gain: preferences.gain(name: name), health: enabled && phase.isOn ? .trouble : .off,
+                gain: preferences.gain(name: name),
+                levelCurve: preferences.levelCurve(name: name),
+                levelCurveOn: preferences.levelCurveActive(name: name),
+                health: enabled && phase.isOn ? .trouble : .off,
                 available: false))
         }
         // Front, back, then extras alphabetically.
@@ -1841,6 +1848,15 @@ final class DALIStore {
         scheduleVolumePush()
     }
 
+    /// Switch a speaker between its master-volume curve and its fixed saved gain.
+    /// Neither value is changed or erased; only which one applies.
+    func setLevelCurveOn(_ on: Bool, for speaker: RoomSpeaker) {
+        guard let idx = speakers.firstIndex(where: { $0.id == speaker.id }) else { return }
+        speakers[idx].levelCurveOn = on
+        preferences.set(on, forKey: "dali.curveOn.\(speaker.name)")
+        scheduleVolumePush()
+    }
+
     /// Hard ceiling for what any speaker is ever sent (big speakers, small room).
     var volumeLimit: Double {
         didSet {
@@ -2154,9 +2170,27 @@ final class DALIStore {
             $0.kind != .extra || $0.enabled
                 || sessionMembership.contains(name: $0.name, enabled: false, primary: false)
         }.map {
-            RoomVolumeSpeaker(id: $0.id, slider: $0.relVolume, gain: $0.gain, enabled: $0.enabled)
-        }, ceiling: volumeLimit, systemMaster: !playerMode && source == .system ? systemVolume : nil,
-           muted: roomMutedByCut)
+            RoomVolumeSpeaker(id: $0.id, slider: $0.relVolume, gain: $0.gain, enabled: $0.enabled,
+                              curve: $0.levelCurveOn ? $0.levelCurve : nil)
+        }, ceiling: volumeLimit, systemMaster: roomMaster, muted: roomMutedByCut)
+    }
+
+    /// The Mac master volume when it is what drives the room (system-audio mode).
+    private var roomMaster: Double? { !playerMode && source == .system ? systemVolume : nil }
+
+    /// The adjustment actually applied to a speaker right now: its curve value at
+    /// the current Mac volume, or its fixed saved gain.
+    func effectiveGain(_ speaker: RoomSpeaker) -> Double {
+        RoomVolumePolicy.effectiveGain(
+            for: RoomVolumeSpeaker(id: speaker.id, slider: speaker.relVolume, gain: speaker.gain,
+                                   enabled: speaker.enabled,
+                                   curve: speaker.levelCurveOn ? speaker.levelCurve : nil),
+            systemMaster: roomMaster)
+    }
+
+    /// True while a level curve (not the fixed gain) is what the speaker follows.
+    func followsLevelCurve(_ speaker: RoomSpeaker) -> Bool {
+        speaker.levelCurveOn && speaker.levelCurve != nil && roomMaster != nil
     }
 
     func effectiveVolume(_ speaker: RoomSpeaker) -> Int { roomVolumePlan.hardware[speaker.id] ?? 0 }

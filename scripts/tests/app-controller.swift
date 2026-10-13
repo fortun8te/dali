@@ -270,6 +270,58 @@ struct AppControllerRegression {
         try expect(reset.ratio == 1 && timing.refill.sessionAdded == 0,
                "explicit new-session reset clears timing state at unity")
 
+        // Per-master-step leveling of the DALI speaker, through the production store:
+        // discovery attaches the curve, the plan uses it, saved settings stay untouched.
+        do {
+            let curveSuite = "DALI.AppControllerTest.curve.\(UUID().uuidString)"
+            let curveDefaults = UserDefaults(suiteName: curveSuite)!
+            defer { curveDefaults.removePersistentDomain(forName: curveSuite) }
+            for version in ["v2", "v3", "v4", "v5", "v8", "v9", "v10", "volumeLimit20"] {
+                curveDefaults.set(true, forKey: "dali.migrated.\(version)")
+            }
+            let saved: [String: Any] = [
+                "dali.frontName": "MICHAEL D", "dali.backName": "MICHAEL S",
+                "dali.vol.MICHAEL D": 100.0, "dali.vol.MICHAEL S": 100.0,
+                "dali.gain.MICHAEL D": 1.343581627155172, "dali.gain.MICHAEL S": 1.0,
+                "dali.volumeLimit": 100.0,
+            ]
+            for (key, value) in saved { curveDefaults.set(value, forKey: key) }
+            let curveStore = DALIStore(defaults: curveDefaults, backendEnabled: false,
+                                       volumeWrite: { _, _ in .applied })
+            let outputs = try JSONDecoder().decode([Output].self, from: Data(#"[{"id":"d","name":"MICHAEL D","type":"AirPlay 2","selected":true,"connected":true,"streaming":true,"volume":10},{"id":"s","name":"MICHAEL S","type":"AirPlay 2","selected":true,"connected":true,"streaming":true,"volume":10}]"#.utf8))
+            curveStore.applyDiscoveredSpeakers(outputs)
+            curveStore.phase = .streaming
+            let dali = curveStore.speakers.first { $0.name == "MICHAEL D" }!
+            let other = curveStore.speakers.first { $0.name == "MICHAEL S" }!
+            try expect(dali.levelCurve != nil && dali.levelCurveOn && other.levelCurve == nil,
+                       "discovery attaches the leveling curve to the DALI speaker only")
+            let targets: [(step: Int, percent: Double, d: Int, s: Int)] = [
+                (1, 220, 32, 14), (2, 186, 43, 23), (3, 171, 53, 31), (4, 149, 56, 38),
+                (5, 140, 62, 44), (6, 136, 68, 50), (7, 136, 76, 56), (8, 136, 84, 62), (16, 136, 100, 100),
+            ]
+            for target in targets {
+                curveStore.systemVolume = Double(target.step) / 16
+                let plan = curveStore.roomVolumePlan.hardware
+                try expect(plan["d"] == target.d && plan["s"] == target.s,
+                           "Mac volume step \(target.step) sends the leveled receiver commands")
+                try expect(abs(curveStore.effectiveGain(dali) * 100 - target.percent) < 1e-6 &&
+                           curveStore.effectiveGain(other) == 1,
+                           "effective adjustment shown for step \(target.step) is \(target.percent)%")
+            }
+            curveStore.systemVolume = 3.0 / 16
+            try expect(curveStore.followsLevelCurve(dali), "the UI knows the curve is driving the speaker")
+            curveStore.setLevelCurveOn(false, for: dali)
+            let fixed = curveStore.roomVolumePlan.hardware
+            try expect(fixed["d"] == Int(min(100 * pow(3.0 / 16, 0.7) * 1.343581627155172, 100).rounded()) &&
+                       !curveStore.followsLevelCurve(curveStore.speakers.first { $0.name == "MICHAEL D" }!),
+                       "switching the curve off brings back the saved fixed adjustment")
+            for (key, value) in saved {
+                try expect((curveDefaults.object(forKey: key) as? NSObject) == (value as? NSObject), "saved \(key) is untouched")
+            }
+            try expect(curveDefaults.bool(forKey: "dali.curveOn.MICHAEL D") == false,
+                       "the switch is the only new setting written")
+        }
+
         func milliseconds(_ elapsed: Duration) -> Double {
             let value = elapsed.components
             return Double(value.seconds) * 1_000 + Double(value.attoseconds) / 1e15
