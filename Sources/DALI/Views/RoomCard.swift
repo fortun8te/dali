@@ -138,54 +138,21 @@ struct PairRow: View {
     }
 }
 
-/// Calibration must be visible where the user controls speaker volume. A speaker
-/// on a master-volume curve shows the percentage it has at the current Mac volume
-/// and can switch to its fixed saved adjustment without losing either.
+/// Where the user trims a speaker's loudness, right under its volume slider.
+/// A speaker with a leveling curve (MICHAEL D) has exactly one control, Balance,
+/// which shifts the whole curve by -30...+30 %. Other speakers show their saved
+/// fixed adjustment with Reset, as before.
 struct SpeakerLoudnessAdjustment: View {
     @Environment(DALIStore.self) private var store
     let speaker: RoomSpeaker
 
     @MainActor static func height(for speaker: RoomSpeaker?, in store: DALIStore) -> CGFloat {
-        speaker.map {
-            store.followsLevelCurve($0) || ($0.levelCurve != nil && !$0.levelCurveOn) || $0.gain != 1 ? 20 : 0
-        } ?? 0
+        speaker.map { $0.levelCurve != nil || $0.gain != 1 ? 20 : 0 } ?? 0
     }
 
     var body: some View {
-        if store.followsLevelCurve(speaker) {
-            HStack(spacing: Space.s) {
-                Text("Leveling: \(safeInt((store.effectiveGain(speaker) * 100).rounded()))% at this volume")
-                    .font(.caption).foregroundStyle(Color.paper62)
-                    .help("Follows the Mac volume step by step, smoothly between steps")
-                Spacer(minLength: 0)
-                Button("Fixed") { store.setLevelCurveOn(false, for: speaker) }
-                    .buttonStyle(.plain).font(.captionMedium)
-                    .foregroundStyle(Color.paper)
-                    .accessibilityLabel("Use \(speaker.name) fixed loudness adjustment instead of the leveling curve")
-                    .help("Use the saved fixed adjustment (\(safeInt((speaker.gain * 100).rounded()))%) instead")
-            }
-            .frame(height: 20)
-        } else if speaker.levelCurve != nil && !speaker.levelCurveOn {
-            HStack(spacing: Space.s) {
-                Text("Adjustment: \(safeInt((speaker.gain * 100).rounded()))% (fixed)")
-                    .font(.caption).foregroundStyle(Color.paper62)
-                Spacer(minLength: 0)
-                // Reset sits left of the switch: the "Fixed" button that was just pressed
-                // lived at the right edge, so a second click there must never reset the gain.
-                if speaker.gain != 1 {
-                    Button("Reset") { store.setGain(1, for: speaker) }
-                        .buttonStyle(.plain).font(.captionMedium)
-                        .foregroundStyle(Color.paper)
-                        .accessibilityLabel("Reset \(speaker.name) loudness adjustment")
-                        .help("Set this speaker's fixed adjustment to 100%")
-                        .padding(.trailing, Space.m)
-                }
-                Button("Leveling") { store.setLevelCurveOn(true, for: speaker) }
-                    .buttonStyle(.plain).font(.captionMedium)
-                    .foregroundStyle(Color.paper)
-                    .accessibilityLabel("Use \(speaker.name) leveling curve again")
-            }
-            .frame(height: 20)
+        if speaker.levelCurve != nil {
+            BalanceTrimControl(speaker: speaker)
         } else if speaker.gain != 1 {
             HStack(spacing: Space.s) {
                 Text("Adjustment: \(safeInt((speaker.gain * 100).rounded()))%")
@@ -199,6 +166,48 @@ struct SpeakerLoudnessAdjustment: View {
             }
             .frame(height: 20)
         }
+    }
+}
+
+/// "Balance +0%", with small minus/plus steps and a Reset that only appears when
+/// the trim is not zero. Reset touches nothing but the trim.
+struct BalanceTrimControl: View {
+    @Environment(DALIStore.self) private var store
+    let speaker: RoomSpeaker
+    static let step = 2.0
+
+    static func label(_ trim: Double) -> String {
+        let value = Int(trim.rounded())
+        return "Balance \(value > 0 ? "+" : "")\(value)%"
+    }
+
+    var body: some View {
+        HStack(spacing: Space.s) {
+            Text(Self.label(speaker.balanceTrim))
+                .font(.caption).foregroundStyle(Color.paper62)
+                .help("Shifts \(speaker.name)'s whole leveling curve up or down, from -30% to +30%")
+            Spacer(minLength: 0)
+            if speaker.balanceTrim != 0 {
+                Button("Reset") { store.setBalanceTrim(0, for: speaker) }
+                    .buttonStyle(.plain).font(.captionMedium)
+                    .foregroundStyle(Color.paper)
+                    .accessibilityLabel("Reset \(speaker.name) balance")
+                    .padding(.trailing, Space.s)
+            }
+            Button("\u{2212}") { store.setBalanceTrim(speaker.balanceTrim - Self.step, for: speaker) }
+                .buttonStyle(.plain).font(.captionMedium)
+                .foregroundStyle(speaker.balanceTrim > RoomVolumePolicy.trimRange.lowerBound ? Color.paper : Color.paper38)
+                .disabled(speaker.balanceTrim <= RoomVolumePolicy.trimRange.lowerBound)
+                .accessibilityLabel("Lower \(speaker.name) balance")
+                .frame(width: 18)
+            Button("+") { store.setBalanceTrim(speaker.balanceTrim + Self.step, for: speaker) }
+                .buttonStyle(.plain).font(.captionMedium)
+                .foregroundStyle(speaker.balanceTrim < RoomVolumePolicy.trimRange.upperBound ? Color.paper : Color.paper38)
+                .disabled(speaker.balanceTrim >= RoomVolumePolicy.trimRange.upperBound)
+                .accessibilityLabel("Raise \(speaker.name) balance")
+                .frame(width: 18)
+        }
+        .frame(height: 20)
     }
 }
 

@@ -109,16 +109,67 @@ final class SpeakerLevelCurveTests: XCTestCase {
         }
     }
 
-    func testCurveReplacesTheSavedFixedGainOnlyWhileTheMacVolumeDrivesTheRoom() {
+    func testOneModeCurveIgnoresTheOldFixedGainAndUsesItsTopValueWithoutAMacMaster() {
         let dali = RoomVolumeSpeaker(id: "D", slider: 100, gain: 1.3436, curve: .michaelD)
-        XCTAssertEqual(RoomVolumePolicy.effectiveGain(for: dali, systemMaster: nil), 1.3436, accuracy: 1e-12,
-                       "app/Spotify/player modes have no Mac master: the saved fixed gain applies as before")
-        var withoutCurve = dali
-        withoutCurve.curve = nil
-        XCTAssertEqual(RoomVolumePolicy.effectiveGain(for: withoutCurve, systemMaster: 1.0 / 16), 1.3436, accuracy: 1e-12,
-                       "curve switched off: the fixed gain applies at every volume")
-        XCTAssertEqual(RoomVolumePolicy.plan(speakers: [withoutCurve], ceiling: 100, systemMaster: 0.5).hardware["D"],
+        XCTAssertEqual(RoomVolumePolicy.effectiveGain(for: dali, systemMaster: nil), 1.36, accuracy: 1e-12,
+                       "app/Spotify/player modes have no Mac master: the curve's settled top value applies")
+        var otherGain = dali; otherGain.gain = 3
+        XCTAssertEqual(RoomVolumePolicy.effectiveGain(for: otherGain, systemMaster: 1.0 / 16),
+                       RoomVolumePolicy.effectiveGain(for: dali, systemMaster: 1.0 / 16),
+                       "the old saved gain has no effect on a curve speaker")
+        var plain = dali
+        plain.curve = nil
+        XCTAssertEqual(RoomVolumePolicy.effectiveGain(for: plain, systemMaster: 1.0 / 16), 1.3436, accuracy: 1e-12,
+                       "a speaker without a curve keeps its fixed saved gain")
+        XCTAssertEqual(RoomVolumePolicy.plan(speakers: [plain], ceiling: 100, systemMaster: 0.5).hardware["D"],
                        Int(min(100 * pow(0.5, 0.7) * 1.3436, 100).rounded()))
+    }
+
+    // MARK: Balance trim: shifts the whole curve, -30...30 %, default 0
+
+    func testBalanceTrimShiftsTheWholeCurveAndZeroIsTheMeasuredCurve() {
+        for (step, percent) in targets {
+            for trim in [-30.0, -10, 0, 7, 30] {
+                let dali = RoomVolumeSpeaker(id: "D", slider: 100, curve: .michaelD, trim: trim)
+                XCTAssertEqual(RoomVolumePolicy.effectiveGain(for: dali, systemMaster: master(step: step)) * 100,
+                               percent * (1 + trim / 100), accuracy: 1e-9, "step \(step), trim \(trim)")
+            }
+        }
+        let untrimmed = RoomVolumeSpeaker(id: "D", slider: 100, curve: .michaelD)
+        XCTAssertEqual(untrimmed.trim, 0, "default trim is 0")
+        for step in 1...7 {
+            XCTAssertEqual(RoomVolumePolicy.effectiveGain(for: untrimmed, systemMaster: master(step: step)) * 100,
+                           targets[step - 1].percent, accuracy: 1e-9, "trim 0 leaves the curve as it is")
+        }
+    }
+
+    func testBalanceTrimIsClampedAndHostileValuesAreIgnored() {
+        let top = RoomVolumeSpeaker(id: "D", slider: 100, curve: .michaelD, trim: 500)
+        XCTAssertEqual(RoomVolumePolicy.effectiveGain(for: top, systemMaster: 1.0 / 16), 2.5 * 1.3, accuracy: 1e-12)
+        let bottom = RoomVolumeSpeaker(id: "D", slider: 100, curve: .michaelD, trim: -500)
+        XCTAssertEqual(RoomVolumePolicy.effectiveGain(for: bottom, systemMaster: 1.0 / 16), 2.5 * 0.7, accuracy: 1e-12)
+        for hostile in [Double.nan, .infinity, -.infinity] {
+            let dali = RoomVolumeSpeaker(id: "D", slider: 100, curve: .michaelD, trim: hostile)
+            XCTAssertEqual(RoomVolumePolicy.effectiveGain(for: dali, systemMaster: 1.0 / 16), 2.5, accuracy: 1e-12)
+        }
+    }
+
+    func testTrimmedCurveStaysMonotoneSmoothAndWithinTheCeiling() {
+        let reference = RoomVolumeSpeaker(id: "S", slider: 100)
+        for trim in [-30.0, -15, 15, 30] {
+            let dali = RoomVolumeSpeaker(id: "D", slider: 100, curve: .michaelD, trim: trim)
+            for ceiling in [20.0, 40, 100] {
+                var previous = 0
+                for master in scan {
+                    let plan = RoomVolumePolicy.plan(speakers: [dali, reference], ceiling: ceiling, systemMaster: master)
+                    let d = plan.hardware["D"]!
+                    XCTAssertGreaterThanOrEqual(d, previous, "trim \(trim), ceiling \(ceiling), master \(master)")
+                    XCTAssertLessThanOrEqual(d - previous, 1)
+                    XCTAssertLessThanOrEqual(d, Int(ceiling.rounded()))
+                    previous = d
+                }
+            }
+        }
     }
 
     func testMuteDisableAndCeilingStillWinOverTheCurve() {
@@ -270,31 +321,43 @@ final class SpeakerLevelCurveTests: XCTestCase {
         test(defaults)
     }
 
-    func testReadingTheCurveKeepsSavedGainsAndVolumesUntouched() {
+    func testReadingTheCurveKeepsSavedGainsAndVolumesUntouchedAndIgnoresTheOldSwitch() {
         withDefaults { defaults in
             let saved: [String: Any] = [
                 "dali.gain.MICHAEL D": 1.343581627155172, "dali.gain.MICHAEL S": 1.0,
-                "dali.vol.MICHAEL D": 100.0, "dali.vol.MICHAEL S": 100.0, "dali.volumeLimit": 100.0
+                "dali.vol.MICHAEL D": 100.0, "dali.vol.MICHAEL S": 100.0, "dali.volumeLimit": 100.0,
+                "dali.curveOn.MICHAEL D": false,   // the old on/off switch: ignored, kept
             ]
             for (key, value) in saved { defaults.set(value, forKey: key) }
             let before = defaults.dictionaryRepresentation().filter { $0.key.hasPrefix("dali.") }.mapValues { "\($0)" }
             let preferences = SpeakerPreferences(defaults: defaults)
-            XCTAssertEqual(preferences.levelCurve(name: "MICHAEL D"), .michaelD)
-            XCTAssertTrue(preferences.levelCurveActive(name: "MICHAEL D"))
+            XCTAssertEqual(preferences.levelCurve(name: "MICHAEL D"), .michaelD, "curve applies whatever the old switch says")
             XCTAssertNil(preferences.levelCurve(name: "MICHAEL S"))
-            XCTAssertEqual(preferences.gain(name: "MICHAEL D"), 1.343581627155172, "fixed gain still readable for the switch-off path")
+            XCTAssertEqual(preferences.balanceTrim(name: "MICHAEL D"), 0, "default balance is 0")
+            XCTAssertEqual(preferences.gain(name: "MICHAEL D"), 1.343581627155172, "old gain still stored and readable")
             let after = defaults.dictionaryRepresentation().filter { $0.key.hasPrefix("dali.") }.mapValues { "\($0)" }
             XCTAssertEqual(before, after, "reading never writes, resets or erases a dali.* setting")
         }
     }
 
-    func testCurveCanBeSwitchedOffAndOverriddenWithoutLosingTheFixedGain() {
+    func testBalanceTrimIsReadBoundedAndWholeNumbered() {
+        withDefaults { defaults in
+            let preferences = SpeakerPreferences(defaults: defaults)
+            XCTAssertEqual(preferences.balanceTrim(name: "Desk"), 0)
+            for (saved, expected) in [(12.0, 12.0), (-30.0, -30), (45.0, 30), (-80.0, -30), (3.6, 4), (Double.nan, 0)] {
+                defaults.set(saved, forKey: "dali.balance.Desk")
+                XCTAssertEqual(preferences.balanceTrim(name: "Desk"), expected, "saved \(saved)")
+            }
+            defaults.set("loud", forKey: "dali.balance.Desk")
+            XCTAssertEqual(preferences.balanceTrim(name: "Desk"), 0, "wrong type ignored")
+        }
+    }
+
+    func testCurveOverrideIsValidatedAndDoesNotTouchTheFixedGain() {
         withDefaults { defaults in
             defaults.set(1.5, forKey: "dali.gain.Desk")
-            defaults.set(false, forKey: "dali.curveOn.Desk")
             defaults.set([200.0, 150.0, 120.0], forKey: "dali.curve.Desk")
             let preferences = SpeakerPreferences(defaults: defaults)
-            XCTAssertFalse(preferences.levelCurveActive(name: "Desk"))
             let curve = preferences.levelCurve(name: "Desk")
             XCTAssertEqual(curve?.gain(atMaster: 2.0 / 16) ?? 0, 1.5, accuracy: 1e-12)
             XCTAssertEqual(curve?.gain(atMaster: 1) ?? 0, 1.2, accuracy: 1e-12, "held after the last saved step")

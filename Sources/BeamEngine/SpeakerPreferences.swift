@@ -41,10 +41,12 @@ public struct SpeakerPreferences {
         return SpeakerLevelCurve.builtIn(forSpeakerNamed: name)
     }
 
-    /// Whether the curve (rather than the fixed saved gain) drives this speaker.
-    /// On unless the user switched it off with `dali.curveOn.<name>`.
-    public func levelCurveActive(name: String) -> Bool {
-        defaults.object(forKey: "dali.curveOn.\(name)") as? Bool ?? true
+    /// The single balance trim for a speaker with a curve, in percent, -30...30,
+    /// whole numbers, 0 when unset. Older `dali.curveOn.*` and `dali.gain.*` values
+    /// are not read here and never deleted.
+    public func balanceTrim(name: String) -> Double {
+        guard let value = defaults.object(forKey: "dali.balance.\(name)") as? Double, value.isFinite else { return 0 }
+        return min(max(value.rounded(), RoomVolumePolicy.trimRange.lowerBound), RoomVolumePolicy.trimRange.upperBound)
     }
 
     /// Keep selected speakers visible across app relaunches even when discovery

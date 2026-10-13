@@ -5,14 +5,16 @@ public struct RoomVolumeSpeaker: Equatable, Sendable {
     public var slider: Double
     public var gain: Double
     public var enabled: Bool
-    /// When set, replaces the fixed `gain` while the Mac master volume drives the
-    /// room. The saved fixed gain is not touched; it applies again without a curve.
+    /// The speaker's one loudness mode: a curve over the Mac master volume plus a
+    /// single balance trim in percent (-30...30) that shifts the whole curve. When
+    /// set, the saved fixed `gain` is ignored (it stays saved, untouched).
     public var curve: SpeakerLevelCurve?
+    public var trim: Double
 
     public init(id: String, slider: Double, gain: Double = 1, enabled: Bool = true,
-                curve: SpeakerLevelCurve? = nil) {
+                curve: SpeakerLevelCurve? = nil, trim: Double = 0) {
         self.id = id; self.slider = slider; self.gain = gain; self.enabled = enabled
-        self.curve = curve
+        self.curve = curve; self.trim = trim
     }
 }
 
@@ -42,13 +44,18 @@ public enum RoomVolumePolicy {
         return RoomVolumePlan(hardware: hardware, pcmGain: silent ? 0 : 1)
     }
 
+    public static let trimRange: ClosedRange<Double> = -30...30
+
     /// The multiplier actually applied to a speaker at this Mac master volume
-    /// (0...1, nil when the Mac volume is not driving the room). A speaker with a
-    /// level curve follows it; everything else keeps its fixed saved gain.
+    /// (0...1; nil when the Mac volume is not driving the room, where the curve's
+    /// settled top value applies). A speaker with a level curve is the curve times
+    /// (1 + trim/100); everything else keeps its fixed saved gain.
     public static func effectiveGain(for speaker: RoomVolumeSpeaker, systemMaster: Double?) -> Double {
         let raw: Double
-        if let curve = speaker.curve, let master = systemMaster {
-            raw = curve.gain(atMaster: bounded(master, fallback: 0, lower: 0, upper: 1))
+        if let curve = speaker.curve {
+            let master = systemMaster.map { bounded($0, fallback: 0, lower: 0, upper: 1) } ?? 1
+            let trim = bounded(speaker.trim, fallback: 0, lower: trimRange.lowerBound, upper: trimRange.upperBound)
+            raw = curve.gain(atMaster: master) * (1 + trim / 100)
         } else {
             raw = speaker.gain
         }

@@ -192,19 +192,15 @@ struct RoomSettings: View {
                             .font(.caption).foregroundStyle(Color.paper62)
                             .padding(.horizontal, Space.m)
                         ForEach(store.speakers.filter { $0.kind != .extra || $0.enabled }) { sp in
-                            if store.followsLevelCurve(sp), let curve = sp.levelCurve {
+                            if let curve = sp.levelCurve {
                                 VStack(alignment: .leading, spacing: 2) {
                                     HStack(spacing: Space.s) {
-                                        Text(sp.name).font(.body13).foregroundStyle(Color.paper)
-                                            .lineLimit(1)
+                                        Text(sp.name).font(.body13).foregroundStyle(Color.paper).lineLimit(1)
                                         Spacer(minLength: 0)
                                         Text("\(safeInt((store.effectiveGain(sp) * 100).rounded()))% now")
                                             .font(.readout).foregroundStyle(Color.paper62)
-                                        Button("Use fixed") { store.setLevelCurveOn(false, for: sp) }
-                                            .buttonStyle(.plain).font(.captionMedium)
-                                            .foregroundStyle(Color.paper)
-                                            .help("Use the saved fixed adjustment (\(safeInt((sp.gain * 100).rounded()))%) instead of the curve")
                                     }
+                                    BalanceTrimControl(speaker: sp)
                                     Text("Levels with the Mac volume. \(curve.stepSummary)")
                                         .font(.caption).foregroundStyle(Color.paper62)
                                 }
@@ -215,12 +211,6 @@ struct RoomSettings: View {
                                           readout: "\(safeInt((sp.gain * 100).rounded()))%", labelWidth: 96) {
                                     Text(sp.name).font(.body13).foregroundStyle(Color.paper)
                                         .lineLimit(1).help("\(sp.name) loudness adjustment")
-                                }
-                                if sp.levelCurve != nil && !sp.levelCurveOn {
-                                    Button("Use leveling curve") { store.setLevelCurveOn(true, for: sp) }
-                                        .buttonStyle(.plain).font(.captionMedium)
-                                        .foregroundStyle(Color.paper)
-                                        .padding(.horizontal, Space.m)
                                 }
                             }
                         }
