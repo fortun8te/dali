@@ -16,17 +16,17 @@ A non-neutral saved gain is shown beside the main front/back slider and in the s
 
 ## Per-master-step leveling (DALI speaker, 13 Oct 2026)
 
-Michael's physical listening shows the speaker he calls "dali" (`MICHAEL D`) needs a different boost over the other speaker (`MICHAEL S`, always 100 %) at each macOS volume step, not the single fixed percentage (saved as `dali.gain.MICHAEL D` = 134 %). These are his listening targets, and they are the evidence for this curve:
+Michael's physical listening (first set 220, 186, 171, 149, 140, 136; revised the same evening after he heard MICHAEL S still too loud at low volume, top unchanged) shows the speaker he calls "dali" (`MICHAEL D`) needs a different boost over the other speaker (`MICHAEL S`, always 100 %) at each macOS volume step, not the single fixed percentage (saved as `dali.gain.MICHAEL D` = 134 %). These are his listening targets, and they are the evidence for this curve:
 
 | Mac volume step (of 16) | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 and up |
 |---|---|---|---|---|---|---|---|---|
-| DALI speaker vs. MICHAEL S | 220 % | 186 % | 171 % | 149 % | 140 % | 136 % | 136 % | 136 % |
+| DALI speaker vs. MICHAEL S | 250 % | 205 % | 182 % | 156 % | 143 % | 136 % | 136 % | 136 % |
 
-Steps above 7 were not measured. The trend had flattened, so they keep 136 %. `SpeakerLevelCurve` interpolates smoothly between steps (monotone cubic: no overshoot, no hard jump at a step) and holds 220 % below step 1. The multiplier replaces the speaker's fixed gain while the Mac master drives the room; the V1 master response (`slider × master^0.7 × ceiling`) is unchanged and `MICHAEL S` is exactly as before. With no Mac master (app capture, Spotify Connect, library player) the saved fixed gain applies as it always did.
+Steps above 7 were not measured. The trend had flattened, so they keep 136 %. `SpeakerLevelCurve` interpolates smoothly between steps (monotone cubic: no overshoot, no hard jump at a step) and holds 250 % below step 1. The multiplier replaces the speaker's fixed gain while the Mac master drives the room; the V1 master response (`slider × master^0.7 × ceiling`) is unchanged and `MICHAEL S` is exactly as before. With no Mac master (app capture, Spotify Connect, library player) the saved fixed gain applies as it always did.
 
 Nothing saved is changed or erased. `dali.gain.*` and `dali.vol.*` are read as before. Two new optional settings exist: `dali.curveOn.<name>` (written only when the user presses "Fixed"/"Leveling", default on) and `dali.curve.<name>` (an optional list of percentages for steps 1...n that overrides the built-in table; nothing writes it). The room card shows "Leveling: N% at this volume" with a "Fixed" button, and Settings > Fine tuning shows the same figure and the step table. "Fixed" restores the saved 134 % without touching it. The percentages are settings applied to receiver commands, not measured loudness.
 
-Limit: the receiver command cannot exceed 100. With the volume limit at 100 and both sliders at 100 the DALI speaker reaches 100 at step 11, so from step 11 to 16 the gap to `MICHAEL S` narrows (130 % at step 11 down to 100 % at step 16). Receiver commands by step (DALI speaker / MICHAEL S): 1: 32/14, 2: 43/23, 3: 53/31, 4: 56/38, 5: 62/44, 6: 68/50, 7: 76/56, 8: 84/62, 9: 91/67, 10: 98/72, 11 to 15: 100/77 to 96, 16: 100/100.
+Limit: the receiver command cannot exceed 100. With the volume limit at 100 and both sliders at 100 the DALI speaker reaches 100 at step 11, so from step 11 to 16 the gap to `MICHAEL S` narrows (130 % at step 11 down to 100 % at step 16). Receiver commands by step (DALI speaker / MICHAEL S): 1: 36/14, 2: 48/23, 3: 56/31, 4: 59/38, 5: 63/44, 6: 68/50, 7: 76/56, 8: 84/62, 9: 91/67, 10: 98/72, 11 to 15: 100/77 to 96, 16: 100/100.
 
 ## Ownership and asynchronous behavior
 

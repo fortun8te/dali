@@ -1,13 +1,13 @@
 import XCTest
 @testable import BeamEngine
 
-/// Michael's physical listening targets (13 Oct 2026): the DALI speaker ("MICHAEL D")
+/// Michael's physical listening targets (13 Oct 2026, low end raised the same evening): the DALI speaker ("MICHAEL D")
 /// needs this much more than the other speaker ("MICHAEL S", always 100 %) at each
 /// macOS volume step. They are evidence for the curve; the tests pin that the code
 /// applies exactly these values.
 final class SpeakerLevelCurveTests: XCTestCase {
     private let targets: [(step: Int, percent: Double)] =
-        [(1, 220), (2, 186), (3, 171), (4, 149), (5, 140), (6, 136), (7, 136)]
+        [(1, 250), (2, 205), (3, 182), (4, 156), (5, 143), (6, 136), (7, 136)]
 
     private func master(step: Int) -> Double { Double(step) / 16 }
 
@@ -22,8 +22,8 @@ final class SpeakerLevelCurveTests: XCTestCase {
         for step in 8...16 {
             XCTAssertEqual(SpeakerLevelCurve.michaelD.gain(atMaster: master(step: step)), 1.36, accuracy: 1e-12, "step \(step)")
         }
-        XCTAssertEqual(SpeakerLevelCurve.michaelD.gain(atMaster: 1.0 / 64), 2.2, accuracy: 1e-12)
-        XCTAssertEqual(SpeakerLevelCurve.michaelD.gain(atMaster: 0), 2.2, accuracy: 1e-12)
+        XCTAssertEqual(SpeakerLevelCurve.michaelD.gain(atMaster: 1.0 / 64), 2.5, accuracy: 1e-12)
+        XCTAssertEqual(SpeakerLevelCurve.michaelD.gain(atMaster: 0), 2.5, accuracy: 1e-12)
     }
 
     func testCurveIsSmoothAndNeverOvershootsItsNeighbours() {
@@ -33,7 +33,7 @@ final class SpeakerLevelCurveTests: XCTestCase {
             let gain = SpeakerLevelCurve.michaelD.gain(atMaster: Double(tick) / 1_600)
             XCTAssertLessThanOrEqual(gain, previous + 1e-12, "falls monotonically, never rises again")
             XCTAssertGreaterThanOrEqual(gain, 1.36 - 1e-12)
-            XCTAssertLessThanOrEqual(gain, 2.2 + 1e-12)
+            XCTAssertLessThanOrEqual(gain, 2.5 + 1e-12)
             largestJump = max(largestJump, previous - gain)
             previous = gain
         }
@@ -48,9 +48,9 @@ final class SpeakerLevelCurveTests: XCTestCase {
     }
 
     func testBadInputFallsBackSafely() {
-        XCTAssertEqual(SpeakerLevelCurve.michaelD.gain(atMaster: .nan), 2.2, accuracy: 1e-12)
+        XCTAssertEqual(SpeakerLevelCurve.michaelD.gain(atMaster: .nan), 2.5, accuracy: 1e-12)
         XCTAssertEqual(SpeakerLevelCurve.michaelD.gain(atMaster: 5), 1.36, accuracy: 1e-12)
-        XCTAssertEqual(SpeakerLevelCurve.michaelD.gain(atMaster: -1), 2.2, accuracy: 1e-12)
+        XCTAssertEqual(SpeakerLevelCurve.michaelD.gain(atMaster: -1), 2.5, accuracy: 1e-12)
         XCTAssertNil(SpeakerLevelCurve(percentPerStep: []))
         XCTAssertNil(SpeakerLevelCurve(percentPerStep: [100, .nan]))
         XCTAssertNil(SpeakerLevelCurve(percentPerStep: [5]), "below the 0.25x safety floor")
@@ -66,7 +66,7 @@ final class SpeakerLevelCurveTests: XCTestCase {
 
     func testStepSummaryShowsTheCurve() {
         XCTAssertEqual(SpeakerLevelCurve.michaelD.stepSummary,
-                       "Step 1 220% \u{00B7} 2 186% \u{00B7} 3 171% \u{00B7} 4 149% \u{00B7} 5 140% \u{00B7} 6 136% \u{00B7} 7 136% and up")
+                       "Step 1 250% \u{00B7} 2 205% \u{00B7} 3 182% \u{00B7} 4 156% \u{00B7} 5 143% \u{00B7} 6 136% \u{00B7} 7 136% and up")
     }
 
     // MARK: effective gain through the production policy
@@ -98,7 +98,7 @@ final class SpeakerLevelCurveTests: XCTestCase {
         // Independently computed: round(min(100 * (step/16)^0.7 * curve, 100)). From step 11
         // up the DALI speaker is at the receiver's 100 % ceiling, so the gap narrows by necessity.
         let expected: [Int: (d: Int, s: Int)] = [
-            1: (32, 14), 2: (43, 23), 3: (53, 31), 4: (56, 38), 5: (62, 44), 6: (68, 50), 7: (76, 56), 8: (84, 62),
+            1: (36, 14), 2: (48, 23), 3: (56, 31), 4: (59, 38), 5: (63, 44), 6: (68, 50), 7: (76, 56), 8: (84, 62),
             9: (91, 67), 10: (98, 72), 11: (100, 77), 12: (100, 82), 13: (100, 86), 14: (100, 91), 15: (100, 96), 16: (100, 100)
         ]
         XCTAssertEqual(expected.count, 16)
@@ -197,14 +197,14 @@ final class SpeakerLevelCurveTests: XCTestCase {
                 XCTAssertEqual(gain * 100, targets[quarter / 4 - 1].percent, accuracy: 1e-9, "whole step \(quarter / 4)")
             }
         }
-        // Whole quarter-steps between 1 and 2 fall strictly between 220 and 186.
+        // Whole quarter-steps between 1 and 2 fall strictly between 250 and 205.
         for quarter in 5...7 {
             let gain = SpeakerLevelCurve.michaelD.gain(atMaster: Double(quarter) / 64) * 100
-            XCTAssertLessThan(gain, 220); XCTAssertGreaterThan(gain, 186)
+            XCTAssertLessThan(gain, 250); XCTAssertGreaterThan(gain, 205)
         }
         // Below step 1 (quarter-steps 1...3) the gain holds the step-1 value.
         for quarter in 1...3 {
-            XCTAssertEqual(SpeakerLevelCurve.michaelD.gain(atMaster: Double(quarter) / 64), 2.2, accuracy: 1e-12)
+            XCTAssertEqual(SpeakerLevelCurve.michaelD.gain(atMaster: Double(quarter) / 64), 2.5, accuracy: 1e-12)
         }
         // A HAL scalar a hair off the exact step (single-precision rounding) changes nothing audible.
         for step in 1...16 {
@@ -227,7 +227,7 @@ final class SpeakerLevelCurveTests: XCTestCase {
         // The smallest non-zero scalar is audible-but-tiny, not muted and not loud.
         let tiny = RoomVolumePolicy.plan(speakers: [dali, reference], ceiling: 100, systemMaster: 1.0 / 64)
         XCTAssertGreaterThanOrEqual(tiny.hardware["D"]!, tiny.hardware["S"]!)
-        XCTAssertLessThanOrEqual(tiny.hardware["D"]!, 12, "one quarter-step above mute: 12 of 100")
+        XCTAssertLessThanOrEqual(tiny.hardware["D"]!, 14, "one quarter-step above mute: 14 of 100")
         XCTAssertEqual(tiny.pcmGain, 1)
         // Slider at zero stays silent whatever the curve says.
         var quiet = dali; quiet.slider = 0
@@ -237,7 +237,7 @@ final class SpeakerLevelCurveTests: XCTestCase {
     func testNoClippingOrOverflowForAnyCurveItIsGiven() {
         // Extreme but valid saved curves and hostile inputs: the command is always an integer in 0...ceiling.
         let curves: [[Double]] = [[400, 400, 400], [25, 400, 25, 400, 25], [25], [400], Array(repeating: 400, count: 16),
-                                  [220, 186, 171, 149, 140, 136, 136, 300, 100]]
+                                  [250, 205, 182, 156, 143, 136, 136, 300, 100]]
         for percent in curves {
             let curve = SpeakerLevelCurve(percentPerStep: percent)!
             let low = (percent.min() ?? 25) / 100, high = (percent.max() ?? 400) / 100

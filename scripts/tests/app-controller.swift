@@ -296,8 +296,8 @@ struct AppControllerRegression {
             try expect(dali.levelCurve != nil && dali.levelCurveOn && other.levelCurve == nil,
                        "discovery attaches the leveling curve to the DALI speaker only")
             let targets: [(step: Int, percent: Double, d: Int, s: Int)] = [
-                (1, 220, 32, 14), (2, 186, 43, 23), (3, 171, 53, 31), (4, 149, 56, 38),
-                (5, 140, 62, 44), (6, 136, 68, 50), (7, 136, 76, 56), (8, 136, 84, 62), (16, 136, 100, 100),
+                (1, 250, 36, 14), (2, 205, 48, 23), (3, 182, 56, 31), (4, 156, 59, 38),
+                (5, 143, 63, 44), (6, 136, 68, 50), (7, 136, 76, 56), (8, 136, 84, 62), (16, 136, 100, 100),
             ]
             for target in targets {
                 curveStore.systemVolume = Double(target.step) / 16

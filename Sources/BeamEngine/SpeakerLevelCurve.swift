@@ -41,10 +41,11 @@ public struct SpeakerLevelCurve: Equatable, Sendable {
             && zip(lhs.knots, rhs.knots).allSatisfy { $0.step == $1.step && $0.gain == $1.gain }
     }
 
-    /// Michael's targets by macOS volume step: 1 = 220 %, 2 = 186 %, 3 = 171 %,
-    /// 4 = 149 %, 5 = 140 %, 6 = 136 %, 7 = 136 %. Higher steps continue the
+    /// Michael's targets by macOS volume step (revised 13 Oct 2026 after listening,
+    /// low end raised, top unchanged): 1 = 250 %, 2 = 205 %, 3 = 182 %,
+    /// 4 = 156 %, 5 = 143 %, 6 = 136 %, 7 = 136 %. Higher steps continue the
     /// flattening trend, so they stay at 136 %.
-    public static let michaelD = SpeakerLevelCurve(percentPerStep: [220, 186, 171, 149, 140, 136, 136])!
+    public static let michaelD = SpeakerLevelCurve(percentPerStep: [250, 205, 182, 156, 143, 136, 136])!
 
     /// The built-in curve for a speaker, if one has been measured. Names are
     /// matched case-insensitively; Michael calls this speaker "dali".
@@ -53,7 +54,7 @@ public struct SpeakerLevelCurve: Equatable, Sendable {
             ? michaelD : nil
     }
 
-    /// Human-readable curve, e.g. "Step 1 220% · 2 186% · … · 7 136% and up".
+    /// Human-readable curve, e.g. "Step 1 250% · 2 205% · … · 7 136% and up".
     public var stepSummary: String {
         var parts: [String] = []
         for (i, knot) in knots.enumerated() {
