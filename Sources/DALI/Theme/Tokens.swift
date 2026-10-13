@@ -25,6 +25,12 @@ extension Color {
     /// The one warning colour.
     static let amber   = Color(hex: 0xF5A524)
 
+    /// The icon's bloom, for the room card (same ramp as Z1's card): deep to periwinkle.
+    static let bloomDeep      = Color(hex: 0x1E3A8A)
+    static let bloomMid       = Color(hex: 0x4A70D0)
+    static let bloomPeriwinkle = Color(hex: 0x7FA6FF)
+    static let bloomSwell     = Color(hex: 0x3F6FE8)
+
     static let paper   = Color(hex: 0xF4F5F7)
     static let paper62 = paper.opacity(0.62)
     static let paper38 = paper.opacity(0.38)

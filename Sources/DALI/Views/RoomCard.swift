@@ -5,6 +5,8 @@ import SwiftUI
 
 struct RoomCard: View {
     @Environment(DALIStore.self) private var store
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+    @Environment(\.colorSchemeContrast) private var contrast
 
     var body: some View {
         VStack(spacing: 0) {
@@ -28,6 +30,10 @@ struct RoomCard: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
             }
         }
+        .background {
+            // Reduce Transparency / Increase Contrast: no light effect, flat card.
+            if !reduceTransparency && contrast != .increased { RoomBloom().equatable() }
+        }
         .clipShape(RoundedRectangle(cornerRadius: Radius.card, style: .continuous))
         .glass(RoundedRectangle(cornerRadius: Radius.card, style: .continuous),
                clear: true, tint: Color.black.opacity(0.52))
@@ -49,6 +55,40 @@ struct RoomCard: View {
                     .init(color: .white.opacity(0.07), location: 1),
                 ], startPoint: .topLeading, endPoint: .bottomTrailing), lineWidth: 0.5)
                 .allowsHitTesting(false)
+        }
+    }
+}
+
+/// A quiet blue bloom pooling along the bottom edge of the room card, the same
+/// light as the app icon (and Z1's card). Drawn from two static gradients: no
+/// state, no animation, no timers, so it costs nothing while the room is idle,
+/// and the view is Equatable so store updates never redraw it.
+struct RoomBloom: View, Equatable {
+    private static let rise: CGFloat = 0.34
+    private static let rim = Gradient(stops: [
+        Gradient.Stop(color: Color.bloomDeep.opacity(0), location: 0),
+        Gradient.Stop(color: Color.bloomDeep.opacity(0.20), location: 0.55),
+        Gradient.Stop(color: Color.bloomMid.opacity(0.24), location: 0.88),
+        Gradient.Stop(color: Color.bloomPeriwinkle.opacity(0.30), location: 1),
+    ])
+    private static let swell = Gradient(colors: [Color.bloomSwell.opacity(0.22), Color.bloomSwell.opacity(0)])
+
+    var body: some View {
+        GeometryReader { proxy in
+            bloom(width: proxy.size.width, height: proxy.size.height * Self.rise)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+        }
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
+    }
+
+    private func bloom(width: CGFloat, height: CGFloat) -> some View {
+        let band = LinearGradient(gradient: Self.rim, startPoint: .top, endPoint: .bottom)
+        // A wider swell in the middle, so it reads as light pooling, not a band.
+        let pool = RadialGradient(gradient: Self.swell, center: .center, startRadius: 0, endRadius: width * 0.5)
+        return ZStack(alignment: .bottom) {
+            Rectangle().fill(band).frame(height: height)
+            Ellipse().fill(pool).frame(width: width, height: height * 1.5).offset(y: height * 0.55)
         }
     }
 }

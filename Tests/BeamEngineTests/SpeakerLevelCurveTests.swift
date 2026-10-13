@@ -130,6 +130,137 @@ final class SpeakerLevelCurveTests: XCTestCase {
         XCTAssertLessThanOrEqual(RoomVolumePolicy.plan(speakers: [dali], ceiling: 20, systemMaster: 1.0 / 16).hardware["D"] ?? 99, 20)
     }
 
+    // MARK: desk-check of the whole curve (no listening)
+
+    /// Fine scan across the entire Mac volume range, including every ⌥⇧ quarter-step
+    /// (master = n/64) and values between them.
+    private let scan = (0...6_400).map { Double($0) / 6_400 }
+
+    func testReceiverCommandNeverDropsAsTheMacVolumeRisesAndNeverJumps() {
+        let dali = RoomVolumeSpeaker(id: "D", slider: 100, gain: 1.3436, curve: .michaelD)
+        let reference = RoomVolumeSpeaker(id: "S", slider: 100)
+        for ceiling in [20.0, 40, 100] {
+            var previousD = 0, previousS = 0
+            var largestStep = 0
+            for master in scan {
+                let plan = RoomVolumePolicy.plan(speakers: [dali, reference], ceiling: ceiling, systemMaster: master)
+                let d = plan.hardware["D"]!, s = plan.hardware["S"]!
+                XCTAssertGreaterThanOrEqual(d, previousD, "D never falls as the Mac volume rises (ceiling \(ceiling), master \(master))")
+                XCTAssertGreaterThanOrEqual(s, previousS)
+                XCTAssertLessThanOrEqual(d, Int(ceiling.rounded()))
+                XCTAssertLessThanOrEqual(s, Int(ceiling.rounded()))
+                largestStep = max(largestStep, d - previousD)
+                previousD = d; previousS = s
+            }
+            // 1/6400 of the Mac range is a tiny move; one command step is the most it may cause.
+            XCTAssertLessThanOrEqual(largestStep, 1, "no jump in the receiver command (ceiling \(ceiling))")
+        }
+    }
+
+    func testUnroundedLevelledLoudnessIsMonotonicAndContinuousThroughTheCap() {
+        // The pre-rounding command D(m) = min(100 * m^0.7 * curve(m), 100).
+        var previous = 0.0
+        var capReachedAt: Double?
+        for master in scan {
+            let d = min(100 * pow(master, 0.7) * SpeakerLevelCurve.michaelD.gain(atMaster: master), 100)
+            XCTAssertGreaterThanOrEqual(d, previous - 1e-9, "master \(master)")
+            // Below one quarter-step the V1 master^0.7 law itself is steep (not the curve); above it, smooth.
+            if master >= 1.0 / 64 { XCTAssertLessThan(d - previous, 0.2, "continuous at master \(master)") }
+            if d >= 100, capReachedAt == nil { capReachedAt = master }
+            previous = d
+        }
+        // The cap is first reached between step 10 and 11 and is a flat top, not a jump.
+        let reached = (capReachedAt ?? 0) * 16
+        XCTAssertGreaterThan(reached, 10)
+        XCTAssertLessThan(reached, 11)
+    }
+
+    func testFinalSlopeIsGentleThroughTheCurvesFlatTail() {
+        for step in 6...16 {
+            XCTAssertEqual(SpeakerLevelCurve.michaelD.gain(atMaster: master(step: step)), 1.36, accuracy: 1e-12)
+        }
+        // Between steps 6 and 16 nothing moves at all, so there is no hidden bump.
+        for master in stride(from: master(step: 6), through: 1.0, by: 0.001) {
+            XCTAssertEqual(SpeakerLevelCurve.michaelD.gain(atMaster: master), 1.36, accuracy: 1e-12)
+        }
+    }
+
+    func testMacVolumeStepsAndQuarterStepsMapToTheRightPointOnTheCurve() {
+        // macOS volume: 16 whole steps (n/16); with Option-Shift each step has four quarter-steps (n/64).
+        XCTAssertEqual(SpeakerLevelCurve.stepsPerFullScale, 16)
+        for quarter in 0...64 {
+            let master = Double(quarter) / 64
+            let step = master * 16
+            XCTAssertEqual(step, Double(quarter) / 4, "quarter-step \(quarter) is exactly step \(Double(quarter) / 4)")
+            let gain = SpeakerLevelCurve.michaelD.gain(atMaster: master)
+            if quarter % 4 == 0, (1...7).contains(quarter / 4) {
+                XCTAssertEqual(gain * 100, targets[quarter / 4 - 1].percent, accuracy: 1e-9, "whole step \(quarter / 4)")
+            }
+        }
+        // Whole quarter-steps between 1 and 2 fall strictly between 220 and 186.
+        for quarter in 5...7 {
+            let gain = SpeakerLevelCurve.michaelD.gain(atMaster: Double(quarter) / 64) * 100
+            XCTAssertLessThan(gain, 220); XCTAssertGreaterThan(gain, 186)
+        }
+        // Below step 1 (quarter-steps 1...3) the gain holds the step-1 value.
+        for quarter in 1...3 {
+            XCTAssertEqual(SpeakerLevelCurve.michaelD.gain(atMaster: Double(quarter) / 64), 2.2, accuracy: 1e-12)
+        }
+        // A HAL scalar a hair off the exact step (single-precision rounding) changes nothing audible.
+        for step in 1...16 {
+            let exact = SpeakerLevelCurve.michaelD.gain(atMaster: master(step: step))
+            for wobble in [-1e-6, 1e-6] {
+                XCTAssertEqual(SpeakerLevelCurve.michaelD.gain(atMaster: master(step: step) + wobble), exact, accuracy: 1e-4)
+            }
+        }
+    }
+
+    func testZeroMuteAndTinyVolumesAreHandled() {
+        let dali = RoomVolumeSpeaker(id: "D", slider: 100, curve: .michaelD)
+        let reference = RoomVolumeSpeaker(id: "S", slider: 100)
+        let zero = RoomVolumePolicy.plan(speakers: [dali, reference], ceiling: 100, systemMaster: 0)
+        XCTAssertEqual(zero.hardware, ["D": 0, "S": 0])
+        XCTAssertEqual(zero.pcmGain, 0, "master 0 mutes the PCM as well")
+        let muted = RoomVolumePolicy.plan(speakers: [dali, reference], ceiling: 100, systemMaster: 0.5, muted: true)
+        XCTAssertEqual(muted.hardware, ["D": 0, "S": 0])
+        XCTAssertEqual(muted.pcmGain, 0)
+        // The smallest non-zero scalar is audible-but-tiny, not muted and not loud.
+        let tiny = RoomVolumePolicy.plan(speakers: [dali, reference], ceiling: 100, systemMaster: 1.0 / 64)
+        XCTAssertGreaterThanOrEqual(tiny.hardware["D"]!, tiny.hardware["S"]!)
+        XCTAssertLessThanOrEqual(tiny.hardware["D"]!, 12, "one quarter-step above mute: 12 of 100")
+        XCTAssertEqual(tiny.pcmGain, 1)
+        // Slider at zero stays silent whatever the curve says.
+        var quiet = dali; quiet.slider = 0
+        XCTAssertEqual(RoomVolumePolicy.plan(speakers: [quiet], ceiling: 100, systemMaster: 1.0 / 16).hardware["D"], 0)
+    }
+
+    func testNoClippingOrOverflowForAnyCurveItIsGiven() {
+        // Extreme but valid saved curves and hostile inputs: the command is always an integer in 0...ceiling.
+        let curves: [[Double]] = [[400, 400, 400], [25, 400, 25, 400, 25], [25], [400], Array(repeating: 400, count: 16),
+                                  [220, 186, 171, 149, 140, 136, 136, 300, 100]]
+        for percent in curves {
+            let curve = SpeakerLevelCurve(percentPerStep: percent)!
+            let low = (percent.min() ?? 25) / 100, high = (percent.max() ?? 400) / 100
+            for master in scan {
+                let gain = curve.gain(atMaster: master)
+                XCTAssertGreaterThanOrEqual(gain, low - 1e-9, "no undershoot below the lowest value")
+                XCTAssertLessThanOrEqual(gain, high + 1e-9, "no overshoot above the highest value")
+                for slider in [0.0, 50, 100] {
+                    for ceiling in [1.0, 20, 100] {
+                        let speaker = RoomVolumeSpeaker(id: "x", slider: slider, curve: curve)
+                        let value = RoomVolumePolicy.plan(speakers: [speaker], ceiling: ceiling, systemMaster: master).hardware["x"]!
+                        XCTAssertTrue((0...Int(ceiling)).contains(value))
+                    }
+                }
+            }
+        }
+        for hostile in [Double.nan, .infinity, -.infinity, -3, 1e300] {
+            let plan = RoomVolumePolicy.plan(speakers: [RoomVolumeSpeaker(id: "x", slider: 100, curve: .michaelD)],
+                                             ceiling: 100, systemMaster: hostile)
+            XCTAssertTrue((0...100).contains(plan.hardware["x"]!))
+        }
+    }
+
     // MARK: saved preferences are read, never rewritten
 
     private func withDefaults(_ test: (UserDefaults) -> Void) {
