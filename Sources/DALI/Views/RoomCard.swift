@@ -5,6 +5,8 @@ import SwiftUI
 
 struct RoomCard: View {
     @Environment(DALIStore.self) private var store
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+    @Environment(\.colorSchemeContrast) private var contrast
 
     var body: some View {
         VStack(spacing: 0) {
@@ -18,8 +20,8 @@ struct RoomCard: View {
                     if let back = store.back { PairRow(speaker: back, title: "Back") }
                 }
                 .frame(height: PanelMetrics.rowHeight * 2
-                    + SpeakerLoudnessAdjustment.height(for: store.front)
-                    + SpeakerLoudnessAdjustment.height(for: store.back), alignment: .top)
+                    + SpeakerLoudnessAdjustment.height(for: store.front, in: store)
+                    + SpeakerLoudnessAdjustment.height(for: store.back, in: store), alignment: .top)
                 .padding(.horizontal, Space.m + 2)
                 .padding(.bottom, Space.s)
             } else {
@@ -27,6 +29,10 @@ struct RoomCard: View {
                     .padding(Space.m)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
             }
+        }
+        .background {
+            // Reduce Transparency / Increase Contrast: no light effect, flat card.
+            if !reduceTransparency && contrast != .increased { RoomBloom().equatable() }
         }
         .clipShape(RoundedRectangle(cornerRadius: Radius.card, style: .continuous))
         .glass(RoundedRectangle(cornerRadius: Radius.card, style: .continuous),
@@ -49,6 +55,40 @@ struct RoomCard: View {
                     .init(color: .white.opacity(0.07), location: 1),
                 ], startPoint: .topLeading, endPoint: .bottomTrailing), lineWidth: 0.5)
                 .allowsHitTesting(false)
+        }
+    }
+}
+
+/// A quiet blue bloom pooling along the bottom edge of the room card, the same
+/// light as the app icon (and Z1's card). Drawn from two static gradients: no
+/// state, no animation, no timers, so it costs nothing while the room is idle,
+/// and the view is Equatable so store updates never redraw it.
+struct RoomBloom: View, Equatable {
+    private static let rise: CGFloat = 0.34
+    private static let rim = Gradient(stops: [
+        Gradient.Stop(color: Color.bloomDeep.opacity(0), location: 0),
+        Gradient.Stop(color: Color.bloomDeep.opacity(0.20), location: 0.55),
+        Gradient.Stop(color: Color.bloomMid.opacity(0.24), location: 0.88),
+        Gradient.Stop(color: Color.bloomPeriwinkle.opacity(0.30), location: 1),
+    ])
+    private static let swell = Gradient(colors: [Color.bloomSwell.opacity(0.22), Color.bloomSwell.opacity(0)])
+
+    var body: some View {
+        GeometryReader { proxy in
+            bloom(width: proxy.size.width, height: proxy.size.height * Self.rise)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+        }
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
+    }
+
+    private func bloom(width: CGFloat, height: CGFloat) -> some View {
+        let band = LinearGradient(gradient: Self.rim, startPoint: .top, endPoint: .bottom)
+        // A wider swell in the middle, so it reads as light pooling, not a band.
+        let pool = RadialGradient(gradient: Self.swell, center: .center, startRadius: 0, endRadius: width * 0.5)
+        return ZStack(alignment: .bottom) {
+            Rectangle().fill(band).frame(height: height)
+            Ellipse().fill(pool).frame(width: width, height: height * 1.5).offset(y: height * 0.55)
         }
     }
 }
@@ -98,17 +138,22 @@ struct PairRow: View {
     }
 }
 
-/// Saved calibration must be visible where the user controls speaker volume.
+/// Where the user trims a speaker's loudness, right under its volume slider.
+/// A speaker with a leveling curve (MICHAEL D) has exactly one control, Balance,
+/// which shifts the whole curve by -30...+30 %. Other speakers show their saved
+/// fixed adjustment with Reset, as before.
 struct SpeakerLoudnessAdjustment: View {
     @Environment(DALIStore.self) private var store
     let speaker: RoomSpeaker
 
-    static func height(for speaker: RoomSpeaker?) -> CGFloat {
-        speaker.map { $0.gain != 1 ? 20 : 0 } ?? 0
+    @MainActor static func height(for speaker: RoomSpeaker?, in store: DALIStore) -> CGFloat {
+        speaker.map { $0.levelCurve != nil || $0.gain != 1 ? 20 : 0 } ?? 0
     }
 
     var body: some View {
-        if speaker.gain != 1 {
+        if speaker.levelCurve != nil {
+            BalanceTrimControl(speaker: speaker)
+        } else if speaker.gain != 1 {
             HStack(spacing: Space.s) {
                 Text("Adjustment: \(safeInt((speaker.gain * 100).rounded()))%")
                     .font(.caption).foregroundStyle(Color.paper62)
@@ -121,6 +166,48 @@ struct SpeakerLoudnessAdjustment: View {
             }
             .frame(height: 20)
         }
+    }
+}
+
+/// "Balance +0%", with small minus/plus steps and a Reset that only appears when
+/// the trim is not zero. Reset touches nothing but the trim.
+struct BalanceTrimControl: View {
+    @Environment(DALIStore.self) private var store
+    let speaker: RoomSpeaker
+    static let step = 2.0
+
+    static func label(_ trim: Double) -> String {
+        let value = Int(trim.rounded())
+        return "Balance \(value > 0 ? "+" : "")\(value)%"
+    }
+
+    var body: some View {
+        HStack(spacing: Space.s) {
+            Text(Self.label(speaker.balanceTrim))
+                .font(.caption).foregroundStyle(Color.paper62)
+                .help("Shifts \(speaker.name)'s whole leveling curve up or down, from -30% to +30%")
+            Spacer(minLength: 0)
+            if speaker.balanceTrim != 0 {
+                Button("Reset") { store.setBalanceTrim(0, for: speaker) }
+                    .buttonStyle(.plain).font(.captionMedium)
+                    .foregroundStyle(Color.paper)
+                    .accessibilityLabel("Reset \(speaker.name) balance")
+                    .padding(.trailing, Space.s)
+            }
+            Button("\u{2212}") { store.setBalanceTrim(speaker.balanceTrim - Self.step, for: speaker) }
+                .buttonStyle(.plain).font(.captionMedium)
+                .foregroundStyle(speaker.balanceTrim > RoomVolumePolicy.trimRange.lowerBound ? Color.paper : Color.paper38)
+                .disabled(speaker.balanceTrim <= RoomVolumePolicy.trimRange.lowerBound)
+                .accessibilityLabel("Lower \(speaker.name) balance")
+                .frame(width: 18)
+            Button("+") { store.setBalanceTrim(speaker.balanceTrim + Self.step, for: speaker) }
+                .buttonStyle(.plain).font(.captionMedium)
+                .foregroundStyle(speaker.balanceTrim < RoomVolumePolicy.trimRange.upperBound ? Color.paper : Color.paper38)
+                .disabled(speaker.balanceTrim >= RoomVolumePolicy.trimRange.upperBound)
+                .accessibilityLabel("Raise \(speaker.name) balance")
+                .frame(width: 18)
+        }
+        .frame(height: 20)
     }
 }
 

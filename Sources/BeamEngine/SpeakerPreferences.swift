@@ -30,6 +30,25 @@ public struct SpeakerPreferences {
                      fallback: 1, range: 0.25...4)
     }
 
+    /// The master-volume curve available for a speaker: a saved
+    /// `dali.curve.<name>` (percent per Mac volume step 1...n) if valid, else the
+    /// built-in measured one. Reading never writes or removes anything.
+    public func levelCurve(name: String) -> SpeakerLevelCurve? {
+        if let saved = defaults.array(forKey: "dali.curve.\(name)") as? [Double],
+           let curve = SpeakerLevelCurve(percentPerStep: saved) {
+            return curve
+        }
+        return SpeakerLevelCurve.builtIn(forSpeakerNamed: name)
+    }
+
+    /// The single balance trim for a speaker with a curve, in percent, -30...30,
+    /// whole numbers, 0 when unset. Older `dali.curveOn.*` and `dali.gain.*` values
+    /// are not read here and never deleted.
+    public func balanceTrim(name: String) -> Double {
+        guard let value = defaults.object(forKey: "dali.balance.\(name)") as? Double, value.isFinite else { return 0 }
+        return min(max(value.rounded(), RoomVolumePolicy.trimRange.lowerBound), RoomVolumePolicy.trimRange.upperBound)
+    }
+
     /// Keep selected speakers visible across app relaunches even when discovery
     /// has not found them yet. A missing speaker must not make the room look healthy.
     public var rememberedNames: Set<String> {

@@ -613,3 +613,15 @@ final class RoomSessionControllerTests: XCTestCase {
         await controller.invalidateAndStop().value
     }
 }
+
+
+final class RoomSessionEventDescriptionTests: XCTestCase {
+    func testEveryRecoveryStepNamesItselfAndItsMissingOutputs() {
+        XCTAssertEqual(RoomSessionController.Event.reset(["b", "a"]).step, "reset")
+        XCTAssertEqual(RoomSessionController.Event.reset(["b", "a"]).missingIDs, ["a", "b"])
+        XCTAssertEqual(RoomSessionController.Event.reassert(attempt: 1, missing: ["x"]).step, "reassert1")
+        XCTAssertEqual(RoomSessionController.Event.reassert(attempt: 2, missing: ["x"]).step, "reassert2")
+        XCTAssertEqual(RoomSessionController.Event.hardRejoin(["y"]).step, "hard_rejoin")
+        XCTAssertEqual(RoomSessionController.Event.hardRejoin(["y"]).missingIDs, ["y"])
+    }
+}

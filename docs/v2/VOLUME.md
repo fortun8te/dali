@@ -14,6 +14,22 @@ V2 zero emits protocol mute (-144 dB). The existing 15 ms PCM ramp remains for m
 
 A non-neutral saved gain is shown beside the main front/back slider and in the speaker list as an adjustment percentage, with a per-speaker Reset action. Reset sets that gain to one through the existing coordinator, preserving the slider, other speakers and Mac master. Fine tuning uses the same rounded percentage instead of a one-decimal multiplier. These percentages describe saved settings, not measured acoustic output. No general preference migration or master-curve change is performed.
 
+## Per-master-step leveling (DALI speaker, 13 Oct 2026)
+
+Michael's physical listening (first set 220, 186, 171, 149, 140, 136; revised the same evening after he heard MICHAEL S still too loud at low volume, top unchanged) shows the speaker he calls "dali" (`MICHAEL D`) needs a different boost over the other speaker (`MICHAEL S`, always 100 %) at each macOS volume step, not the single fixed percentage (saved as `dali.gain.MICHAEL D` = 134 %). These are his listening targets, and they are the evidence for this curve:
+
+| Mac volume step (of 16) | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 and up |
+|---|---|---|---|---|---|---|---|---|
+| DALI speaker vs. MICHAEL S | 250 % | 205 % | 182 % | 156 % | 143 % | 136 % | 136 % | 136 % |
+
+Steps above 7 were not measured. The trend had flattened, so they keep 136 %. `SpeakerLevelCurve` interpolates smoothly between steps (monotone cubic: no overshoot, no hard jump at a step) and holds 250 % below step 1. The multiplier replaces the speaker's fixed gain while the Mac master drives the room; the V1 master response (`slider × master^0.7 × ceiling`) is unchanged and `MICHAEL S` is exactly as before. With no Mac master (app capture, Spotify Connect, library player) the saved fixed gain applies as it always did.
+
+One mode, no switch (13 Oct 2026, evening): the leveling curve is the only loudness mode for `MICHAEL D`, plus one **Balance** trim that shifts the whole curve by -30 % to +30 % (default 0, whole numbers). Trim is multiplicative: effective gain = curve(master) x (1 + trim/100), so +10 % turns 182 % at step 3 into 200 %. With no Mac master (app capture, Spotify Connect, library player) the curve's settled top value (136 %) times the trim applies. The room card row shows "Balance +0%" with - / + (2 % steps) and a Reset that appears only when the trim is not zero and changes nothing but the trim. Settings > Fine tuning shows the same control, the effective percentage now, and the step table. Speakers without a curve keep their fixed adjustment slider as before.
+
+Nothing saved is changed or erased. `dali.gain.*` and `dali.vol.*` are kept as they are, and the old `dali.curveOn.*` switch and the saved `dali.gain.MICHAEL D` are ignored for a curve speaker (they stay on disk). The one setting this writes is `dali.balance.<name>` (percent, clamped to +/-30). An optional `dali.curve.<name>` list of percentages for steps 1...n overrides the built-in table; nothing writes it. The percentages are settings applied to receiver commands, not measured loudness.
+
+Limit: the receiver command cannot exceed 100. With the volume limit at 100 and both sliders at 100 the DALI speaker reaches 100 at step 11, so from step 11 to 16 the gap to `MICHAEL S` narrows (130 % at step 11 down to 100 % at step 16). Receiver commands by step (DALI speaker / MICHAEL S): 1: 36/14, 2: 48/23, 3: 56/31, 4: 59/38, 5: 63/44, 6: 68/50, 7: 76/56, 8: 84/62, 9: 91/67, 10: 98/72, 11 to 15: 100/77 to 96, 16: 100/100.
+
 ## Ownership and asynchronous behavior
 
 `RoomVolumeCoordinator` is the sole output-volume request owner. Startup silence, readiness restore, recovery, browser cuts and ordinary UI intent all use it. Desired values and engine-accepted values are separate. Sent requests drain; new intent replaces queued work. Session epochs reject stale receipts. A successful RTSP-backed HTTP response means control acceptance, not measured physical loudness. `/api/outputs` reports requested volume, so a matching poll never upgrades a failed or unknown write to acceptance.

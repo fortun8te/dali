@@ -270,6 +270,65 @@ struct AppControllerRegression {
         try expect(reset.ratio == 1 && timing.refill.sessionAdded == 0,
                "explicit new-session reset clears timing state at unity")
 
+        // Per-master-step leveling of the DALI speaker, through the production store:
+        // discovery attaches the curve, the plan uses it, saved settings stay untouched.
+        do {
+            let curveSuite = "DALI.AppControllerTest.curve.\(UUID().uuidString)"
+            let curveDefaults = UserDefaults(suiteName: curveSuite)!
+            defer { curveDefaults.removePersistentDomain(forName: curveSuite) }
+            for version in ["v2", "v3", "v4", "v5", "v8", "v9", "v10", "volumeLimit20"] {
+                curveDefaults.set(true, forKey: "dali.migrated.\(version)")
+            }
+            let saved: [String: Any] = [
+                "dali.frontName": "MICHAEL D", "dali.backName": "MICHAEL S",
+                "dali.vol.MICHAEL D": 100.0, "dali.vol.MICHAEL S": 100.0,
+                "dali.gain.MICHAEL D": 1.343581627155172, "dali.gain.MICHAEL S": 1.0,
+                "dali.volumeLimit": 100.0,
+                "dali.curveOn.MICHAEL D": false,   // retired switch: must be ignored, never deleted
+            ]
+            for (key, value) in saved { curveDefaults.set(value, forKey: key) }
+            let curveStore = DALIStore(defaults: curveDefaults, backendEnabled: false,
+                                       volumeWrite: { _, _ in .applied })
+            let outputs = try JSONDecoder().decode([Output].self, from: Data(#"[{"id":"d","name":"MICHAEL D","type":"AirPlay 2","selected":true,"connected":true,"streaming":true,"volume":10},{"id":"s","name":"MICHAEL S","type":"AirPlay 2","selected":true,"connected":true,"streaming":true,"volume":10}]"#.utf8))
+            curveStore.applyDiscoveredSpeakers(outputs)
+            curveStore.phase = .streaming
+            let dali = curveStore.speakers.first { $0.name == "MICHAEL D" }!
+            let other = curveStore.speakers.first { $0.name == "MICHAEL S" }!
+            try expect(dali.levelCurve != nil && dali.balanceTrim == 0 && other.levelCurve == nil,
+                       "discovery attaches the leveling curve (trim 0) to the DALI speaker only, whatever the retired switch says")
+            let targets: [(step: Int, percent: Double, d: Int, s: Int)] = [
+                (1, 250, 36, 14), (2, 205, 48, 23), (3, 182, 56, 31), (4, 156, 59, 38),
+                (5, 143, 63, 44), (6, 136, 68, 50), (7, 136, 76, 56), (8, 136, 84, 62), (16, 136, 100, 100),
+            ]
+            for target in targets {
+                curveStore.systemVolume = Double(target.step) / 16
+                let plan = curveStore.roomVolumePlan.hardware
+                try expect(plan["d"] == target.d && plan["s"] == target.s,
+                           "Mac volume step \(target.step) sends the leveled receiver commands")
+                try expect(abs(curveStore.effectiveGain(dali) * 100 - target.percent) < 1e-6 &&
+                           curveStore.effectiveGain(other) == 1,
+                           "effective adjustment shown for step \(target.step) is \(target.percent)%")
+            }
+            curveStore.systemVolume = 3.0 / 16
+            let neutral = curveStore.roomVolumePlan.hardware
+            curveStore.setBalanceTrim(10, for: dali)
+            let boosted = curveStore.roomVolumePlan.hardware
+            try expect(neutral["d"] == 56 && boosted["d"] == 62 && boosted["s"] == neutral["s"],
+                       "Balance +10% raises only the DALI speaker, by 10% of its curve value (56 to 62)")
+            try expect(abs(curveStore.effectiveGain(curveStore.speakers.first { $0.name == "MICHAEL D" }!) - 1.82 * 1.1) < 1e-9,
+                       "effective adjustment includes the trim")
+            curveStore.setBalanceTrim(500, for: dali)
+            try expect(curveStore.speakers.first { $0.name == "MICHAEL D" }!.balanceTrim == 30 &&
+                       curveDefaults.double(forKey: "dali.balance.MICHAEL D") == 30, "trim is limited to +30")
+            curveStore.setBalanceTrim(0, for: dali)
+            try expect(curveStore.roomVolumePlan.hardware == neutral, "Reset (trim 0) restores the measured curve")
+            for (key, value) in saved {
+                try expect((curveDefaults.object(forKey: key) as? NSObject) == (value as? NSObject), "saved \(key) is untouched")
+            }
+            try expect(curveDefaults.object(forKey: "dali.balance.MICHAEL D") as? Double == 0,
+                       "the balance trim is the only setting this feature writes")
+        }
+
         func milliseconds(_ elapsed: Duration) -> Double {
             let value = elapsed.components
             return Double(value.seconds) * 1_000 + Double(value.attoseconds) / 1e15

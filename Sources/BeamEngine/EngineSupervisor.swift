@@ -189,7 +189,16 @@ public actor EngineSupervisor {
     /// False only when the file is provably not a usable sqlite database.
     /// Anything ambiguous (locked, unreadable, unexpected error) is "fine": the
     /// caller deletes a user's library on a False, so it must never guess.
-    private nonisolated static func databaseIsHealthy(at url: URL) -> Bool {
+    ///
+    /// OwnTone indexes titles with a custom `DAAP` collation that its own SQLite
+    /// extension registers. A plain connection has none, so `PRAGMA quick_check`
+    /// could not even be PREPARED ("no such collation sequence: DAAP", logged by
+    /// the app on every launch) and the failure fell through to "fine": the
+    /// probe never saw inside a real library. A stand-in with the same name
+    /// fixes that. Only the name matters: quick_check validates page structure,
+    /// not key order (integrity_check does, and would flag every row), so the
+    /// stand-in's ordering cannot produce a false verdict.
+    nonisolated static func databaseIsHealthy(at url: URL) -> Bool {
         let fm = FileManager.default
         guard fm.fileExists(atPath: url.path) else { return true }
         let size = ((try? fm.attributesOfItem(atPath: url.path)[.size]) as? NSNumber)?.int64Value ?? 0
@@ -203,6 +212,12 @@ public actor EngineSupervisor {
         defer { sqlite3_close(db) }
         let openRC = sqlite3_open_v2(url.path, &db, SQLITE_OPEN_READONLY, nil)
         guard openRC == SQLITE_OK else { return openRC != SQLITE_CORRUPT && openRC != SQLITE_NOTADB }
+        sqlite3_create_collation(db, "DAAP", SQLITE_UTF8, nil) { _, lengthA, a, lengthB, b in
+            let common = Int(min(lengthA, lengthB))
+            let order = common > 0 ? memcmp(a, b, common) : 0
+            if order != 0 { return order < 0 ? -1 : 1 }
+            return lengthA == lengthB ? 0 : (lengthA < lengthB ? -1 : 1)
+        }
         var stmt: OpaquePointer?
         defer { sqlite3_finalize(stmt) }
         let prepRC = sqlite3_prepare_v2(db, "PRAGMA quick_check(1)", -1, &stmt, nil)
@@ -216,6 +231,16 @@ public actor EngineSupervisor {
         default:
             return true
         }
+    }
+
+    /// A crash loop never heals on a bad library file, so three startup deaths in
+    /// a row used to start it over empty. That also fired when the engine died
+    /// for an unrelated reason (2026-10-03: a missing web root made the HTTP
+    /// thread fail on every launch, and a healthy library was quarantined along
+    /// with it, costing the next launch a full Music-folder rescan). Now the
+    /// library goes only when the integrity probe condemns it as well.
+    nonisolated static func shouldDiscardLibrary(afterQuickDeaths deaths: Int, libraryIsHealthy: Bool) -> Bool {
+        deaths >= 3 && !libraryIsHealthy
     }
 
     /// Quarantine (one copy, for post-mortem) rather than delete: OwnTone rebuilds
@@ -724,7 +749,12 @@ public actor EngineSupervisor {
             let lived = spawnedAt.map { Date().timeIntervalSince($0) } ?? .infinity
             quickDeaths = lived < 20 ? quickDeaths + 1 : 0
             if quickDeaths >= 3 {
-                discardDatabase(reason: "engine died at startup \(quickDeaths) times in a row (last exit \(status))")
+                let healthy = Self.databaseIsHealthy(at: config.dbFile)
+                if Self.shouldDiscardLibrary(afterQuickDeaths: quickDeaths, libraryIsHealthy: healthy) {
+                    discardDatabase(reason: "engine died at startup \(quickDeaths) times in a row (last exit \(status))")
+                } else {
+                    log.error("engine died at startup \(self.quickDeaths) times in a row (last exit \(status)) but the library passes its integrity check; keeping it")
+                }
                 quickDeaths = 0
             }
         }

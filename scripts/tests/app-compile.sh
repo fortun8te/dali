@@ -10,6 +10,9 @@ mkdir -p "$BUILD_ROOT/project"
 # XcodeGen resolves folder resources relative to the generated project even
 # with --project-root. Keep that resource available inside the temporary tree.
 ln -s "$ROOT/chrome-extension" "$BUILD_ROOT/project/chrome-extension"
+# INFOPLIST_FILE is relative to the generated project too (Assets/Info.plist,
+# added with the explicit app metadata), so the gate failed at "file not found".
+ln -s "$ROOT/Assets" "$BUILD_ROOT/project/Assets"
 xcodegen generate --quiet --spec "$ROOT/project.yml" \
   --project-root "$ROOT" --project "$BUILD_ROOT/project"
 if ! xcodebuild -project "$BUILD_ROOT/project/DALI.xcodeproj" -scheme DALI \

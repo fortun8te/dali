@@ -184,6 +184,21 @@ final class CaptureTransportTests: XCTestCase {
         XCTAssertEqual(ramp.applied, 0)
         XCTAssertEqual(falling.last, 0)
     }
+    func testFadeInAfterGapStartsFromSilenceWithoutStepAndKeepsMute() {
+        var ramp = PCMVolumeRamp()
+        ramp.fadeIn(sampleRate: 44100)
+        let samples = scale(&ramp, gain: 1)
+        XCTAssertLessThan(samples[0], 0.01)
+        XCTAssertEqual(samples[1999], 0.5)
+        for frame in 1..<1000 {
+            XCTAssertGreaterThanOrEqual(samples[frame * 2], samples[(frame - 1) * 2])
+            XCTAssertLessThan(samples[frame * 2] - samples[(frame - 1) * 2], 0.01)
+        }
+        XCTAssertEqual(ramp.applied, 1)
+        var muted = PCMVolumeRamp(initialGain: 0)
+        muted.fadeIn(sampleRate: 44100)
+        XCTAssertTrue(scale(&muted, gain: 0).allSatisfy { $0 == 0 }, "A fade-in must never unmute")
+    }
     func testConverterMutesBeforeDitherAndTracksSourceBeforeGain() throws {
         let format = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 44100, channels: 2, interleaved: false)!
         let pcm = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 1024)!
