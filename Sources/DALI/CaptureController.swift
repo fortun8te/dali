@@ -619,6 +619,9 @@ final class CaptureController: @unchecked Sendable {
             self.lock.lock()
             guard self._isRunning, self.activeToken == token else { self.lock.unlock(); return }
             let gain = self.desiredMasterGain
+            // First audio after the keepalive has been feeding zeros (tap stall,
+            // rebuild, wake): ramp in instead of stepping from silence.
+            let resumedAfterGap = self.lastBufferMono > 0 && conversionBegan - self.lastBufferMono > 0.12
             self.lock.unlock()
             var rebuilt = false
             // Rebuild the converter if the device's mix rate or layout changed
@@ -632,6 +635,7 @@ final class CaptureController: @unchecked Sendable {
                 varispeed.reset()
                 rebuilt = true
             }
+            if resumedAfterGap { conv?.fadeInNextBuffer() }
             guard let converted = conv?.convert(buffer, masterGain: gain) else { return }
             let sourceHasAudio = !(conv?.outputWasSilent ?? true)
             // SMOOTH DRIFT CONTROL: resample by a hair to match the AirPlay speaker

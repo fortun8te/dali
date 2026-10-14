@@ -9,10 +9,21 @@ struct PCMVolumeRamp {
     private var remaining = 0
     private var step = 0.0
     static let rampSeconds = 0.015
+    static let fadeInSeconds = 0.008
 
     init(initialGain: Double = 1) {
         let gain = initialGain.isFinite ? min(max(initialGain, 0), 1) : 0
         applied = gain; target = gain
+    }
+    /// Start the next samples from silence and climb to the current gain. Used
+    /// where the stream resumes after a gap (tap stall, rebuild): the keepalive
+    /// has been writing zeros, so a full-level first sample is a step, heard as
+    /// a click or pop.
+    mutating func fadeIn(sampleRate: Double) {
+        guard sampleRate.isFinite, sampleRate > 0, target > 0 else { return }
+        applied = 0
+        remaining = max(1, Int(min(sampleRate, 768_000) * Self.fadeInSeconds))
+        step = target / Double(remaining)
     }
     mutating func apply(to samples: UnsafeMutableBufferPointer<Float>, channels: Int,
                         sampleRate: Double, gain: Double) {

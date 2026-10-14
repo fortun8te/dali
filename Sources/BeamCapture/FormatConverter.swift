@@ -62,6 +62,9 @@ public final class FormatConverter {
         format == inFormat
     }
 
+    /// Fade the next converted audio in from silence (see PCMVolumeRamp.fadeIn).
+    public func fadeInNextBuffer() { volume.fadeIn(sampleRate: outFormat.sampleRate) }
+
     /// Convert one buffer; returns interleaved s16le bytes ready for the pipe.
     public func convert(_ buffer: AVAudioPCMBuffer, masterGain: Double = 1) -> Data? {
         sourceMeanSquare = 0; outputMeanSquare = 0; signalSampleCount = 0
