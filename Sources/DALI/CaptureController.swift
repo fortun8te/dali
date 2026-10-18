@@ -37,10 +37,23 @@ final class CaptureController: @unchecked Sendable {
     private let beforePublish: (@Sendable () -> Void)?
     init(makeTap: @escaping @Sendable () -> any CaptureTap = { ProcessTap() },
          observeWake: Bool = true, beforePublish: (@Sendable () -> Void)? = nil,
-         stallRebuildAfter: Double = 4.0) {
+         stallRebuildAfter: Double = 4.0,
+         micInUse: @escaping @Sendable () -> Bool = { CallAudio.micInUseByOtherApps() },
+         callPollInterval: Double = 0.5) {
         self.makeTap = makeTap; self.observeWake = observeWake; self.beforePublish = beforePublish
         self.stallRebuildAfter = stallRebuildAfter
+        self.micInUse = micInUse
+        self.callPollInterval = callPollInterval
     }
+    // CALLS (see CallAudio.swift). While another app has a microphone open the
+    // room is lowered; it comes back a few seconds after the mic closes. Polled
+    // off the main thread; the decision is guarded by `lock` and applied through
+    // the same per-buffer gain as the master volume, so it ramps like it.
+    private let micInUse: @Sendable () -> Bool
+    private let callPollInterval: Double
+    private var callDuck = CallDuck()
+    private var callTimer: DispatchSourceTimer?
+    var isCallDucked: Bool { lock.withLock { callDuck.isDucked } }
     private var desiredMasterGain = 1.0
     func setMasterGain(_ value: Double) {
         guard value.isFinite else { return }
@@ -424,6 +437,12 @@ final class CaptureController: @unchecked Sendable {
         overrunsSeen = 0
         lock.unlock()
         staleFifo?.closePipe()
+        // Decide ducking before the first buffer can be converted, so a session
+        // started mid-call never plays a full-level moment into the room.
+        let micNow = micInUse()
+        lock.lock()
+        if sessionGeneration == session { _ = callDuck.update(micInUse: micNow, now: Self.monoNow()) }
+        lock.unlock()
         let candidate = makeTap()
         attachHandler(to: candidate, pipe: pipe, token: token)
         do {
@@ -435,6 +454,7 @@ final class CaptureController: @unchecked Sendable {
             tap = candidate
             tapLiveMono = Self.monoNow()
             startSilenceKeepaliveLocked(session: session)
+            startCallWatchLocked(session: session)
             lock.unlock()
             installWakeObserver()
         } catch {
@@ -618,7 +638,7 @@ final class CaptureController: @unchecked Sendable {
             let conversionBegan = Self.monoNow()
             self.lock.lock()
             guard self._isRunning, self.activeToken == token else { self.lock.unlock(); return }
-            let gain = self.desiredMasterGain
+            let gain = self.desiredMasterGain * self.callDuck.gain
             // First audio after the keepalive has been feeding zeros (tap stall,
             // rebuild, wake): ramp in instead of stepping from silence.
             let resumedAfterGap = self.lastBufferMono > 0 && conversionBegan - self.lastBufferMono > 0.12
@@ -849,6 +869,27 @@ final class CaptureController: @unchecked Sendable {
         }
     }
 
+    // Caller holds lock. Same session fencing as the keepalive below.
+    private func startCallWatchLocked(session: Int) {
+        guard callTimer == nil else { return }
+        let t = DispatchSource.makeTimerSource(queue: DispatchQueue(label: "dali.calls"))
+        t.schedule(deadline: .now() + callPollInterval, repeating: callPollInterval, leeway: .milliseconds(100))
+        t.setEventHandler { [weak self] in
+            guard let self else { return }
+            let inUse = self.micInUse()            // HAL read, never under `lock`
+            self.lock.lock()
+            guard self.sessionGeneration == session, self._isRunning else { self.lock.unlock(); return }
+            let changed = self.callDuck.update(micInUse: inUse, now: Self.monoNow())
+            let ducked = self.callDuck.isDucked
+            let report = changed ? self.onEvent : nil
+            self.lock.unlock()
+            report?(ducked ? "call_duck: microphone in use, room lowered"
+                           : "call_duck_released: microphone closed, room restored")
+        }
+        t.resume()
+        callTimer = t
+    }
+
     // Caller holds lock. The session guard also rejects an already-fired tick
     // from a cancelled timer after a later start.
     private func startSilenceKeepaliveLocked(session: Int) {
@@ -917,6 +958,9 @@ final class CaptureController: @unchecked Sendable {
         let oldTap = tap, oldFifo = fifo
         let timer = silenceTimer
         silenceTimer = nil
+        let calls = callTimer
+        callTimer = nil
+        callDuck = CallDuck()
         sessionGeneration &+= 1; activeToken &+= 1
         tap = nil; fifo = nil; fifoPathInUse = nil; startParams = nil
         recoveryScheduled = false; _isRunning = false
@@ -947,6 +991,7 @@ final class CaptureController: @unchecked Sendable {
         lifecycleQueue.async { [self] in oldTap?.stop(); removeWakeObserver() }
         lock.unlock()
         timer?.cancel()
+        calls?.cancel()
         oldFifo?.closePipe()
 
     }

@@ -91,6 +91,7 @@ private struct CaptureLifecycleTests {
         try await stopCannotWaitForHardware()
         try await failedStartCanRetryAndSilenceIsPaced()
         try await slowTapStartIsNotMistakenForAStall()
+        try await fakeCallDucksRoomAndRestoresAfterHangUp()
         print("PASS: production CaptureController lifecycle, stale conversion, mute/rebuild/source, stop latency and paced silence")
     }
 
@@ -99,6 +100,58 @@ private struct CaptureLifecycleTests {
     /// the instant it returned (the field showed exactly "no tap callbacks for
     /// 4s" with the first bytes). It must count from when the tap went live, and
     /// a tap that then really stays silent must still be rebuilt.
+    /// A fake call while the room plays: the mic opens mid-session, the room
+    /// drops to the duck level without a rebuild, and full level returns a few
+    /// seconds after hang-up. A session started mid-call is ducked from its
+    /// first buffer.
+    static func fakeCallDucksRoomAndRestoresAfterHangUp() async throws {
+        // Outgoing PCM level after all gain (master x call duck), in dBFS. The
+        // snapshot resets per read, so each reading covers only these buffers.
+        func level(_ capture: CaptureController, _ fixture: PipeFixture, _ tap: FakeTap) async throws -> Double {
+            _ = capture.readMetrics(); _ = fixture.readAvailable()
+            let before = capture.totalWritten
+            for _ in 0..<4 { tap.emit() }
+            try await eventually { capture.totalWritten > before }
+            return capture.readMetrics().outputRMSDBFS
+        }
+        let mic = Mutex(false)
+        let fixture = try PipeFixture(), factory = TapFactory()
+        let events = Mutex<[String]>([])
+        let capture = CaptureController(makeTap: { factory.make() }, observeWake: false,
+                                        stallRebuildAfter: 60, // idle fake tap is not a stall here
+                                        micInUse: { mic.withLock { $0 } }, callPollInterval: 0.02)
+        capture.onEvent = { message in events.withLock { $0.append(message) } }
+        try await capture.startAsync(fifoPath: fixture.path)
+        let full = try await level(capture, fixture, factory.latest)
+        try expect(full > -10 && !capture.isCallDucked, "Room was not at full level before the call")
+        mic.withLock { $0 = true }
+        try await eventually { capture.isCallDucked }
+        _ = try await level(capture, fixture, factory.latest)   // spans the 15 ms ramp
+        let ducked = try await level(capture, fixture, factory.latest)
+        try expect(ducked > -60 && ducked < full - 15, "Room was not lowered during the call (\(ducked) vs \(full) dBFS)")
+        try expect(factory.count == 1, "Ducking rebuilt the tap")
+        mic.withLock { $0 = false }
+        try await Task.sleep(for: .milliseconds(1000))
+        try expect(capture.isCallDucked, "Room came back during the hang-up hold")
+        for _ in 0..<300 where capture.isCallDucked { try await Task.sleep(for: .milliseconds(20)) }
+        try expect(!capture.isCallDucked, "Room never came back after the call")
+        _ = try await level(capture, fixture, factory.latest)   // spans the ramp back up
+        let restored = try await level(capture, fixture, factory.latest)
+        try expect(restored > full - 1, "Room did not return to full level after the call (\(restored) vs \(full) dBFS)")
+        try expect(events.withLock { $0.contains { $0.hasPrefix("call_duck:") } && $0.contains { $0.hasPrefix("call_duck_released") } },
+                   "Duck and restore were not logged")
+        capture.stop()
+        try expect(!capture.isCallDucked, "Stop left the next session ducked")
+
+        mic.withLock { $0 = true }
+        let midCall = try PipeFixture()
+        try await capture.startAsync(fifoPath: midCall.path)
+        try expect(capture.isCallDucked, "Session started mid-call was not ducked before audio")
+        let first = try await level(capture, midCall, factory.latest)
+        try expect(first < full - 15, "Session started mid-call played a full-level moment (\(first) dBFS)")
+        capture.stop()
+    }
+
     static func slowTapStartIsNotMistakenForAStall() async throws {
         let fixture = try PipeFixture(), factory = TapFactory()
         factory.configure = { tap in tap.onStart = { Thread.sleep(forTimeInterval: 0.6) } }

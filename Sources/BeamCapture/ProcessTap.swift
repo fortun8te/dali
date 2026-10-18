@@ -245,6 +245,11 @@ public final class ProcessTap: @unchecked Sendable {
     private let invalidated = Atomic<Bool>(false)
     private let eventGeneration = Atomic<Int>(0)
     private var anchorUID: String?
+    /// Call-app process objects left out of a .system tap; nil for a single-app tap.
+    /// Written in start() strictly before installListeners() (eventQueue.sync gives
+    /// the happens-before), and only read by listener callbacks on eventQueue.
+    /// CaptureController never restarts a ProcessTap instance; it makes a new one.
+    private var excludedCallObjects: Set<AudioObjectID>?
     private var startRate = 0.0
     private var listeners: [(AudioObjectID, AudioObjectPropertyAddress, AudioObjectPropertyListenerBlock)] = []
 
@@ -292,8 +297,12 @@ public final class ProcessTap: @unchecked Sendable {
         let desc: CATapDescription
         switch source {
         case .system:
-            desc = CATapDescription(stereoGlobalTapButExcludeProcesses: [])
+            // Call apps play locally and undelayed (see CallAudio.swift).
+            let calls = CallAudio.callProcessObjects(in: CallAudio.currentProcesses())
+            excludedCallObjects = Set(calls)
+            desc = CATapDescription(stereoGlobalTapButExcludeProcesses: calls)
         case .process(let pid):
+            excludedCallObjects = nil
             let obj = try Self.processObject(for: pid)
             desc = CATapDescription(stereoMixdownOfProcesses: [obj])
         }
@@ -436,6 +445,11 @@ public final class ProcessTap: @unchecked Sendable {
         add(aggregateID, kAudioDevicePropertyNominalSampleRate, "rate_changed")
         add(aggregateID, kAudioDevicePropertyDeviceIsAlive, "aggregate_dead")
         add(tapID, kAudioTapPropertyFormat, "tap_format_changed")
+        // A call app that starts after the tap would otherwise be captured
+        // (and muted locally) until the next rebuild.
+        if excludedCallObjects != nil {
+            add(sys, kAudioHardwarePropertyProcessObjectList, "process_list_changed")
+        }
     }
 
     private func removeListeners() {
@@ -462,6 +476,9 @@ public final class ProcessTap: @unchecked Sendable {
         } else if let f = tapFormat, let now = Self.currentTapFormat(tapID),
                   now.sampleRate != f.sampleRate || now.channelCount != f.channelCount {
             reason = "tap_format_changed"
+        } else if trigger == "process_list_changed", let excluded = excludedCallObjects,
+                  !Set(CallAudio.callProcessObjects(in: CallAudio.currentProcesses())).isSubset(of: excluded) {
+            reason = "call_app_started"
         }
         guard let reason else { return }
         guard !invalidated.exchange(true, ordering: .relaxed) else { return }
