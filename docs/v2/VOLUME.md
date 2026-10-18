@@ -2,7 +2,7 @@
 
 ## Current behavior: V1 master response restored
 
-The user rejected the fixed-receiver, software-master behavior, including its later quadratic curve. System-audio master volume now uses the original V1 receiver calculation: `round(min(slider × master^0.7 × ceiling / 100 × gain, 100, ceiling))`. Bounds and invalid-input protection remain explicit. Positive system master leaves captured PCM at unity; zero master or an explicit cut mutes both PCM and receiver commands. App capture, Spotify Connect and library-player modes retain their existing direct speaker control semantics.
+The user rejected the fixed-receiver, software-master behavior, including its later quadratic curve. System-audio master volume now uses the original V1 receiver calculation: `round(min(slider × master^0.7 × ceiling / 100 × gain, 100, ceiling))`. Bounds and invalid-input protection remain explicit. System master at or above the second Mac volume step leaves captured PCM at unity. Below that, the quiet-end taper described below lowers both speakers together; zero master or an explicit cut mutes both PCM and receiver commands. App capture, Spotify Connect and library-player modes retain their existing direct speaker control semantics.
 
 Mac volume changes again lower and raise the actual speaker commands through the V2 serialized coordinator. Full-master saved speaker settings are retained. Disabling a speaker cannot increase its partner's command. This deliberately restores V1 volume response rather than approximating native receiver behavior with an assumed dB curve.
 
@@ -45,3 +45,9 @@ Unknown writes retry at bounded cooldowns of 3, 6, 12, 24 and 30 seconds, with s
 Policy tests compare against an independent extraction of V1's original arithmetic across master, ceiling, slider and calibration values, including clipping and fractional ceilings. The actual app-controller fixture verifies master changes submit the expected V1 receiver commands through the production coordinator, rather than merely changing a local calculated gain. Zero master, explicit cuts, disabled speakers, source changes and invalid inputs remain covered.
 
 The historical `docs/v2/v1-volume-baseline.swift` reproduces the original balance drift and still intentionally exits with failure. That issue is acknowledged, not relabeled as fixed. Tests and compilation establish code behavior, not physical loudness or receiver latency. Installation follows the user's request with no post-build app launch or playback test.
+
+## Quieter whole-room floor, 17 October 2026
+
+Michael confirmed that the whole room is too loud at the lowest Mac volume. Receiver commands retain the familiar V1 master^0.7 arithmetic and the existing per-speaker leveling/balance. Only shared captured PCM below the second Mac step changes: t=master/(2/16), clamped0...1, and gain=t*t*(3-2*t). At the first Mac step the PCM amplitude is0.5, approximately6.02dB below the previous behavior. At step two and above the gain is1. Quarter steps below step one become progressively quieter; explicit mute remains zero. Existing capture gain smoothing applies.
+
+No saved dali.vol.*, dali.gain.*, dali.balance.* or custom curve values are rewritten. This applies when system master drives captured room audio, not Spotify Connect or library playback. The taper is a conservative starting value based on the quieter-floor request, not a measured subjective loudness target. Installed/listening status must be read from the current dated handoff rather than inferred from this source contract.

@@ -13,8 +13,10 @@ if not icon or not (resources / icon).is_file():
     errors.append('DALI icon is absent or its resource is missing')
 if not metadata.get('NSAudioCaptureUsageDescription', '').strip():
     errors.append('System Audio Recording permission description is missing')
+if not metadata.get('NSLocalNetworkUsageDescription', '').strip():
+    errors.append('Local Network permission description is missing')
 if errors:
     for error in errors:
         print('FAIL:', error)
     sys.exit(1)
-print('PASS: icon resource and audio-capture permission metadata')
+print('PASS: icon resource, audio-capture and local-network permission metadata')

@@ -26,5 +26,7 @@
 	<string>AppIcon.icns</string>
 	<key>NSAudioCaptureUsageDescription</key>
 	<string>DALI captures your Mac's audio so it can play on your AirPlay speakers.</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>DALI connects to your AirPlay speakers to play your Mac's audio around the room.</string>
 </dict>
 </plist>

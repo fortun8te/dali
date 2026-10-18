@@ -86,7 +86,7 @@ final class SpeakerLevelCurveTests: XCTestCase {
             let v1Reference = 100 * pow(m, 0.7)
             XCTAssertEqual(plan.hardware["S"], Int(v1Reference.rounded()), "V1 response kept for the reference speaker")
             XCTAssertEqual(plan.hardware["D"], Int(min(v1Reference * percent / 100, 100).rounded()), "step \(step)")
-            XCTAssertEqual(plan.pcmGain, 1)
+            XCTAssertEqual(plan.pcmGain, step == 1 ? 0.5 : 1)
         }
     }
 
@@ -279,7 +279,7 @@ final class SpeakerLevelCurveTests: XCTestCase {
         let tiny = RoomVolumePolicy.plan(speakers: [dali, reference], ceiling: 100, systemMaster: 1.0 / 64)
         XCTAssertGreaterThanOrEqual(tiny.hardware["D"]!, tiny.hardware["S"]!)
         XCTAssertLessThanOrEqual(tiny.hardware["D"]!, 14, "one quarter-step above mute: 14 of 100")
-        XCTAssertEqual(tiny.pcmGain, 1)
+        XCTAssertEqual(tiny.pcmGain, 0.04296875, accuracy: 1e-12)
         // Slider at zero stays silent whatever the curve says.
         var quiet = dali; quiet.slider = 0
         XCTAssertEqual(RoomVolumePolicy.plan(speakers: [quiet], ceiling: 100, systemMaster: 1.0 / 16).hardware["D"], 0)

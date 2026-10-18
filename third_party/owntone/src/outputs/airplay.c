@@ -2248,6 +2248,7 @@ packets_resend(struct airplay_session *session, uint16_t seqnum, int len)
   int sent = 0;
   int suppressed = 0;
   bool pkt_missing = false;
+  bool send_failed = false;
   int64_t elapsed_ms;
   int64_t age_samples;
   int64_t lead_samples;
@@ -2342,19 +2343,24 @@ packets_resend(struct airplay_session *session, uint16_t seqnum, int len)
 	  break;
 	}
 
-      packet_send(session, pkt);
+      if (packet_send(session, pkt) < 0)
+        send_failed = true;
+      else
+        sent++;
       session->resend_tokens -= 1.0;
-      sent++;
     }
 
   session->retransmit_packets_window += sent;
   session->retransmit_suppressed_window += suppressed;
-  // Record the requested range (not only what we sent) so a re-ask for the
-  // same gap within the dedup window is dropped even if age-gating skipped
-  // some of the packets.
-  session->resend_last_seq = seqnum;
-  session->resend_last_len = (uint16_t)len;
-  session->resend_last_ts = now;
+  // Age/history-gated requests remain deduplicated, but a failed local send
+  // must leave its range eligible for the receiver's next retry. Attempts
+  // still consume tokens, so repeated queue failures cannot bypass the cap.
+  if (!send_failed)
+    {
+      session->resend_last_seq = seqnum;
+      session->resend_last_len = (uint16_t)len;
+      session->resend_last_ts = now;
+    }
 
   if (pkt_missing)
     {

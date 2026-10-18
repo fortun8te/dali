@@ -164,4 +164,30 @@ final class RoomVolumeCoordinatorTests: XCTestCase {
         coordinator.stop(session: 2)
     }
 
+    func testReleasedRecoveryHoldWaitsForReadinessThenRestoresLatestIntent() async {
+        let coordinator = RoomVolumeCoordinator(minimumSpacing: .zero) { _, _ in .applied }
+        coordinator.update(session: 1, active: true, targets: ["front": 20], eligible: [])
+        isTrue(await coordinator.silence("front", session: 1))
+        coordinator.releaseHold("front", session: 1)
+        coordinator.update(session: 1, active: true, targets: ["front": 35], eligible: ["front"])
+        await waitFor { coordinator.applied["front"] == 35 }
+        coordinator.stop(session: 2)
+    }
+
+    func testForcedResyncReleasesOnlySelectedTemporaryHold() async {
+        let coordinator = RoomVolumeCoordinator(minimumSpacing: .zero) { _, _ in .applied }
+        coordinator.update(session: 1, active: true, targets: ["front": 20, "back": 30], eligible: [])
+        isTrue(await coordinator.silence("front", session: 1))
+        isTrue(await coordinator.silence("back", session: 1))
+        coordinator.update(session: 1, active: true, targets: ["front": 25, "back": 35],
+                           eligible: ["front", "back"], force: ["front"])
+        await waitFor { coordinator.applied["front"] == 25 }
+        equal(coordinator.applied["back"], 0)
+        coordinator.releaseHold("back", session: 0)
+        equal(coordinator.applied["back"], 0)
+        coordinator.releaseHold("back", session: 1)
+        await waitFor { coordinator.applied["back"] == 35 }
+        coordinator.stop(session: 2)
+    }
+
 }

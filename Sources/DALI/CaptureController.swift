@@ -35,11 +35,16 @@ final class CaptureController: @unchecked Sendable {
     private let makeTap: @Sendable () -> any CaptureTap
     private let observeWake: Bool
     private let beforePublish: (@Sendable () -> Void)?
+    private let sourceActivity: @Sendable (ProcessTap.Source) -> Bool?
     init(makeTap: @escaping @Sendable () -> any CaptureTap = { ProcessTap() },
          observeWake: Bool = true, beforePublish: (@Sendable () -> Void)? = nil,
-         stallRebuildAfter: Double = 4.0) {
+         stallRebuildAfter: Double = 4.0,
+         sourceActivity: @escaping @Sendable (ProcessTap.Source) -> Bool? = {
+             AudioSourceActivity.isOutputActive(source: $0)
+         }) {
         self.makeTap = makeTap; self.observeWake = observeWake; self.beforePublish = beforePublish
         self.stallRebuildAfter = stallRebuildAfter
+        self.sourceActivity = sourceActivity
     }
     private var desiredMasterGain = 1.0
     func setMasterGain(_ value: Double) {
@@ -86,6 +91,11 @@ final class CaptureController: @unchecked Sendable {
     // slow-building stutters/stops).
     private var silenceTimer: DispatchSourceTimer?
     private var lastBufferMono = 0.0             // monotonic secs of last tap buffer, 0 = none yet
+    // Unlike the seeded pacing/stall clock, these advance only after a fresh
+    // converted buffer passes the current tap's publication fence. Reset on
+    // every tap generation; flight-log consumption never clears this evidence.
+    private var publishedBuffers: UInt64 = 0
+    private var lastPublicationMono = 0.0
     /// When the current tap finished starting. `lastBufferMono` is seeded BEFORE
     /// the HAL work begins (it also paces the pipe's silence), and creating the
     /// tap and aggregate device can take several seconds on the first start after
@@ -94,6 +104,14 @@ final class CaptureController: @unchecked Sendable {
     /// with a second, redundant tap rebuild (seen 2026-10-11 15:15 and 17:25, each
     /// logging exactly "no tap callbacks for 4s" as the start returned).
     private var tapLiveMono = 0.0
+    private let activityQueue = DispatchQueue(label: "dali.capture.source-activity", qos: .utility)
+    private var activityPollPending = false
+    private var activityPollMono = -1000.0
+    private var sourceActive: Bool?
+    private var activityObservedMono = 0.0
+    private var sourceExpectedSinceMono = 0.0
+    private static let activityPollInterval = 0.5
+    private static let activityFreshness = 1.5
     /// Seconds without a callback before the first stall rebuild (doubles on the
     /// second). A parameter only so tests need not wait the production 4 s.
     private let stallRebuildAfter: Double
@@ -243,6 +261,76 @@ final class CaptureController: @unchecked Sendable {
         lock.lock(); defer { lock.unlock() }
         guard lastBufferMono > 0 else { return 0 }
         return max(0, Self.monoNow() - callbackClockStart)
+    }
+
+    struct CallbackExpectation: Sendable {
+        let sourceIsInactive: Bool
+        let secondsMissingExpectedBuffer: Double
+    }
+
+    var callbackExpectation: CallbackExpectation {
+        lock.lock(); defer { lock.unlock() }
+        return callbackExpectationLocked(now: Self.monoNow())
+    }
+
+    private func callbackExpectationLocked(now: Double) -> CallbackExpectation {
+        let inactive = sourceActive == false && activityObservedMono > 0 &&
+            now - activityObservedMono <= Self.activityFreshness
+        let clock = max(callbackClockStart, sourceExpectedSinceMono)
+        return CallbackExpectation(sourceIsInactive: inactive,
+            secondsMissingExpectedBuffer: !_isRunning || inactive || clock <= 0 ? 0 : max(0, now - clock))
+    }
+
+    /// The timer only schedules work. HAL property reads never block paced
+    /// silence, conversion, the realtime callback, or a publication lock.
+    private func sampleSourceActivity(session: Int) {
+        lock.lock()
+        let now = Self.monoNow()
+        guard _isRunning, sessionGeneration == session, let params = startParams,
+              !activityPollPending, now - activityPollMono >= Self.activityPollInterval else {
+            lock.unlock(); return
+        }
+        let token = activeToken
+        activityPollPending = true; activityPollMono = now
+        lock.unlock()
+        activityQueue.async { [weak self] in
+            guard let self else { return }
+            let activity = self.sourceActivity(params.source)
+            self.lock.lock()
+            self.activityPollPending = false
+            guard self._isRunning, self.sessionGeneration == session, self.activeToken == token else {
+                self.lock.unlock(); return
+            }
+            let observed = Self.monoNow()
+            if activity == false || self.sourceActive == false {
+                // Idle is not recovery evidence. Only this separate deadline
+                // moves, granting newly active sources their full callback grace.
+                self.sourceExpectedSinceMono = observed
+            }
+            self.sourceActive = activity
+            self.activityObservedMono = observed
+            self.lock.unlock()
+        }
+    }
+
+    struct PublicationProgress: Sendable {
+        let generation: Int
+        let publishedBuffers: UInt64
+        let secondsSinceLastPublication: Double?
+
+        func isRecent(within seconds: Double) -> Bool {
+            guard publishedBuffers > 0, let age = secondsSinceLastPublication else { return false }
+            return age >= 0 && age <= seconds
+        }
+    }
+
+    /// Non-consuming evidence for recovery, independent of flight-log reads.
+    var publicationProgress: PublicationProgress {
+        lock.lock(); defer { lock.unlock() }
+        return PublicationProgress(generation: activeToken,
+                                   publishedBuffers: _isRunning ? publishedBuffers : 0,
+                                   secondsSinceLastPublication: _isRunning && lastPublicationMono > 0
+                                    ? max(0, Self.monoNow() - lastPublicationMono) : nil)
     }
 
     /// Where the "no callbacks" clock starts: the later of the last buffer and the
@@ -419,6 +507,8 @@ final class CaptureController: @unchecked Sendable {
         _isRunning = true
         lastFillMono = Self.monoNow(); bytesWritten = 0
         lastBufferMono = lastFillMono
+        publishedBuffers = 0; lastPublicationMono = 0
+        sourceActive = nil; activityObservedMono = 0; sourceExpectedSinceMono = 0; activityPollMono = -1000
         startParams = (fifoPath, muteLocal, source)
         stallAttempts = 0; recoveryFailures = 0; recoveryScheduled = false
         overrunsSeen = 0
@@ -496,6 +586,8 @@ final class CaptureController: @unchecked Sendable {
         sourceSilent = false; heardAudioSinceBuild = false
         feedingSilence = false
         lastFillMono = Self.monoNow(); lastBufferMono = lastFillMono
+        publishedBuffers = 0; lastPublicationMono = 0
+        sourceActive = nil; activityObservedMono = 0; sourceExpectedSinceMono = 0; activityPollMono = -1000
         lock.unlock()
         if wasSilent { reportSourceSilence(false, token: token) }
         // Consumer cancellation is not a join guarantee. Its local converter
@@ -519,10 +611,12 @@ final class CaptureController: @unchecked Sendable {
             candidate.stop()
             lock.lock()
             if sessionGeneration == session, activeToken == token {
-                if !keepRunningOnFailure { _isRunning = false }
                 tap = nil
             }
             lock.unlock()
+            if !keepRunningOnFailure {
+                stopIfCurrent(session: session, token: token)
+            }
             return false
         }
     }
@@ -556,20 +650,41 @@ final class CaptureController: @unchecked Sendable {
         guard _isRunning, sessionGeneration == session, activeToken == token, let p = startParams else {
             lock.unlock(); return
         }
-        recoveryScheduled = false
         lock.unlock()
         // After sleep the HAL usually needs a rebuild, but if buffers are already
         // flowing again the tap survived and rebuilding would only splice a gap.
         if reason == "wake", secondsSinceLastBuffer < 0.5 {
+            lock.withLock {
+                if _isRunning, sessionGeneration == session, activeToken == token { recoveryScheduled = false }
+            }
             onEvent?("capture_recovery_skipped: wake, tap healthy")
             return
         }
         onEvent?("capture_recovery: \(reason)")
-        FileHandle.standardError.write(Data("CaptureController: rebuilding tap (\(reason))\n".utf8))
-        let ok = lifecycleQueue.sync {
-            guard lock.withLock({ _isRunning && activeToken == token && sessionGeneration == session }) else { return false }
+        let attempted: Bool? = lifecycleQueue.sync {
+            lock.lock()
+            guard _isRunning, activeToken == token, sessionGeneration == session else {
+                lock.unlock(); return nil
+            }
+            if reason.hasPrefix("no tap callbacks") {
+                let expectation = callbackExpectationLocked(now: Self.monoNow())
+                let threshold = stallRebuildAfter * pow(2.0, Double(stallAttempts))
+                guard !expectation.sourceIsInactive, expectation.secondsMissingExpectedBuffer > threshold else {
+                    recoveryScheduled = false
+                    lock.unlock(); return nil
+                }
+                // Count only admitted rebuilds, never an idle job skipped
+                // while queued. Keep single-flight ownership until admission.
+                stallAttempts += 1
+            }
+            lock.unlock()
+            FileHandle.standardError.write(Data("CaptureController: rebuilding tap (\(reason))\n".utf8))
             return rebuildOwned(fifoPath: p.fifoPath, muteLocal: p.muteLocal, source: p.source,
                                 expectedSession: session, keepRunningOnFailure: true)
+        }
+        guard let ok = attempted else {
+            onEvent?("capture_recovery_skipped: source idle, fresh callbacks, or replaced session")
+            return
         }
         lock.lock()
         let stillOurs = _isRunning && sessionGeneration == session && activeToken == token &+ 1
@@ -635,7 +750,13 @@ final class CaptureController: @unchecked Sendable {
                 varispeed.reset()
                 rebuilt = true
             }
-            if resumedAfterGap { conv?.fadeInNextBuffer() }
+            if resumedAfterGap {
+                // The pipe has advanced through keepalive silence. History
+                // carried from before that gap no longer belongs next to this
+                // buffer, including the pending tail on a return to unity.
+                varispeed.reset()
+                conv?.fadeInNextBuffer()
+            }
             guard let converted = conv?.convert(buffer, masterGain: gain) else { return }
             let sourceHasAudio = !(conv?.outputWasSilent ?? true)
             // SMOOTH DRIFT CONTROL: resample by a hair to match the AirPlay speaker
@@ -672,6 +793,8 @@ final class CaptureController: @unchecked Sendable {
                 self.staleConversions += 1; self.lock.unlock(); return
             }
             self.lastBufferMono = finishedAt
+            self.publishedBuffers &+= 1
+            self.lastPublicationMono = finishedAt
             self.stallAttempts = 0            // callbacks are alive: re-arm the stall watchdog
             let session = self.sessionGeneration
             self.bytesWritten += data.count
@@ -696,17 +819,38 @@ final class CaptureController: @unchecked Sendable {
             // Publish under the token lock so rebuild/stop cannot occur between
             // validation and writing into a pipe shared by the replacement tap.
             pipe.write(data, generation: token)
-            self.lock.unlock()
+            if let flipped = self.recordSourceSilenceLocked(hasAudio: sourceHasAudio,
+                    seconds: Double(data.count) / Double(Self.bytesPerSecond), fromTap: true) {
+                self.reportSourceSilence(flipped, token: token)
+            }
             let capturedAt = Date()
             if self.analysisBacklog.load(ordering: .relaxed) < 8 {
                 _ = self.analysisBacklog.wrappingAdd(1, ordering: .relaxed)
-                self.analyze(data, capturedAt: capturedAt, session: session, token: token, sourceHasAudio: sourceHasAudio)
+                self.analyze(data, capturedAt: capturedAt, session: session, token: token)
             }
+            self.lock.unlock()
         }
     }
 
+    /// Caller holds the publication lock. Account in pipe admission order,
+    /// rather than from delayed analysis jobs. Paced zeros are outgoing silence,
+    /// but they are never evidence that the tap itself delivered a buffer.
+    private func recordSourceSilenceLocked(hasAudio: Bool, seconds: Double, fromTap: Bool) -> Bool? {
+        if hasAudio {
+            zeroBufferRun = 0; heardAudioSinceBuild = true; silentSec = 0
+            if sourceSilent { sourceSilent = false; return false }
+        } else {
+            if fromTap { zeroBufferRun += 1 }
+            silentSec += seconds
+            if !sourceSilent && silentSec >= Self.silenceCutDelaySec {
+                sourceSilent = true; return true
+            }
+        }
+        return nil
+    }
+
     /// Loudness + band split for the room visualization, off the audio thread.
-    private func analyze(_ data: Data, capturedAt: Date, session: Int, token: Int, sourceHasAudio: Bool) {
+    private func analyze(_ data: Data, capturedAt: Date, session: Int, token: Int) {
         analysisQueue.async { [weak self] in
             guard let self else { return }
             defer { _ = self.analysisBacklog.wrappingSubtract(1, ordering: .relaxed) }
@@ -714,48 +858,10 @@ final class CaptureController: @unchecked Sendable {
             let current = self._isRunning && self.sessionGeneration == session && self.activeToken == token
             self.lock.unlock()
             guard current else { return }
-            // Zero-buffer canary (see zeroBufferRun). Early-exits on the first
-            // non-zero sample, so on real audio this is a couple of comparisons.
-            let anyNonZero = sourceHasAudio
-            // SOURCE-SILENCE DETECTOR — how instant cut-off works for anything
-            // that is not a browser video.
-            //
-            // The extension can tell us a YouTube video stopped, but nothing can
-            // tell us Spotify, Apple Music or a game did. The tap can: when the
-            // source stops, it delivers literal zeros, and that is a fact about
-            // every app on the machine at once.
-            //
-            // Acting on it is safe in a way that flushing never was. We only
-            // MUTE, and muting during genuine digital silence is by definition
-            // inaudible — the worst case for a false positive is that we silence
-            // silence. A quiet passage is not silence: music sits far above zero
-            // even at its quietest, so this cannot fire on a fade or a rest.
-            //
-            // The delay before acting exists for gapless-ish sources that emit a
-            // handful of zero buffers between tracks. 200 ms is long enough to
-            // ride over those and short enough that the ~1 s tail is cut before
-            // you register it as still playing.
-            let secs = Double(data.count) / 176_400.0
-            var flipped: Bool? = nil
             self.lock.lock()
             guard self._isRunning, self.sessionGeneration == session, self.activeToken == token else { self.lock.unlock(); return }
-            if anyNonZero {
-                self.zeroBufferRun = 0; self.heardAudioSinceBuild = true
-                self.silentSec = 0
-                if self.sourceSilent { self.sourceSilent = false; flipped = false }
-            } else {
-                self.zeroBufferRun += 1
-                self.silentSec += secs
-                if !self.sourceSilent && self.silentSec >= Self.silenceCutDelaySec {
-                    self.sourceSilent = true; flipped = true
-                }
-            }
             let oldLpSlow = self.lpSlow, oldLpMid = self.lpMid
             self.lock.unlock()
-            // Resuming is reported on the FIRST non-zero buffer — no delay at
-            // all. Being slow to un-mute would be audible; being slow to mute is
-            // only ever inaudible.
-            if let f = flipped { self.reportSourceSilence(f, token: token) }
 
             let (instant, bass, treble, lpSlow, lpMid) = data.withUnsafeBytes { raw -> (Double, Double, Double, Double, Double) in
                 let s16 = raw.bindMemory(to: Int16.self)
@@ -843,7 +949,8 @@ final class CaptureController: @unchecked Sendable {
         Task { @MainActor [weak self] in
             guard let self else { return }
             let cb = self.lock.withLock {
-                self._isRunning && self.activeToken == token ? self.onSourceSilenceChanged : nil
+                self._isRunning && self.activeToken == token && self.sourceSilent == silent
+                    ? self.onSourceSilenceChanged : nil
             }
             cb?(silent)
         }
@@ -893,19 +1000,31 @@ final class CaptureController: @unchecked Sendable {
             // Queue the zero block before releasing the same lock used by the
             // real-audio callback. This guarantees resumed PCM cannot overtake
             // an already-decided silence write.
-            if fill > 0 { f.write(Data(count: fill)) }
+            if fill > 0 {
+                let zeros = Data(count: fill)
+                f.write(zeros)
+                let token = activeToken
+                if let flipped = recordSourceSilenceLocked(hasAudio: false,
+                        seconds: Double(fill) / Double(Self.bytesPerSecond), fromTap: false) {
+                    reportSourceSilence(flipped, token: token)
+                }
+                if analysisBacklog.load(ordering: .relaxed) < 8 {
+                    _ = analysisBacklog.wrappingAdd(1, ordering: .relaxed)
+                    analyze(zeros, capturedAt: Date(), session: session, token: token)
+                }
+            }
             // STALL WATCHDOG. The tap is "running" but its callbacks stopped
             // (HAL reconfigured, sleep/wake, permission flip). Rebuild it from
             // here after 4 s, then 8 s; after that DALIStore's own >10 s
             // watchdog escalates to a full stream restart.
             var stallReason: String?
-            let silentFor = now - callbackClockStart
+            let silentFor = callbackExpectationLocked(now: now).secondsMissingExpectedBuffer
             if tap != nil, !recoveryScheduled, stallAttempts < 2,
                silentFor > stallRebuildAfter * pow(2.0, Double(stallAttempts)) {
-                stallAttempts += 1
                 stallReason = String(format: "no tap callbacks for %.0fs", silentFor)
             }
             lock.unlock()
+            sampleSourceActivity(session: session)
             if let stallReason { requestRecovery(stallReason, after: 0, session: session) }
         }
         t.resume()
@@ -913,7 +1032,15 @@ final class CaptureController: @unchecked Sendable {
     }
 
     func stop() {
+        stopIfCurrent()
+    }
+
+    /// A failed rebuild may finish after Stop/new Start. Only its own token
+    /// may invalidate resources; teardown remains queued ahead of later starts.
+    private func stopIfCurrent(session: Int? = nil, token: Int? = nil) {
         lock.lock()
+        guard session == nil || session == sessionGeneration,
+              token == nil || token == activeToken else { lock.unlock(); return }
         let oldTap = tap, oldFifo = fifo
         let timer = silenceTimer
         silenceTimer = nil
@@ -922,6 +1049,8 @@ final class CaptureController: @unchecked Sendable {
         recoveryScheduled = false; _isRunning = false
         lastFillMono = 0
         lastBufferMono = 0
+        publishedBuffers = 0; lastPublicationMono = 0
+        sourceActive = nil; activityObservedMono = 0; sourceExpectedSinceMono = 0; activityPollMono = -1000
         tapLiveMono = 0
         feedingSilence = false
         bytesWritten = 0

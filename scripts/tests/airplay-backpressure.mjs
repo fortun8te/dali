@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 
 const only = process.argv.find(value => value.startsWith('--only='))?.slice(7) ?? 'all';
-assert.ok(new Set(['all','volume','backpressure','timeout','socket','progress','pts','timing','ownership']).has(only), `Unknown test group: ${only}`);
+assert.ok(new Set(['all','volume','backpressure','resend','timeout','socket','progress','pts','timing','ownership']).has(only), `Unknown test group: ${only}`);
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const sourceRoot = process.env.DALI_ENGINE_TEST_SOURCE ?? join(root, 'third_party/owntone');
 const source = path => readFileSync(join(sourceRoot, 'src', path), 'utf8');
@@ -41,10 +41,11 @@ function definition(text, name) {
 const common = [
   ...['AIRPLAY_CONFIG_MAX_VOLUME', 'AIRPLAY_STREAM_CONTROL_TIMEOUT_SEC'].map(name => definition(airplay, name)),
   definition(raop, 'RAOP_CONFIG_MAX_VOLUME'),
+  ...['AIRPLAY_RESEND_MAX_LEN', 'AIRPLAY_RESEND_RATE_PER_SEC', 'AIRPLAY_RESEND_BURST_MAX', 'AIRPLAY_RESEND_DEDUP_MS', 'AIRPLAY_RESEND_MIN_LEAD_MS'].map(name => definition(airplay, name)),
   '#define AIRPLAY_VOLUME_PROCEED_NON_OK ' + airplay.match(/\{ AIRPLAY_SEQ_SEND_VOLUME, "SET_PARAMETER \(volume\)"[^\n]*, (true|false) \}/)[1],
   functionBody(source('httpd_jsonapi.c'), 'jsonapi_reply_player_volume'),
   functionBody(source('outputs.c'), 'outputs_device_volume_set'),
-  ...['airplay_volume_from_pct', 'airplay_volume_to_pct', 'volume_command_failure', 'deferred_session_failure_cb', 'deferred_session_failure', 'deferred_volume_failure', 'data_socket_prepare', 'packet_send', 'sequence_continue_cb', 'sequence_continue'].map(name => functionBody(airplay, name)),
+  ...['airplay_volume_from_pct', 'airplay_volume_to_pct', 'volume_command_failure', 'deferred_session_failure_cb', 'deferred_session_failure', 'deferred_volume_failure', 'data_socket_prepare', 'packet_send', 'packets_resend', 'sequence_continue_cb', 'sequence_continue'].map(name => functionBody(airplay, name)),
   ...['raop_volume_from_pct', 'raop_volume_to_pct'].map(name => functionBody(raop, name)),
   ...['session_update_read', 'session_update_read_ts', 'device_volume_cb'].map(name => functionBody(player, name)),
 ].join('\n');

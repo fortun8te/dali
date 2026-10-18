@@ -71,7 +71,10 @@ public final class RoomVolumeCoordinator {
             desired = bounded
         }
         self.eligible = eligible
-        for id in force { applied[id] = nil; failures[id] = nil; retryAt[id] = nil }
+        for id in force {
+            if temporary.removeValue(forKey: id) != nil { revision += 1 }
+            applied[id] = nil; failures[id] = nil; retryAt[id] = nil
+        }
         self.urgent = self.urgent || urgent
         if intentChanged || eligibilityChanged || urgent || !force.isEmpty { sleeper?.cancel() }
         settleObsoleteWaiters()
@@ -85,6 +88,16 @@ public final class RoomVolumeCoordinator {
         temporary[id] = 0; revision += 1; urgent = true
         failures[id] = nil; retryAt[id] = nil; sleeper?.cancel()
         return await awaitApplication(id, value: 0, session: session)
+    }
+
+    /// Remove a completed setup/recovery hold without declaring a missing
+    /// receiver ready. Its current desired volume is sent once it is eligible.
+    public func releaseHold(_ id: String, session: Int) {
+        guard active, self.session == session, temporary.removeValue(forKey: id) != nil else { return }
+        revision += 1
+        failures[id] = nil; retryAt[id] = nil; sleeper?.cancel()
+        settleObsoleteWaiters()
+        startDriver()
     }
 
     public func restore(_ id: String, session: Int) async -> Bool {

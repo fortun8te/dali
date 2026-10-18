@@ -23,8 +23,8 @@ public struct RoomVolumePlan: Equatable, Sendable {
     public let pcmGain: Double
 }
 
-/// Preserve V1's receiver master curve. Captured PCM stays at unity for positive
-/// master settings; zero and explicit cuts also silence PCM for safe admission.
+/// Preserve V1's receiver master curve. A shared low-volume fade lowers the
+/// room below Mac step two; normal levels and non-system sources stay at unity.
 public enum RoomVolumePolicy {
     public static func plan(speakers: [RoomVolumeSpeaker], ceiling: Double,
                             systemMaster: Double? = nil, muted: Bool = false) -> RoomVolumePlan {
@@ -41,7 +41,12 @@ public enum RoomVolumePolicy {
             let limited = min(min(base * gain, 100), ceiling)
             hardware[speaker.id] = silent || !speaker.enabled ? 0 : Int(max(limited, 0).rounded())
         }
-        return RoomVolumePlan(hardware: hardware, pcmGain: silent ? 0 : 1)
+        // Keep every speaker's receiver calibration intact while giving the
+        // whole room a quieter first step. Smoothstep is half amplitude at
+        // step one and joins unity with zero slope at step two.
+        let t = min((master ?? 1) / (2.0 / 16), 1)
+        let lowVolumeGain = t * t * (3 - 2 * t)
+        return RoomVolumePlan(hardware: hardware, pcmGain: silent ? 0 : lowVolumeGain)
     }
 
     public static let trimRange: ClosedRange<Double> = -30...30

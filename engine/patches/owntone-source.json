@@ -2,7 +2,7 @@
   "schema": 1,
   "upstream_repository": "https://github.com/owntone/owntone-server",
   "upstream_commit": "84e3755198c44c36ddf91e9919634807d68f69f9",
-  "patch_sha256": "df905103c9a5efa4970aa02f7baf9d72be71e9f5326f25546ffec79a29364ab0",
+  "patch_sha256": "4f1fcf7602bbcea64ac25687a68c7419b4305d5467f765afe947ddbb77dd936a",
   "files": {
     ".clang-format": {
       "sha256": "3163969118efe7fdb50355d2797ecc0a37b211c9bb5f0c51186e579ce2a0af64",
@@ -1245,7 +1245,7 @@
       "executable": false
     },
     "src/outputs/airplay.c": {
-      "sha256": "e1dacfd2904af43729bc798f718c885e46ddb59a5b94f221fce8478de775b6c4",
+      "sha256": "33a4d406dad677d7935f5961fe819c43e2ea0460029a1d6122ab14af9381c97c",
       "executable": false
     },
     "src/outputs/airplay_events.c": {
