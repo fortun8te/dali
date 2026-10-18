@@ -61,6 +61,9 @@ public enum AudioSourceActivity {
         for object in objects.prefix(Int(size) / MemoryLayout<AudioObjectID>.size) {
             let pid = value(object, kAudioProcessPropertyPID).map { pid_t(bitPattern: $0) }
             if source == .system, pid == ownPID { continue }
+            // Call apps are excluded from a .system tap (CallAudio), so their
+            // output cannot be evidence that the tap should be delivering.
+            if source == .system, CallAudio.isCallProcess(object) { continue }
             if case .process(let selectedPID) = source, let pid, pid != selectedPID { continue }
             let running = value(object, kAudioProcessPropertyIsRunningOutput).map { $0 != 0 }
             processes.append(ProcessOutput(pid: pid, isRunningOutput: running))
