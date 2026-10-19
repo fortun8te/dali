@@ -200,6 +200,64 @@ final class TapConsumer: @unchecked Sendable {
 
 // MARK: - tap
 
+/// Runs on the tap event queue. HAL access is injected so exclusion updates can
+/// be verified without creating a tap, aggregate, IOProc, or audio device.
+enum ProcessTapExclusionRefresh {
+    enum Result: Equatable { case unchanged, updated, failed, stale }
+
+    private struct Identity: Equatable {
+        let uuid: UUID
+        let name: String
+        let isPrivate: Bool
+        let isExclusive: Bool
+        let isMixdown: Bool
+        let isMono: Bool
+        let mute: CATapMuteBehavior
+        let deviceUID: String?
+
+        init(_ description: CATapDescription) {
+            uuid = description.uuid; name = description.name
+            isPrivate = description.isPrivate; isExclusive = description.isExclusive
+            isMixdown = description.isMixdown; isMono = description.isMono
+            mute = description.muteBehavior; deviceUID = description.deviceUID
+        }
+    }
+
+    static func apply(previous: Set<AudioObjectID>, requested: Set<AudioObjectID>,
+                      isCurrent: () -> Bool, read: () -> CATapDescription?,
+                      write: (CATapDescription) -> OSStatus,
+                      wait: (TimeInterval) -> Void = { Thread.sleep(forTimeInterval: $0) }) -> Result {
+        guard isCurrent() else { return .stale }
+        guard !requested.isSubset(of: previous) else { return .unchanged }
+        guard let description = read() else { return isCurrent() ? .failed : .stale }
+        guard isCurrent() else { return .stale }
+        let identity = Identity(description)
+        let originalProcesses = Set(description.processes)
+        description.processes = requested.sorted()
+        guard isCurrent() else { return .stale }
+        let status = write(description)
+        guard isCurrent() else { return .stale }
+        guard status == noErr else { return .failed }
+        // HAL property changes may complete asynchronously. Only an intact,
+        // unchanged description is a pending acknowledgement worth retrying.
+        // This private event queue waits at most 50 ms; Stop is checked before
+        // every read/wait and can end confirmation after the current 10 ms wait.
+        for attempt in 0...5 {
+            guard isCurrent() else { return .stale }
+            guard let accepted = read() else { return isCurrent() ? .failed : .stale }
+            guard isCurrent() else { return .stale }
+            guard Identity(accepted) == identity else { return .failed }
+            let processes = Set(accepted.processes)
+            if processes == requested { return .updated }
+            guard processes == originalProcesses, attempt < 5 else { return .failed }
+            guard isCurrent() else { return .stale }
+            wait(0.01)
+            guard isCurrent() else { return .stale }
+        }
+        return .failed
+    }
+}
+
 public final class ProcessTap: @unchecked Sendable {
     public struct TapError: Error, CustomStringConvertible {
         public let stage: String
@@ -297,8 +355,10 @@ public final class ProcessTap: @unchecked Sendable {
         let desc: CATapDescription
         switch source {
         case .system:
-            // Call apps play locally and undelayed (see CallAudio.swift).
-            let calls = CallAudio.callProcessObjects(in: CallAudio.currentProcesses())
+            // Call apps are excluded only when they are kept on the Mac
+            // (CallAudio.keepCallsOnMac); otherwise they play in the room.
+            let calls = CallAudio.keepCallsOnMac
+                ? CallAudio.callProcessObjects(in: CallAudio.currentProcesses()) : []
             excludedCallObjects = Set(calls)
             desc = CATapDescription(stereoGlobalTapButExcludeProcesses: calls)
         case .process(let pid):
@@ -464,6 +524,7 @@ public final class ProcessTap: @unchecked Sendable {
     /// fires `onInvalidated` at most once per start().
     private func evaluate(trigger: String) {
         guard !stopping.load(ordering: .relaxed) else { return }
+        let generation = eventGeneration.load(ordering: .acquiring)
         var reason: String?
         if trigger == "hal_restarted" {
             reason = trigger
@@ -476,16 +537,49 @@ public final class ProcessTap: @unchecked Sendable {
         } else if let f = tapFormat, let now = Self.currentTapFormat(tapID),
                   now.sampleRate != f.sampleRate || now.channelCount != f.channelCount {
             reason = "tap_format_changed"
-        } else if trigger == "process_list_changed", let excluded = excludedCallObjects,
-                  !Set(CallAudio.callProcessObjects(in: CallAudio.currentProcesses())).isSubset(of: excluded) {
-            reason = "call_app_started"
+        } else if trigger == "process_list_changed", let excluded = excludedCallObjects {
+            let requested = Set(CallAudio.keepCallsOnMac
+                ? CallAudio.callProcessObjects(in: CallAudio.currentProcesses()) : [])
+            let result = ProcessTapExclusionRefresh.apply(previous: excluded, requested: requested,
+                isCurrent: { !self.stopping.load(ordering: .acquiring) &&
+                    self.eventGeneration.load(ordering: .acquiring) == generation },
+                read: { Self.currentTapDescription(self.tapID) },
+                write: { Self.setTapDescription(self.tapID, description: $0) })
+            switch result {
+            case .updated: excludedCallObjects = requested
+            case .failed: reason = "call_exclusion_update_failed"
+            case .unchanged, .stale: break
+            }
         }
         guard let reason else { return }
+        guard !stopping.load(ordering: .acquiring), eventGeneration.load(ordering: .acquiring) == generation else { return }
         guard !invalidated.exchange(true, ordering: .relaxed) else { return }
         onInvalidated?(reason)
     }
 
     // MARK: HAL helpers
+
+    private static func currentTapDescription(_ tap: AudioObjectID) -> CATapDescription? {
+        var address = AudioObjectPropertyAddress(mSelector: kAudioTapPropertyDescription,
+            mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
+        var description: Unmanaged<CATapDescription>?
+        var size = UInt32(MemoryLayout<Unmanaged<CATapDescription>?>.size)
+        let status = AudioObjectGetPropertyData(tap, &address, 0, nil, &size, &description)
+        guard status == noErr else { return nil }
+        return description?.takeRetainedValue()
+    }
+
+    private static func setTapDescription(_ tap: AudioObjectID, description: CATapDescription) -> OSStatus {
+        var address = AudioObjectPropertyAddress(mSelector: kAudioTapPropertyDescription,
+            mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
+        // The setter copies a non-owning Objective-C pointer; it does not take
+        // ownership. Keep the Swift object alive through the synchronous call.
+        var value: UnsafeMutableRawPointer? = Unmanaged.passUnretained(description).toOpaque()
+        return withExtendedLifetime(description) {
+            AudioObjectSetPropertyData(tap, &address, 0, nil,
+                UInt32(MemoryLayout<UnsafeMutableRawPointer?>.size), &value)
+        }
+    }
 
     private static func stringProperty(_ obj: AudioObjectID, _ selector: AudioObjectPropertySelector) -> String? {
         var addr = AudioObjectPropertyAddress(

@@ -5,9 +5,9 @@
 // what it plays on the Mac's own output, not the room speakers a moment later.
 // So DALI (1) leaves known call apps out of the system tap: excluded processes
 // are not muted by `.mutedWhenTapped` and keep playing on the Mac or headphones
-// with no added delay; and (2) turns the room down while any other app has the
-// microphone open, which also covers browser calls (Meet, Teams on the web)
-// where the browser itself cannot be excluded without losing YouTube.
+// with no added delay; and (2) turns background room audio down while an
+// excluded call app has its microphone open. Browser voice remains in the
+// captured mix, so its microphone must not turn down its own replies.
 //
 // macOS has no public "call in progress" API for third-party apps, so both use
 // Core Audio's process objects (macOS 14+), the same objects process taps use.
@@ -16,6 +16,12 @@ import Foundation
 import CoreAudio
 
 public enum CallAudio {
+    /// Owner decision 2026-10-19: calls must play through the room speakers, not the
+    /// Mac's. So call apps stay in the captured mix like any other audio, and
+    /// nothing ducks the room for them (the call itself is in that mix). The
+    /// list and classification below remain for this switch and for tests.
+    public static let keepCallsOnMac = false
+
     /// Bundle IDs whose audio is a live conversation. Matching also covers each
     /// app's helpers ("<id>.helper", "<id>.helper.Renderer"), where Electron
     /// apps actually play sound. Fixed on purpose: no settings to manage.
@@ -23,6 +29,10 @@ public enum CallAudio {
         "com.apple.FaceTime",
         "com.apple.avconferenced",                         // FaceTime / FaceTime Audio media
         "com.apple.telephonyutilities.callservicesd",      // iPhone calls relayed to the Mac
+        "com.apple.mobilephone",                           // Phone app (macOS 26)
+        "ru.keepcoder.Telegram",                           // Telegram (App Store)
+        "org.telegram.desktop",                            // Telegram Desktop
+        "org.whispersystems.signal-desktop",               // Signal
         "us.zoom.xos",
         "com.microsoft.teams2",
         "com.microsoft.teams",
@@ -33,6 +43,8 @@ public enum CallAudio {
         "Cisco-Systems.Spark",                             // Webex
         "com.skype.skype",
         "com.cisco.webexmeetingsapp",
+        "com.openai.chat",                                 // ChatGPT desktop
+        "com.openai.codex",                                // ChatGPT/Codex voice desktop
     ]
 
     /// Pure classification, unit tested.
@@ -59,9 +71,26 @@ public enum CallAudio {
         processes.filter { isCallApp(bundleID: $0.bundleID) }.map(\.object)
     }
 
-    /// True when any process other than `ownPID` is reading a microphone.
-    public static func micInUse(in processes: [Process], ownPID: pid_t) -> Bool {
-        processes.contains { $0.isRunningInput && $0.pid != ownPID }
+    /// Duck only speech that is kept outside the captured mix. An arbitrary
+    /// microphone (browser voice, dictation, recording) is not enough evidence:
+    /// its reply may be the very audio the room is supposed to reproduce.
+    public static func micInUse(in processes: [Process], ownPID: pid_t,
+                                source: ProcessTap.Source = .system) -> Bool {
+        if case .process(let selectedPID) = source,
+           processes.contains(where: { $0.pid == selectedPID && isCallApp(bundleID: $0.bundleID) }) {
+            return false // Explicitly capturing a call must not duck that call.
+        }
+        return processes.contains {
+            guard $0.isRunningInput, $0.pid != ownPID, isCallApp(bundleID: $0.bundleID) else { return false }
+            // This desktop helper observes SYSTEM OUTPUT for an audio meter.
+            // Core Audio reports input IO for taps too; it is not a voice call
+            // or a microphone. Do not leave the whole room ducked while idle.
+            let bundle = $0.bundleID?.lowercased() ?? ""
+            if bundle == "com.openai.codex.system-audio-spectrum" ||
+               bundle.hasPrefix("com.openai.codex.system-audio-spectrum.") { return false }
+            if case .process(let selectedPID) = source, $0.pid == selectedPID { return false }
+            return true
+        }
     }
 
     // MARK: HAL reads (non-realtime threads only)
@@ -83,14 +112,15 @@ public enum CallAudio {
         }
     }
 
-    public static func micInUseByOtherApps() -> Bool {
-        micInUse(in: currentProcesses(), ownPID: getpid())
+    public static func micInUseByOtherApps(source: ProcessTap.Source = .system) -> Bool {
+        guard keepCallsOnMac else { return false }
+        return micInUse(in: currentProcesses(), ownPID: getpid(), source: source)
     }
 
     /// Whether a Core Audio process object belongs to a call app (and so is
     /// left out of a .system tap).
     public static func isCallProcess(_ obj: AudioObjectID) -> Bool {
-        isCallApp(bundleID: bundleIDOf(obj))
+        keepCallsOnMac && isCallApp(bundleID: bundleIDOf(obj))
     }
 
     private static func pidOf(_ obj: AudioObjectID) -> pid_t? {

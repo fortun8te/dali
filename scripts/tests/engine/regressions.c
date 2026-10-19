@@ -234,11 +234,11 @@ static void test_backpressure(void) {
       event_prepare(&session); deferred_failures=0; fake_send_error=transient[i]; fake_now=ts(100000000000LL);
       assert(packet_send(&session, &pkt) == -1);
       assert(session.send_blocked && deferred_failures == 0 && session.state == AIRPLAY_STATE_STREAMING);
-      fake_now=ts(101499999999LL); assert(packet_send(&session, &pkt) == -1); assert(deferred_failures==0);
+      fake_now=ts(102999999999LL); assert(packet_send(&session, &pkt) == -1); assert(deferred_failures==0);
       fake_send_error=0; assert(packet_send(&session, &pkt)==0); assert(!session.send_blocked);
       // Recovery resets the clock, so a separate burst gets its own grace.
-      fake_send_error=transient[i]; fake_now=ts(103000000000LL); assert(packet_send(&session,&pkt)==-1);
-      fake_now=ts(104500000000LL); assert(packet_send(&session,&pkt)==-1); assert(deferred_failures==1);
+      fake_send_error=transient[i]; fake_now=ts(105000000000LL); assert(packet_send(&session,&pkt)==-1);
+      fake_now=ts(108000000000LL); assert(packet_send(&session,&pkt)==-1); assert(deferred_failures==1);
     }
   }
   struct airplay_session session = {.state=AIRPLAY_STATE_STREAMING,.devname="test"};
@@ -353,9 +353,22 @@ static void test_pts(void) {
   marker(98000000000LL); assert(timespec_cmp(pb_session.pts,fake_now)==0);
   pb_session.pts=ts(100004000000LL); marker(98000000000LL); assert(pb_session.pts.tv_nsec==4000000);
   pb_session.pts=ts(99800000000LL); marker(90000000000LL); assert(pb_session.pts.tv_nsec==800000000);
-  fake_now=ts(101000000000LL); marker(90000000000LL); assert(pb_session.pts.tv_nsec==800100000);
+  fake_now=ts(101000000000LL); pb_session.pts=ts(100800000000LL); marker(90000000000LL); assert(pb_session.pts.tv_nsec==800100000);
   fake_now=ts(102000000000LL); pb_tick_debt_ns=30000000; marker(90000000000LL); assert(pb_session.pts.tv_nsec==800100000);
   pb_tick_debt_ns=0;
+  // 2026-10-18: a 1.17 s lag used to creep back at 100 ppm for hours. It is
+  // now owed to the catch-up as debt, and pts itself is not moved.
+  fake_now=ts(200000000000LL); pb_session.pts=ts(198830000000LL); marker(150000000000LL);
+  assert(pb_tick_debt_ns==1170000000ULL && pb_session.pts.tv_sec==198 && pb_session.pts.tv_nsec==830000000);
+  // Outstanding debt means catch-up is already working on it: no double count.
+  marker(150000000000LL); assert(pb_tick_debt_ns==1170000000ULL);
+  pb_tick_debt_ns=0;
+  // Before the first read anchors pts, a marker changes nothing.
+  memset(&pb_session.pts,0,sizeof pb_session.pts); marker(150000000000LL);
+  assert(pb_session.pts.tv_sec==0 && pb_session.pts.tv_nsec==0 && pb_tick_debt_ns==0);
+  // Beyond the repay window the queued audio cannot exist: re-anchor.
+  pb_session.pts=ts(190000000000LL); marker(150000000000LL);
+  assert(timespec_cmp(pb_session.pts,fake_now)==0 && pb_tick_debt_ns==0);
 }
 static void test_timing(void) {
   pb_tick_debt_ns=0; pb_tick_last=ts(100000000000LL); fake_now=ts(100170000000LL);
@@ -375,7 +388,17 @@ static void test_timing(void) {
   assert(pb_tick_debt_ns==0 && reads==24);
 #ifndef HAVE_TIMERFD
   playback_timing_test(0,0,NULL); assert(test_skip_tick && test_overrun==0);
-  fake_now=timespec_add(fake_now,ts(1500000000)); playback_timing_test(0,0,NULL); assert(!test_skip_tick && test_overrun==0 && pb_tick_debt_ns==0);
+  // A 1.5 s scheduler stall is repaid at the paced rate (three reads per
+  // callback), not discarded: it drains in about 0.75 s of callbacks.
+  fake_now=timespec_add(fake_now,ts(1500000000)); playback_timing_test(0,0,NULL);
+  assert(!test_skip_tick && test_overrun==2 && pb_tick_debt_ns==1470000000ULL);
+  uint64_t repaid=3; int callbacks=1;
+  while(pb_tick_debt_ns>=10000000ULL) { fake_now=timespec_add(fake_now,ts(10000000)); playback_timing_test(0,0,NULL); repaid+=test_skip_tick?0:test_overrun+1; callbacks++; }
+  // Every 10 ms of wall time, stall included, is read exactly once.
+  assert(callbacks<=80 && repaid==150+(uint64_t)callbacks-1);
+  // A sleep-sized gap is still discarded.
+  pb_tick_debt_ns=0; fake_now=timespec_add(fake_now,ts(6000000000LL)); playback_timing_test(0,0,NULL);
+  assert(!test_skip_tick && test_overrun==0 && pb_tick_debt_ns==0);
   uint64_t total=0;
   for(int i=0;i<1000;i++) { fake_now=timespec_add(fake_now,ts(10070000)); playback_timing_test(0,0,NULL); total+=test_skip_tick?0:test_overrun+1; }
   assert(total==1007 && pb_tick_debt_ns==0);

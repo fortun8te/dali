@@ -42,7 +42,7 @@ final class CaptureController: @unchecked Sendable {
          sourceActivity: @escaping @Sendable (ProcessTap.Source) -> Bool? = {
              AudioSourceActivity.isOutputActive(source: $0)
          },
-         micInUse: @escaping @Sendable () -> Bool = { CallAudio.micInUseByOtherApps() },
+         micInUse: @escaping @Sendable (ProcessTap.Source) -> Bool = { CallAudio.micInUseByOtherApps(source: $0) },
          callPollInterval: Double = 0.5) {
         self.makeTap = makeTap; self.observeWake = observeWake; self.beforePublish = beforePublish
         self.stallRebuildAfter = stallRebuildAfter
@@ -50,11 +50,11 @@ final class CaptureController: @unchecked Sendable {
         self.micInUse = micInUse
         self.callPollInterval = callPollInterval
     }
-    // CALLS (see CallAudio.swift). While another app has a microphone open the
-    // room is lowered; it comes back a few seconds after the mic closes. Polled
+    // CALLS (see CallAudio.swift). An excluded call app's microphone lowers
+    // background room audio, never the captured voice itself. Polled
     // off the main thread; the decision is guarded by `lock` and applied through
     // the same per-buffer gain as the master volume, so it ramps like it.
-    private let micInUse: @Sendable () -> Bool
+    private let micInUse: @Sendable (ProcessTap.Source) -> Bool
     private let callPollInterval: Double
     private var callDuck = CallDuck()
     private var callTimer: DispatchSourceTimer?
@@ -529,7 +529,7 @@ final class CaptureController: @unchecked Sendable {
         staleFifo?.closePipe()
         // Decide ducking before the first buffer can be converted, so a session
         // started mid-call never plays a full-level moment into the room.
-        let micNow = micInUse()
+        let micNow = micInUse(source)
         lock.lock()
         if sessionGeneration == session { _ = callDuck.update(micInUse: micNow, now: Self.monoNow()) }
         lock.unlock()
@@ -983,15 +983,19 @@ final class CaptureController: @unchecked Sendable {
         t.schedule(deadline: .now() + callPollInterval, repeating: callPollInterval, leeway: .milliseconds(100))
         t.setEventHandler { [weak self] in
             guard let self else { return }
-            let inUse = self.micInUse()            // HAL read, never under `lock`
+            guard let context = self.lock.withLock({ () -> (Int, ProcessTap.Source)? in
+                guard self.sessionGeneration == session, self._isRunning, let source = self.startParams?.source else { return nil }
+                return (self.activeToken, source)
+            }) else { return }
+            let inUse = self.micInUse(context.1)   // HAL read, never under `lock`
             self.lock.lock()
-            guard self.sessionGeneration == session, self._isRunning else { self.lock.unlock(); return }
+            guard self.sessionGeneration == session, self.activeToken == context.0, self._isRunning else { self.lock.unlock(); return }
             let changed = self.callDuck.update(micInUse: inUse, now: Self.monoNow())
             let ducked = self.callDuck.isDucked
             let report = changed ? self.onEvent : nil
             self.lock.unlock()
-            report?(ducked ? "call_duck: microphone in use, room lowered"
-                           : "call_duck_released: microphone closed, room restored")
+            report?(ducked ? "call_duck: excluded call active, background room lowered"
+                           : "call_duck_released: excluded call inactive, room restored")
         }
         t.resume()
         callTimer = t

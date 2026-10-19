@@ -338,7 +338,7 @@ index e8474c9..adfc3dc 100644
    // Quality of audio output
    struct media_quality quality;
 diff --git a/src/outputs/airplay.c b/src/outputs/airplay.c
-index 4290b75..0381ca0 100644
+index 4290b75..d9591c4 100644
 --- a/src/outputs/airplay.c
 +++ b/src/outputs/airplay.c
 @@ -24,6 +24,7 @@
@@ -349,7 +349,7 @@ index 4290b75..0381ca0 100644
  #include <errno.h>
  #include <sys/types.h>
  #include <sys/socket.h>
-@@ -97,8 +98,37 @@
+@@ -97,8 +98,40 @@
  // audio payload encryption. For normal pairing the key is 32 bytes.
  #define AIRPLAY_AUDIO_KEY_LEN 32
  
@@ -359,6 +359,9 @@ index 4290b75..0381ca0 100644
 +// DALI: 1000 ≈ 8 s at 352/44100. Bluesound PowerNodes keep asking for aged
 +// seqnums during WiFi blips; a deeper ring avoids delivery_unrecoverable
 +// misses that used to cascade into session thrash. Memory cost is small.
++// DALI patch: how long a full local UDP queue (ENOBUFS/EAGAIN) may last before
++// the session is failed. See packet_send().
++#define AIRPLAY_SEND_BLOCKED_GRACE_MS 3000
 +#define AIRPLAY_PACKET_BUFFER_SIZE    2000
 +
 +// DALI: scheduling lead uses start_buffer_ms minus this, NOT minus the full
@@ -389,7 +392,7 @@ index 4290b75..0381ca0 100644
  
  #define AIRPLAY_MD_DELAY_STARTUP      15360
  #define AIRPLAY_MD_DELAY_SWITCH       (AIRPLAY_MD_DELAY_STARTUP * 2)
-@@ -257,6 +287,7 @@ struct airplay_session
+@@ -257,6 +290,7 @@ struct airplay_session
    bool supports_encryption;
  
    struct event *deferredev;
@@ -397,7 +400,7 @@ index 4290b75..0381ca0 100644
  
    int reqs_in_flight;
    int cseq;
-@@ -283,6 +314,33 @@ struct airplay_session
+@@ -283,6 +317,33 @@ struct airplay_session
    // amplifier or DSP delays)
    int offset_samples;
  
@@ -431,7 +434,7 @@ index 4290b75..0381ca0 100644
    char *local_v4_address;
    char *local_v6_address;
    char local_mac_address[18];
-@@ -492,6 +550,9 @@ sequence_start(enum airplay_seq_type seq_type, struct airplay_session *session,
+@@ -492,6 +553,9 @@ sequence_start(enum airplay_seq_type seq_type, struct airplay_session *session,
  static void
  sequence_continue(struct airplay_seq_ctx *seq_ctx);
  
@@ -441,7 +444,7 @@ index 4290b75..0381ca0 100644
  
  /* ------------------------------- MISC HELPERS ----------------------------- */
  
-@@ -1136,7 +1197,17 @@ master_session_cleanup(struct airplay_master_session *ams)
+@@ -1136,7 +1200,17 @@ master_session_cleanup(struct airplay_master_session *ams)
  	; /* EMPTY */
  
        if (!s)
@@ -460,7 +463,7 @@ index 4290b75..0381ca0 100644
        else
  	s->next = ams->next;
      }
-@@ -1204,7 +1275,14 @@ master_session_make(struct media_quality *quality, bool use_ptp)
+@@ -1204,7 +1278,14 @@ master_session_make(struct media_quality *quality, bool use_ptp)
    ams->use_ptp = use_ptp;
    ams->samples_per_packet = AIRPLAY_SAMPLES_PER_PACKET;
    ams->rawbuf_size = STOB(ams->samples_per_packet, quality->bits_per_sample, quality->channels);
@@ -476,7 +479,7 @@ index 4290b75..0381ca0 100644
  
    CHECK_NULL(L_AIRPLAY, ams->rawbuf = malloc(ams->rawbuf_size));
    CHECK_NULL(L_AIRPLAY, ams->input_buffer = evbuffer_new());
-@@ -1273,7 +1351,32 @@ session_cleanup(struct airplay_session *session)
+@@ -1273,7 +1354,32 @@ session_cleanup(struct airplay_session *session)
  	; /* EMPTY */
  
        if (!s)
@@ -510,7 +513,7 @@ index 4290b75..0381ca0 100644
        else
  	s->next = session->next;
      }
-@@ -1295,11 +1398,37 @@ session_failure(struct airplay_session *session)
+@@ -1295,11 +1401,37 @@ session_failure(struct airplay_session *session)
    session_cleanup(session);
  }
  
@@ -548,7 +551,7 @@ index 4290b75..0381ca0 100644
    DPRINTF(E_DBG, L_AIRPLAY, "Cleaning up failed session (deferred) on device '%s'\n", session->devname);
    session_failure(session);
  }
-@@ -1309,6 +1438,7 @@ deferred_session_failure(struct airplay_session *session)
+@@ -1309,6 +1441,7 @@ deferred_session_failure(struct airplay_session *session)
  {
    struct timeval tv;
  
@@ -556,7 +559,7 @@ index 4290b75..0381ca0 100644
    if (session->state != AIRPLAY_STATE_AUTH)
      session->state = AIRPLAY_STATE_FAILED;
  
-@@ -1316,6 +1446,23 @@ deferred_session_failure(struct airplay_session *session)
+@@ -1316,6 +1449,23 @@ deferred_session_failure(struct airplay_session *session)
    evtimer_add(session->deferredev, &tv);
  }
  
@@ -580,7 +583,7 @@ index 4290b75..0381ca0 100644
  static void
  rtsp_close_cb(struct evrtsp_connection *evcon, void *arg)
  {
-@@ -1752,6 +1899,12 @@ airplay_metadata_keep_alive_send(struct airplay_session *session)
+@@ -1752,6 +1902,12 @@ airplay_metadata_keep_alive_send(struct airplay_session *session)
    sequence_start(AIRPLAY_SEQ_FEEDBACK, session, NULL, "keep_alive");
  }
  
@@ -593,7 +596,7 @@ index 4290b75..0381ca0 100644
  static void
  airplay_metadata_send(struct output_metadata *metadata)
  {
-@@ -1810,10 +1963,10 @@ airplay_volume_from_pct(int volume, const char *name)
+@@ -1810,10 +1966,10 @@ airplay_volume_from_pct(int volume, const char *name)
    max_volume = volume_max_get(name);
  
    /* RAOP volume
@@ -607,7 +610,7 @@ index 4290b75..0381ca0 100644
      airplay_volume = -30.0 + ((float)max_volume * (float)volume * 30.0) / (100.0 * AIRPLAY_CONFIG_MAX_VOLUME);
    else
      airplay_volume = -144.0;
-@@ -1824,50 +1977,30 @@ airplay_volume_from_pct(int volume, const char *name)
+@@ -1824,50 +1980,30 @@ airplay_volume_from_pct(int volume, const char *name)
  static int
  airplay_volume_to_pct(struct output_device *device, const char *volstr)
  {
@@ -677,7 +680,7 @@ index 4290b75..0381ca0 100644
  }
  
  /* Volume in [0 - 100] */
-@@ -1957,6 +2090,7 @@ packet_send(struct airplay_session *session, struct rtp_packet *pkt)
+@@ -1957,6 +2093,7 @@ packet_send(struct airplay_session *session, struct rtp_packet *pkt)
    size_t buf_len;
    ssize_t sent;
    int ret;
@@ -685,7 +688,7 @@ index 4290b75..0381ca0 100644
  
    if (!session)
      return -1;
-@@ -1968,6 +2102,8 @@ packet_send(struct airplay_session *session, struct rtp_packet *pkt)
+@@ -1968,6 +2105,8 @@ packet_send(struct airplay_session *session, struct rtp_packet *pkt)
  	return -1;
  
        sent = send(session->server_fd, buf, buf_len, 0);
@@ -694,7 +697,7 @@ index 4290b75..0381ca0 100644
        free(buf);
      }
    else
-@@ -1975,11 +2111,40 @@ packet_send(struct airplay_session *session, struct rtp_packet *pkt)
+@@ -1975,11 +2114,42 @@ packet_send(struct airplay_session *session, struct rtp_packet *pkt)
        buf = pkt->data;
        buf_len = pkt->data_len;
        sent = send(session->server_fd, buf, buf_len, 0);
@@ -725,10 +728,12 @@ index 4290b75..0381ca0 100644
 +                }
 +              int64_t elapsed_ns = ((int64_t)now.tv_sec - session->send_blocked_since.tv_sec) * 1000000000
 +                                 + now.tv_nsec - session->send_blocked_since.tv_nsec;
-+              // A 1.5 s grace can exceed the presentation lead. It avoids
-+              // tearing down the session for a brief local Wi-Fi queue stall;
-+              // audible delivery during that stall is not guaranteed.
-+              if (elapsed_ns >= 0 && elapsed_ns < 1500000000)
++              // The grace can exceed the presentation lead. It avoids tearing
++              // down the session for a brief local Wi-Fi queue stall; audible
++              // delivery during that stall is not guaranteed. 1.5 s was too
++              // short: a 2 s queue stall on 2026-10-19 14:53 failed both
++              // receivers and cost ~40 s of reconnects for a 2 s gap.
++              if (elapsed_ns >= 0 && elapsed_ns < (int64_t)AIRPLAY_SEND_BLOCKED_GRACE_MS * 1000000)
 +                return -1;
 +            }
 +        }
@@ -736,7 +741,7 @@ index 4290b75..0381ca0 100644
  
        // Can't free it right away, it would make the ->next in the calling
        // master_session and session loops invalid
-@@ -1988,10 +2153,46 @@ packet_send(struct airplay_session *session, struct rtp_packet *pkt)
+@@ -1988,10 +2158,46 @@ packet_send(struct airplay_session *session, struct rtp_packet *pkt)
      }
    else if (sent != buf_len)
      {
@@ -783,7 +788,7 @@ index 4290b75..0381ca0 100644
  /*
    DPRINTF(E_DBG, L_AIRPLAY, "RTP PACKET seqnum %u, rtptime %u, payload 0x%x, pktbuf_s %zu\n",
      session->master_session->rtp_session->seqnum,
-@@ -2038,43 +2239,142 @@ control_packet_send(struct airplay_session *session, struct rtp_packet *pkt)
+@@ -2038,43 +2244,142 @@ control_packet_send(struct airplay_session *session, struct rtp_packet *pkt)
  static void
  packets_resend(struct airplay_session *session, uint16_t seqnum, int len)
  {
@@ -944,7 +949,7 @@ index 4290b75..0381ca0 100644
  }
  
  static int
-@@ -2162,6 +2462,10 @@ packets_sync_send(struct airplay_master_session *ams)
+@@ -2162,6 +2467,10 @@ packets_sync_send(struct airplay_master_session *ams)
    struct airplay_session *session;
    struct timespec ts;
    bool is_sync_time;
@@ -955,7 +960,7 @@ index 4290b75..0381ca0 100644
  
    // Check if it is time send a sync packet to sessions that are already running
    is_sync_time = rtp_sync_is_time(ams->rtp_session);
-@@ -2177,6 +2481,24 @@ packets_sync_send(struct airplay_master_session *ams)
+@@ -2177,6 +2486,24 @@ packets_sync_send(struct airplay_master_session *ams)
        cur_stamp = ams->cur_stamp;
  
        // Apply user configured offset
@@ -980,7 +985,7 @@ index 4290b75..0381ca0 100644
        cur_stamp.pos -= session->offset_samples;
  
        // A device has joined and should get an init sync packet
-@@ -2193,6 +2515,43 @@ packets_sync_send(struct airplay_master_session *ams)
+@@ -2193,6 +2520,43 @@ packets_sync_send(struct airplay_master_session *ams)
  	{
  	  sync_pkt = rtp_sync_packet_next(ams->rtp_session, cur_stamp, 0x80);
  	  control_packet_send(session, sync_pkt);
@@ -1024,7 +1029,7 @@ index 4290b75..0381ca0 100644
  	}
      }
  }
-@@ -3035,6 +3394,26 @@ response_handler_record(struct evrtsp_request *req, struct airplay_session *sess
+@@ -3035,6 +3399,26 @@ response_handler_record(struct evrtsp_request *req, struct airplay_session *sess
    return AIRPLAY_SEQ_CONTINUE;
  }
  
@@ -1051,7 +1056,7 @@ index 4290b75..0381ca0 100644
  static enum airplay_seq_type
  response_handler_setup_stream(struct evrtsp_request *req, struct airplay_session *session)
  {
-@@ -3097,6 +3476,9 @@ response_handler_setup_stream(struct evrtsp_request *req, struct airplay_session
+@@ -3097,6 +3481,9 @@ response_handler_setup_stream(struct evrtsp_request *req, struct airplay_session
        goto error;
      }
  
@@ -1061,7 +1066,7 @@ index 4290b75..0381ca0 100644
    session->state = AIRPLAY_STATE_SETUP;
  
    plist_free(response);
-@@ -3623,14 +4005,14 @@ static struct airplay_seq_definition airplay_seq_definition[] =
+@@ -3623,14 +4010,14 @@ static struct airplay_seq_definition airplay_seq_definition[] =
    { AIRPLAY_SEQ_STOP, session_success, session_failure },
    { AIRPLAY_SEQ_FAILURE, session_success, session_failure},
    { AIRPLAY_SEQ_PIN_START, session_success, session_failure },
@@ -1078,7 +1083,7 @@ index 4290b75..0381ca0 100644
  };
  
  // The size of the second array dimension MUST at least be the size of largest
-@@ -3669,7 +4051,7 @@ static struct airplay_seq_request airplay_seq_request[][7] =
+@@ -3669,7 +4056,7 @@ static struct airplay_seq_request airplay_seq_request[][7] =
      { AIRPLAY_SEQ_PIN_START, "PIN start", EVRTSP_REQ_POST, payload_make_pin_start, response_handler_pin_start, NULL, "/pair-pin-start", false },
    },
    {
@@ -1087,7 +1092,7 @@ index 4290b75..0381ca0 100644
    },
    {
      { AIRPLAY_SEQ_SEND_TEXT, "SET_PARAMETER (text)", EVRTSP_REQ_SET_PARAMETER, payload_make_send_text, NULL, "application/x-dmap-tagged", NULL, true },
-@@ -3816,7 +4198,13 @@ sequence_continue(struct airplay_seq_ctx *seq_ctx)
+@@ -3816,7 +4203,13 @@ sequence_continue(struct airplay_seq_ctx *seq_ctx)
  
    ret = evrtsp_make_request(session->ctrl, req, cur_request->rtsp_type, uri);
    if (ret < 0)
@@ -1102,7 +1107,7 @@ index 4290b75..0381ca0 100644
  
    evrtsp_connection_set_closecb(session->ctrl, NULL, NULL);
  
-@@ -3830,11 +4218,13 @@ sequence_continue(struct airplay_seq_ctx *seq_ctx)
+@@ -3830,11 +4223,13 @@ sequence_continue(struct airplay_seq_ctx *seq_ctx)
    if (req)
      evrtsp_request_free(req);
  
@@ -1121,7 +1126,7 @@ index 4290b75..0381ca0 100644
  
    free(seq_ctx);
  }
-@@ -4276,6 +4666,7 @@ airplay_write(struct output_buffer *obuf)
+@@ -4276,6 +4671,7 @@ airplay_write(struct output_buffer *obuf)
  	evtimer_add(keep_alive_timer, &keep_alive_tv);
  
        session->state = AIRPLAY_STATE_STREAMING;
@@ -1275,10 +1280,24 @@ index 5b3d418..b1b05ea 100644
    return session;
  }
 diff --git a/src/player.c b/src/player.c
-index f9ce616..36daa5e 100644
+index f9ce616..0500fd0 100644
 --- a/src/player.c
 +++ b/src/player.c
-@@ -118,7 +118,7 @@
+@@ -115,10 +115,21 @@
+ // (value is in milliseconds)
+ #define PLAYER_WRITE_BEHIND_MAX 1500
+ 
++// DALI patch: a scheduler stall shorter than this is repaid by the paced
++// catch-up (three reads per callback) instead of being discarded. Discarding it
++// left pts and the input buffer that far behind real time for hours, because
++// only the 100 ppm slew remained to correct it (measured 1.2-2.5 s lags on
++// 2026-10-18). Longer gaps (sleep, debugger) are still dropped.
++#define PLAYER_STALL_REPAY_MAX_MS 5000
++
++// DALI patch: a pts lag above this, with no timer debt outstanding, is handed
++// to the catch-up loop as debt. Smaller lags keep the gentle 100 ppm slew.
++#define PLAYER_PTS_BEHIND_REPAY_MS 250
++
  // If a speaker fails during playback we try to bring it back by reconnecting
  // after this number of seconds. When this feature was added, we had an issue
  // with Homepods and ATV4's dropping connections, so it is also a workaround.
@@ -1287,7 +1306,7 @@ index f9ce616..36daa5e 100644
  
  // Shorthand condition for outputs_start and outputs_device_start, both need to
  // know if they should only probe the device, or fully start it.
-@@ -239,6 +239,10 @@ struct player_source
+@@ -239,6 +250,10 @@ struct player_source
    // This should at any time match the millisecond position of the media that is
    // coming out of your device. Will be 0 during initial buffering.
    uint32_t pos_ms;
@@ -1298,7 +1317,7 @@ index f9ce616..36daa5e 100644
  
    // How many samples the outputs buffer before playing (=delay)
    int output_buffer_samples;
-@@ -261,6 +265,9 @@ struct player_session
+@@ -261,6 +276,9 @@ struct player_session
    // It will be equal to:
    // pts = start_ts + ticks_elapsed * player_tick_interval
    struct timespec pts;
@@ -1308,7 +1327,7 @@ index f9ce616..36daa5e 100644
  
    // Equals current number of samples written to outputs
    uint32_t pos;
-@@ -313,6 +320,10 @@ static int clear_queue_on_stop_disabled;
+@@ -313,6 +331,10 @@ static int clear_queue_on_stop_disabled;
  
  // Player status
  static enum play_status player_state;
@@ -1319,7 +1338,7 @@ index f9ce616..36daa5e 100644
  static enum repeat_mode repeat;
  static char shuffle;
  static char consume;
-@@ -327,6 +338,17 @@ static struct event *pb_timer_ev;
+@@ -327,6 +349,17 @@ static struct event *pb_timer_ev;
  
  // Time between ticks, i.e. time between when playback_cb() is invoked
  static struct timespec player_tick_interval;
@@ -1337,7 +1356,7 @@ index f9ce616..36daa5e 100644
  // Timer resolution
  static struct timespec player_timer_res;
  
-@@ -855,6 +877,7 @@ session_update_read_start(uint32_t seek_ms)
+@@ -855,6 +888,7 @@ session_update_read_start(uint32_t seek_ms)
      return;
  
    pb_session.reading_now->pos_ms     = seek_ms;
@@ -1345,7 +1364,7 @@ index f9ce616..36daa5e 100644
    pb_session.reading_now->seek_ms    = seek_ms;
    pb_session.reading_now->read_start = pb_session.pos;
  
-@@ -864,7 +887,7 @@ session_update_read_start(uint32_t seek_ms)
+@@ -864,7 +898,7 @@ session_update_read_start(uint32_t seek_ms)
  static inline void
  session_update_read(int nsamples)
  {
@@ -1354,7 +1373,7 @@ index f9ce616..36daa5e 100644
  
    // Did we just complete our first read? Then set the start timestamp
    if (pb_session.start_ts.tv_sec == 0)
-@@ -881,11 +904,13 @@ session_update_read(int nsamples)
+@@ -881,11 +915,13 @@ session_update_read(int nsamples)
    if (!pb_session.playing_now->quality.sample_rate)
      return;
  
@@ -1371,7 +1390,7 @@ index f9ce616..36daa5e 100644
  }
  
  static void
-@@ -928,9 +953,71 @@ session_update_read_quality(struct media_quality *quality)
+@@ -928,9 +964,94 @@ session_update_read_quality(struct media_quality *quality)
  static void
  session_update_read_ts(struct timespec *ts)
  {
@@ -1404,11 +1423,34 @@ index f9ce616..36daa5e 100644
 +
 +  if (clock_gettime(CLOCK_MONOTONIC, &now_ts) < 0)
 +    goto out;
- 
++
++  // Not anchored yet: the first read sets pts from start_ts.
++  if (pb_session.pts.tv_sec == 0 && pb_session.pts.tv_nsec == 0)
++    goto out;
++
 +  if (timespec_cmp(pb_session.pts, now_ts) <= 0)
 +    {
 +      diff = timespec_sub(now_ts, pb_session.pts);
 +      diff_ms = (int64_t)diff.tv_sec * 1000 + diff.tv_nsec / 1000000;
++      // A large lag after the timer debt is paid means audio is still queued
++      // that the room should already be playing. Hand it to the paced
++      // catch-up, which advances pts only as real audio is read. Beyond the
++      // repay window the queued audio cannot exist any more: re-anchor.
++      if (diff_ms > PLAYER_PTS_BEHIND_REPAY_MS && pb_tick_debt_ns <= 20000000ULL)
++	{
++	  if (diff_ms > PLAYER_STALL_REPAY_MAX_MS)
++	    {
++	      DPRINTF(E_LOG, L_PLAYER, "AI event=pts_reanchor_behind lag_ms=%" PRIi64 "\n", diff_ms);
++	      pb_session.pts = now_ts;
++	    }
++	  else
++	    {
++	      DPRINTF(E_LOG, L_PLAYER, "AI event=pts_repay_behind lag_ms=%" PRIi64 "\n", diff_ms);
++	      pb_tick_debt_ns += (uint64_t)diff_ms * 1000000ULL;
++	    }
++	  pb_session.last_pts_slew_ts = now_ts;
++	  goto out;
++	}
 +      if (pb_session.last_pts_slew_ts.tv_sec != 0)
 +	{
 +	  elapsed = timespec_sub(now_ts, pb_session.last_pts_slew_ts);
@@ -1437,14 +1479,14 @@ index f9ce616..36daa5e 100644
 +    "AI event=pts_clamp_ahead diff_ms=%" PRIi64 "\n",
 +    diff_ms);
 +  pb_session.pts = now_ts;
-+
+ 
 + out:
    free(ts);
 +#undef PTS_AHEAD_DEADBAND_MS
  }
  
  static void
-@@ -947,7 +1034,10 @@ static void
+@@ -947,7 +1068,10 @@ static void
  session_update_play_metadata(struct input_metadata *metadata)
  {
    if (metadata->pos_is_updated)
@@ -1456,7 +1498,7 @@ index f9ce616..36daa5e 100644
    if (metadata->len_ms)
      pb_session.playing_now->len_ms = metadata->len_ms;
  }
-@@ -961,6 +1051,17 @@ session_restart(void)
+@@ -961,6 +1085,17 @@ session_restart(void)
    pb_session.pts.tv_nsec = 0;
    pb_session.read_deficit = 0;
    pb_session.metadata_sent = 0;
@@ -1474,7 +1516,7 @@ index f9ce616..36daa5e 100644
  }
  
  static void
-@@ -1272,7 +1373,10 @@ static void
+@@ -1272,7 +1407,10 @@ static void
  playback_cb(int fd, short what, void *arg)
  {
    struct timespec ts;
@@ -1485,7 +1527,7 @@ index f9ce616..36daa5e 100644
    int nbytes;
    int nsamples;
    int i;
-@@ -1280,20 +1384,153 @@ playback_cb(int fd, short what, void *arg)
+@@ -1280,20 +1418,161 @@ playback_cb(int fd, short what, void *arg)
  
    // Check if we missed any timer expirations
    overrun = 0;
@@ -1549,10 +1591,10 @@ index f9ce616..36daa5e 100644
 +            struct timespec el = timespec_sub(tick_now, pb_tick_last);
 +            uint64_t el_ns = (uint64_t)el.tv_sec * 1000000000ULL + (uint64_t)el.tv_nsec;
 +
-+            // A pause/resume or a debugger stop can hand us a huge gap; that is
-+            // not audio we owe anyone, so discard it rather than reading a
-+            // burst. One second of catch-up is already far more than any real
-+            // scheduling hiccup.
++            // A sleep or a debugger stop can hand us a huge gap; that is not
++            // audio we owe anyone, so a gap of PLAYER_STALL_REPAY_MAX_MS or
++            // more is discarded rather than read. (Pause/resume and restarts
++            // clear pb_tick_last, so they never reach this accounting.)
 +            //
 +            // Wall time is authoritative for the TOTAL number of reads. libevent
 +            // may deliver accumulated SIGALRM callbacks back-to-back; consuming
@@ -1560,10 +1602,18 @@ index f9ce616..36daa5e 100644
 +            // wall-clock catch-up reads double-counted those ticks and drained a
 +            // real-time pipe by 8–10%. Send at most three reads now and preserve
 +            // the remainder as debt for later callbacks.
-+            if (el_ns < 1000000000ULL)
++            //
++            // A stall of up to PLAYER_STALL_REPAY_MAX_MS is still audio the
++            // room is owed: the producer kept writing in real time, so the
++            // input holds it. Repay it at the same paced rate rather than
++            // dropping the debt, which used to leave pts permanently behind.
++            if (el_ns < (uint64_t)PLAYER_STALL_REPAY_MAX_MS * 1000000ULL)
 +              {
 +                uint64_t reads_due;
 +                uint64_t reads_now;
++
++                if (el_ns >= 1000000000ULL)
++                  DPRINTF(E_LOG, L_PLAYER, "AI event=timer_stall gap_ms=%" PRIu64 " repaying\n", el_ns / 1000000ULL);
 +
 +                pb_tick_debt_ns += el_ns;
 +                reads_due = pb_tick_debt_ns / tick_ns;
@@ -1645,7 +1695,7 @@ index f9ce616..36daa5e 100644
    // We are too delayed, probably some output blocked: reset if first overrun or abort if second overrun
    if (overrun > pb_write_deficit_max)
      {
-@@ -1317,7 +1554,7 @@ playback_cb(int fd, short what, void *arg)
+@@ -1317,7 +1596,7 @@ playback_cb(int fd, short what, void *arg)
    else
      {
        if (overrun > 1) // An overrun of 1 is no big deal
@@ -1654,7 +1704,19 @@ index f9ce616..36daa5e 100644
  
        pb_write_recovery = false;
      }
-@@ -1372,6 +1609,17 @@ playback_cb(int fd, short what, void *arg)
+@@ -1344,6 +1623,11 @@ playback_cb(int fd, short what, void *arg)
+ 	}
+       if (nbytes == 0)
+ 	{
++	  // DALI patch: catch-up found the input empty, so the audio it was
++	  // repaying is not there. Stop pressing for it; a real remaining lag is
++	  // re-measured from pts at the next pipe marker.
++	  if (overrun > 0)
++	    pb_tick_debt_ns = 0;
+ 	  break;
+ 	}
+ 
+@@ -1372,6 +1656,17 @@ playback_cb(int fd, short what, void *arg)
  	}
      }
  
@@ -1672,7 +1734,7 @@ index f9ce616..36daa5e 100644
    if (pb_session.read_deficit_max && pb_session.read_deficit > pb_session.read_deficit_max)
      {
        DPRINTF(E_LOG, L_PLAYER, "Source is not providing sufficient data, temporarily suspending playback (deficit=%zu/%zu bytes)\n",
-@@ -1507,13 +1755,23 @@ device_streaming_cb(struct output_device *device, enum output_device_state statu
+@@ -1507,13 +1802,23 @@ device_streaming_cb(struct output_device *device, enum output_device_state statu
  
        // The device can fail outside of playback, e.g. if it disconnects after a
        // flush command
@@ -1701,7 +1763,7 @@ index f9ce616..36daa5e 100644
  	goto out;
  
        DPRINTF(E_LOG, L_PLAYER, "Attempting reconnection in %d sec to the %s device '%s'\n", PLAYER_SPEAKER_RESURRECT_TIME, device->type_name, device->name);
-@@ -1524,6 +1782,58 @@ device_streaming_cb(struct output_device *device, enum output_device_state statu
+@@ -1524,6 +1829,58 @@ device_streaming_cb(struct output_device *device, enum output_device_state statu
    else if (status == OUTPUT_STATE_STOPPED)
      {
        DPRINTF(E_INFO, L_PLAYER, "The %s device '%s' stopped\n", device->type_name, device->name);
@@ -1760,7 +1822,7 @@ index f9ce616..36daa5e 100644
      }
    else
      {
-@@ -1541,19 +1851,27 @@ device_streaming_cb(struct output_device *device, enum output_device_state statu
+@@ -1541,19 +1898,27 @@ device_streaming_cb(struct output_device *device, enum output_device_state statu
  static void
  device_volume_cb(struct output_device *device, enum output_device_state status)
  {
@@ -1788,7 +1850,7 @@ index f9ce616..36daa5e 100644
    outputs_device_cb_set(device, device_streaming_cb);
  
   out:
-@@ -1562,7 +1880,7 @@ device_volume_cb(struct output_device *device, enum output_device_state status)
+@@ -1562,7 +1927,7 @@ device_volume_cb(struct output_device *device, enum output_device_state status)
    if (outputs_sessions_count() == 0)
      pb_suspend();
  
@@ -1797,7 +1859,22 @@ index f9ce616..36daa5e 100644
  }
  
  static void
-@@ -1803,6 +2121,7 @@ pb_session_stop(void)
+@@ -1691,6 +2056,14 @@ pb_timer_start(void)
+   // playback loop has been kicked off, we deactivate them
+   outputs_stop_delayed_cancel();
+ 
++  // DALI patch: time while the timer was stopped (stop, pause, a quick
++  // Stop then Play) is not a scheduler stall. Without this reset a 3 s
++  // Stop/Play was "repaid" as a catch-up burst on 2026-10-19 15:33, which
++  // pushed the RTP timeline ahead of pts and left the Sonos silent.
++  pb_tick_last.tv_sec = 0;
++  pb_tick_last.tv_nsec = 0;
++  pb_tick_debt_ns = 0;
++
+   ret = event_add(pb_timer_ev, NULL);
+   if (ret < 0)
+     {
+@@ -1803,6 +2176,7 @@ pb_session_stop(void)
  static void
  pb_abort(void)
  {
@@ -1805,7 +1882,7 @@ index f9ce616..36daa5e 100644
    // Immediate stop of all outputs
    outputs_stop(device_streaming_cb);
    outputs_metadata_purge();
-@@ -1984,6 +2303,7 @@ playing_now(void *arg, int *retval)
+@@ -1984,6 +2358,7 @@ playing_now(void *arg, int *retval)
  static enum command_state
  playback_stop(void *arg, int *retval)
  {
@@ -1813,7 +1890,7 @@ index f9ce616..36daa5e 100644
    if (player_state == PLAY_STOPPED)
      {
        *retval = 0;
-@@ -2030,6 +2350,7 @@ playback_start_bh(void *arg, int *retval)
+@@ -2030,6 +2405,7 @@ playback_start_bh(void *arg, int *retval)
  
    // We also ask listeners to update speaker/volume state, since it is possible
    // some of the speakers we tried to start responded with failure
@@ -1821,7 +1898,7 @@ index f9ce616..36daa5e 100644
    status_update(PLAY_PLAYING, LISTENER_PLAYER | LISTENER_SPEAKER | LISTENER_VOLUME);
  
    *retval = 0;
-@@ -2470,6 +2791,7 @@ playback_pause_bh(void *arg, int *retval)
+@@ -2470,6 +2846,7 @@ playback_pause_bh(void *arg, int *retval)
  static enum command_state
  playback_pause(void *arg, int *retval)
  {
@@ -1829,7 +1906,7 @@ index f9ce616..36daa5e 100644
    if (player_state == PLAY_STOPPED)
      {
        *retval = -1;
-@@ -2498,6 +2820,7 @@ playback_pause(void *arg, int *retval)
+@@ -2498,6 +2875,7 @@ playback_pause(void *arg, int *retval)
  static enum command_state
  playback_flush(void *arg, int *retval)
  {
@@ -1837,7 +1914,7 @@ index f9ce616..36daa5e 100644
    if (player_state == PLAY_STOPPED)
      {
        *retval = -1;
-@@ -2562,6 +2885,8 @@ device_to_speaker_info(struct player_speaker_info *spk, struct output_device *de
+@@ -2562,6 +2940,8 @@ device_to_speaker_info(struct player_speaker_info *spk, struct output_device *de
      spk->format = device->supported_formats;
  
    spk->selected = OUTPUTS_DEVICE_DISPLAY_SELECTED(device);
@@ -1846,7 +1923,7 @@ index f9ce616..36daa5e 100644
  
    spk->has_password = device->has_password;
    spk->has_video = device->has_video;
-@@ -2978,6 +3303,9 @@ speaker_resurrect(void *arg, int *retval)
+@@ -2978,6 +3358,9 @@ speaker_resurrect(void *arg, int *retval)
        // Playback was suspended by device_streaming_cb() because the speaker was
        // the only one playing. In that case we need to first resume the source,
        // then wait for the speaker to reactivate, and then run bottom half.

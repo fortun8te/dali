@@ -136,10 +136,16 @@ final class DALIStore {
         source = .app(pid: app.processIdentifier, name: saved)
     }
 
-    /// The Mac's output volume 0...1 controls a common system-capture PCM gain.
-    /// Receiver calibration stays fixed across ordinary nonzero master changes;
-    /// zero additionally mutes buffered audio through the receiver controls.
-    var systemVolume: Double = 0.5 { didSet { scheduleVolumePush() } }
+    /// V1 receiver response plus the shared quiet-end taper below Mac step two.
+    var systemVolume: Double = 0.5 {
+        didSet {
+            if backendEnabled, oldValue != systemVolume {
+                aiEvent("volume_intent", fields: ["master": systemVolume,
+                    "pcm_gain": roomVolumePlan.pcmGain, "targets": roomVolumePlan.hardware])
+            }
+            scheduleVolumePush()
+        }
+    }
 
     /// Music level 0...1 for the room visualization.
     var audioLevel: Double = 0
@@ -1286,6 +1292,14 @@ final class DALIStore {
             return
         }
         resolveSavedSource()
+        // Play means the room: the front and back pair always join a new
+        // session. Switching one off is for the current session only; a saved
+        // "off" left a speaker silently missing on every later start.
+        for i in speakers.indices where speakers[i].kind != .extra && !speakers[i].enabled {
+            speakers[i].enabled = true
+            preferences.set(true, forKey: "dali.on.\(speakers[i].name)")
+            dlog("\(speakers[i].name) was switched off; re-included for this start")
+        }
         let sessionSource = source
         let precedingTeardown = teardownTask
         let requestedAt = Date()
@@ -2220,8 +2234,21 @@ final class DALIStore {
 
     func effectiveVolume(_ speaker: RoomSpeaker) -> Int { roomVolumePlan.hardware[speaker.id] ?? 0 }
     private(set) var captureMasterGain = 1.0
-    @ObservationIgnored private lazy var volumeController = RoomVolumeCoordinator(write: injectedVolumeWrite ?? { [api] id, value in
-        switch await api.setVolumeConfirmed(outputID: id, volume: value) {
+    @ObservationIgnored private lazy var volumeController = RoomVolumeCoordinator(write: injectedVolumeWrite ?? { [weak self, api] id, value in
+        let began = DispatchTime.now().uptimeNanoseconds
+        let result = await api.setVolumeConfirmed(outputID: id, volume: value)
+        let elapsedMs = Double(DispatchTime.now().uptimeNanoseconds - began) / 1_000_000
+        let label: String
+        switch result {
+        case .applied: label = "applied"
+        case .superseded: label = "superseded"
+        case .unknown: label = "unknown"
+        }
+        Task { @MainActor [weak self] in
+            self?.aiEvent("volume_write", fields: ["speaker": id, "target": value,
+                "ms": elapsedMs, "result": label])
+        }
+        switch result {
         case .applied: return .applied
         case .superseded: return .superseded
         case .unknown: return .unknown
@@ -3040,8 +3067,12 @@ final class DALIStore {
     /// EngineSupervisor.reapEngines). Posted synchronously on the main thread
     /// before exit, so blocking up to ~3 s here is the whole point.
     private func reapEngineOnQuit(confPath: String) {
+        let api = self.api
         NotificationCenter.default.addObserver(forName: NSApplication.willTerminateNotification,
                                                object: nil, queue: nil) { _ in
+            // Release the receivers first: a killed engine never tears its
+            // AirPlay sessions down, and the next launch then waits for them.
+            api.releaseOutputsForQuit()
             EngineSupervisor.reapEngines(matchingConfig: confPath, graceSeconds: 3.0)
         }
     }

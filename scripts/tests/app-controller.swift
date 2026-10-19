@@ -101,7 +101,7 @@ struct AppControllerRegression {
             let sourceActivity = Mutex<Bool?>(nil)
             let capture = CaptureController(makeTap: {
                 let tap = RecoveryFixtureTap(); taps.withLock { $0.append(tap) }; return tap
-            }, observeWake: false, sourceActivity: { _ in sourceActivity.withLock { $0 } })
+            }, observeWake: false, sourceActivity: { _ in sourceActivity.withLock { $0 } }, micInUse: { _ in false })
             let recoveryStore = DALIStore(defaults: defaults, backendEnabled: false, capture: capture)
             try await capture.startAsync(fifoPath: pipe)
             defer { capture.stop() }

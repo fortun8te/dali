@@ -256,6 +256,34 @@ public struct BeamAPI: Sendable {
         _ = try await request("PUT", "/api/player/stop")
     }
 
+    /// App quit: stop the player and deselect every output so the engine sends
+    /// each receiver a proper TEARDOWN before it is terminated. A SIGTERM alone
+    /// left Bluesound/Sonos holding the old AirPlay session, and the next start
+    /// failed its first probe and spent 8-27 s in the recovery ladder.
+    /// Synchronous and bounded: it runs from willTerminate on the main thread.
+    public func releaseOutputsForQuit(timeout: TimeInterval = 1.5) {
+        let deadline = Date().addingTimeInterval(timeout)
+        let config = URLSessionConfiguration.ephemeral
+        config.timeoutIntervalForRequest = timeout
+        let session = URLSession(configuration: config)
+        defer { session.invalidateAndCancel() }
+        let calls: [(String, Data?)] = [
+            ("/api/player/stop", nil),
+            ("/api/outputs/set", try? JSONSerialization.data(withJSONObject: ["outputs": [String]()])),
+        ]
+        for (path, body) in calls {
+            let remaining = deadline.timeIntervalSinceNow
+            guard remaining > 0.05 else { return }
+            var request = URLRequest(url: baseURL.appendingPathComponent(path))
+            request.httpMethod = "PUT"
+            request.httpBody = body
+            request.timeoutInterval = remaining
+            let done = DispatchSemaphore(value: 0)
+            session.dataTask(with: request) { _, _, _ in done.signal() }.resume()
+            _ = done.wait(timeout: .now() + remaining)
+        }
+    }
+
     public func playerState(deadline: TimeInterval? = nil) async throws -> PlayerState {
         try JSONDecoder().decode(PlayerState.self, from: try await request("GET", "/api/player", deadline: deadline))
     }

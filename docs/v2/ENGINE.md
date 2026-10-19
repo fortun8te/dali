@@ -10,16 +10,21 @@ from the pinned upstream archive.
 
 - PTS bounds use the monotonic clock when a pipe marker is consumed. A marker's
   earlier capture timestamp does not reset the playback clock. Ahead-of-clock
-  PTS is clamped after 5 ms; persistent behind drift receives only the existing
-  100 microsecond correction while timer debt is low.
+  PTS is clamped after 5 ms. Behind drift of 100 to 250 ms receives the 100
+  microsecond correction while timer debt is low. A larger lag is handed to
+  the paced catch-up as debt (pts advances only as real audio is read); a lag
+  beyond 5 s re-anchors pts to the monotonic clock.
 - Fractional sample progress accumulates its remainder instead of losing a
   fraction of a millisecond on each short read.
 - macOS catch-up uses elapsed wall time, sends at most three reads per callback,
-  repays the remaining debt, and skips early coalesced callbacks. A gap of one
-  second or longer discards historical debt. This matches the current reviewed
-  local implementation, which supersedes the older immediate-burst repair.
-- Local UDP backpressure retains the session for less than 1.5 seconds. Exactly
-  1.5 seconds takes the normal deferred failure path. Successful sends reset
+  repays the remaining debt, and skips early coalesced callbacks. A scheduler
+  stall shorter than 5 s is repaid at that paced rate; only a longer gap (sleep,
+  debugger) discards its debt. Catch-up that finds the input empty drops the
+  remaining debt. Discarding every stall of one second or more used to leave
+  pts and the input buffer 1.2 to 2.5 s behind for hours (2026-10-18).
+- Local UDP backpressure retains the session for less than 3 seconds. Exactly
+  3 seconds takes the normal deferred failure path. (1.5 s failed both
+  receivers during a 2 s Wi-Fi queue stall on 2026-10-19.) Successful sends reset
   the allowance. This grace exceeds the default presentation lead and does not
   promise uninterrupted sound while the local queue is full.
 - Capture supplies forward-paced silence in the Swift transport. The engine's

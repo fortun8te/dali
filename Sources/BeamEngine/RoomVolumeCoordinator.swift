@@ -37,6 +37,7 @@ public final class RoomVolumeCoordinator {
     private var revision = 0
     private var writes = 0
     private var urgent = false
+    private var lastPositiveWriteID: String?
     public private(set) var applied: [String: Int] = [:]
     public private(set) var isWriting = false
     public private(set) var lastCompletionAt = Date.distantPast
@@ -130,6 +131,7 @@ public final class RoomVolumeCoordinator {
         driverGeneration += 1; sleeper?.cancel(); sleeper = nil; task?.cancel(); task = nil; isWriting = false
         desired.removeAll(); applied.removeAll(); eligible.removeAll(); temporary.removeAll()
         failures.removeAll(); retryAt.removeAll(); urgent = false; revision += 1
+        lastPositiveWriteID = nil
         let old = waiters; waiters.removeAll()
         for waiter in old { waiter.continuation.resume(returning: false) }
     }
@@ -177,13 +179,20 @@ public final class RoomVolumeCoordinator {
             let ids = pendingIDs()
             guard !ids.isEmpty else { finishSatisfiedWaiters(); return }
             let instant = now()
-            guard let id = ids.first(where: { (retryAt[$0] ?? instant) <= instant }) else {
+            let ready = ids.filter { (retryAt[$0] ?? instant) <= instant }
+            guard !ready.isEmpty else {
                 let wake = ids.compactMap { retryAt[$0] }.min() ?? instant
                 do { try await pause(instant.duration(to: wake)) } catch { return }
                 continue
             }
+            // Repeated master changes leave every speaker pending. Rotate
+            // positive writes so the first ID cannot monopolize the lane;
+            // ready mutes always take precedence, regardless of that rotation.
+            let nextPositive = lastPositiveWriteID.flatMap { previous in ready.first { $0 > previous } }
+            let id = ready.first { target($0) == 0 } ?? nextPositive ?? ready[0]
             guard let value = target(id) else { continue }
             let epoch = session
+            if value > 0 { lastPositiveWriteID = id }
             isWriting = true; writes += 1
             let result = await write(id, value)
             guard active, generation == driverGeneration, epoch == session, !Task.isCancelled else { return }

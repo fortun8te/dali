@@ -2,6 +2,22 @@ import Foundation
 import AVFoundation
 import Synchronization
 
+// Every fixture supplies fake hardware and microphone observations. A real
+// call on the developer's Mac must not change the fixture's outgoing PCM.
+private func isolatedCapture(
+    makeTap: @escaping @Sendable () -> any CaptureTap,
+    observeWake: Bool = false,
+    beforePublish: (@Sendable () -> Void)? = nil,
+    stallRebuildAfter: Double = 4,
+    sourceActivity: @escaping @Sendable (ProcessTap.Source) -> Bool? = { _ in nil },
+    micInUse: @escaping @Sendable (ProcessTap.Source) -> Bool = { _ in false },
+    callPollInterval: Double = 0.5
+) -> CaptureController {
+    CaptureController(makeTap: makeTap, observeWake: observeWake, beforePublish: beforePublish,
+                      stallRebuildAfter: stallRebuildAfter, sourceActivity: sourceActivity,
+                      micInUse: micInUse, callPollInterval: callPollInterval)
+}
+
 private struct Failure: Error, CustomStringConvertible {
     let description: String
 }
@@ -115,7 +131,7 @@ private struct CaptureLifecycleTests {
         let active = Mutex<Bool?>(true)
         let entered = DispatchSemaphore(value: 0), release = DispatchSemaphore(value: 0)
         let blockOnce = Mutex(true), skipped = Mutex(false)
-        let capture = CaptureController(makeTap: { factory.make() }, observeWake: false,
+        let capture = isolatedCapture(makeTap: { factory.make() }, observeWake: false,
             stallRebuildAfter: 0.4, sourceActivity: { _ in active.withLock { $0 } })
         capture.onEvent = { event in
             if event.hasPrefix("capture_recovery:"), blockOnce.withLock({ let old = $0; $0 = false; return old }) {
@@ -142,7 +158,7 @@ private struct CaptureLifecycleTests {
     static func inactiveSourceDoesNotSpendCaptureRecovery(nextActivity: Bool? = true) async throws {
         let fixture = try PipeFixture(), factory = TapFactory()
         let active = Mutex<Bool?>(false)
-        let capture = CaptureController(makeTap: { factory.make() }, observeWake: false,
+        let capture = isolatedCapture(makeTap: { factory.make() }, observeWake: false,
             stallRebuildAfter: 0.2, sourceActivity: { _ in active.withLock { $0 } })
         try await capture.startAsync(fifoPath: fixture.path)
         defer { capture.stop() }
@@ -184,7 +200,7 @@ private struct CaptureLifecycleTests {
         let firstEntered = DispatchSemaphore(value: 0), releaseFirst = DispatchSemaphore(value: 0)
         let secondEntered = DispatchSemaphore(value: 0), releaseSecond = DispatchSemaphore(value: 0)
         let queriedSources = Mutex<[ProcessTap.Source]>([])
-        let capture = CaptureController(makeTap: { factory.make() }, observeWake: false,
+        let capture = isolatedCapture(makeTap: { factory.make() }, observeWake: false,
             stallRebuildAfter: 10, sourceActivity: { source in
                 let count = queriedSources.withLock { $0.append(source); return $0.count }
                 if count == 1 { firstEntered.signal(); releaseFirst.wait(); return false }
@@ -218,7 +234,7 @@ private struct CaptureLifecycleTests {
     static func activeSourceFirstCallbackStaysHealthy() async throws {
         let fixture = try PipeFixture(), factory = TapFactory()
         let active = Mutex<Bool?>(false)
-        let capture = CaptureController(makeTap: { factory.make() }, observeWake: false,
+        let capture = isolatedCapture(makeTap: { factory.make() }, observeWake: false,
             stallRebuildAfter: 0.2, sourceActivity: { _ in active.withLock { $0 } })
         try await capture.startAsync(fifoPath: fixture.path)
         defer { capture.stop() }
@@ -236,7 +252,7 @@ private struct CaptureLifecycleTests {
 
     static func keepaliveUpdatesSilenceWithoutInventingCallbacks() async throws {
         let fixture = try PipeFixture(), factory = TapFactory()
-        let capture = CaptureController(makeTap: { factory.make() }, observeWake: false, sourceActivity: { _ in nil })
+        let capture = isolatedCapture(makeTap: { factory.make() }, observeWake: false, sourceActivity: { _ in nil })
         try await capture.startAsync(fifoPath: fixture.path)
         defer { capture.stop() }
         factory.latest.emit(value: 0.5, rate: 44100)
@@ -261,7 +277,7 @@ private struct CaptureLifecycleTests {
             let fail = starts.withLock { $0 += 1; return $0 == 2 }
             if fail { throw Failure(description: "Injected rebuild failure") }
         } }
-        let capture = CaptureController(makeTap: { factory.make() }, observeWake: false, sourceActivity: { _ in nil })
+        let capture = isolatedCapture(makeTap: { factory.make() }, observeWake: false, sourceActivity: { _ in nil })
         try await capture.startAsync(fifoPath: fixture.path)
         defer { capture.stop() }
         let rebuilt = await capture.rebuildAsync(fifoPath: fixture.path, muteLocal: true, source: .system,
@@ -281,7 +297,7 @@ private struct CaptureLifecycleTests {
     /// No pre-gap positive sample may escape ahead of the new buffer's fade.
     static func gapDiscardsVarispeedHistory(returnToUnity: Bool) async throws {
         let fixture = try PipeFixture(), factory = TapFactory()
-        let capture = CaptureController(makeTap: { factory.make() }, observeWake: false, sourceActivity: { _ in nil })
+        let capture = isolatedCapture(makeTap: { factory.make() }, observeWake: false, sourceActivity: { _ in nil })
         try await capture.startAsync(fifoPath: fixture.path)
         defer { capture.stop() }
         capture.setTargetRatio(0.995)
@@ -322,7 +338,7 @@ private struct CaptureLifecycleTests {
 
     static func recoveryEvidenceRequiresFreshPublishedBuffers() async throws {
         let fixture = try PipeFixture(), factory = TapFactory()
-        let capture = CaptureController(makeTap: { factory.make() }, observeWake: false, sourceActivity: { _ in nil })
+        let capture = isolatedCapture(makeTap: { factory.make() }, observeWake: false, sourceActivity: { _ in nil })
         try await capture.startAsync(fifoPath: fixture.path)
         defer { capture.stop() }
         let initial = capture.publicationProgress
@@ -372,9 +388,9 @@ private struct CaptureLifecycleTests {
         let mic = Mutex(false)
         let fixture = try PipeFixture(), factory = TapFactory()
         let events = Mutex<[String]>([])
-        let capture = CaptureController(makeTap: { factory.make() }, observeWake: false,
+        let capture = isolatedCapture(makeTap: { factory.make() }, observeWake: false,
                                         stallRebuildAfter: 60, // idle fake tap is not a stall here
-                                        micInUse: { mic.withLock { $0 } }, callPollInterval: 0.02)
+                                        micInUse: { _ in mic.withLock { $0 } }, callPollInterval: 0.02)
         capture.onEvent = { message in events.withLock { $0.append(message) } }
         try await capture.startAsync(fifoPath: fixture.path)
         let full = try await level(capture, fixture, factory.latest)
@@ -405,13 +421,38 @@ private struct CaptureLifecycleTests {
         let first = try await level(capture, midCall, factory.latest)
         try expect(first < full - 15, "Session started mid-call played a full-level moment (\(first) dBFS)")
         capture.stop()
+
+        let browser = CallAudio.Process(object: 10, pid: 70, bundleID: "com.google.Chrome", isRunningInput: true)
+        let assistant = CallAudio.Process(object: 11, pid: 71, bundleID: "com.openai.codex", isRunningInput: true)
+        let music = CallAudio.Process(object: 12, pid: 72, bundleID: "com.spotify.client", isRunningInput: false)
+        let meter = CallAudio.Process(object: 13, pid: 73, bundleID: "com.openai.codex.system-audio-spectrum", isRunningInput: true)
+        for (source, processes, shouldDuck) in [
+            (ProcessTap.Source.system, [browser], false),
+            (.system, [browser, meter], false),
+            (.process(71), [assistant, music], false),
+            (.process(72), [assistant, music], true),
+        ] {
+            let voicePipe = try PipeFixture(), voiceFactory = TapFactory()
+            let voice = isolatedCapture(makeTap: { voiceFactory.make() },
+                micInUse: { selected in CallAudio.micInUse(in: processes, ownPID: 42, source: selected) },
+                callPollInterval: 0.02)
+            try await voice.startAsync(fifoPath: voicePipe.path, source: source)
+            try expect(voice.isCallDucked == shouldDuck, "Initial call decision ignored the captured source")
+            try await Task.sleep(for: .milliseconds(100))
+            try expect(voice.isCallDucked == shouldDuck, "Call poll ignored the captured source")
+            let output = try await level(voice, voicePipe, voiceFactory.latest)
+            try expect(shouldDuck ? output < full - 15 : output > full - 1,
+                       "Voice/background routing applied the wrong PCM gain")
+            try expect(voiceFactory.count == 1, "Call observation unnecessarily rebuilt capture")
+            voice.stop()
+        }
     }
 
     static func slowTapStartIsNotMistakenForAStall() async throws {
         let fixture = try PipeFixture(), factory = TapFactory()
         factory.configure = { tap in tap.onStart = { Thread.sleep(forTimeInterval: 0.6) } }
         let events = Mutex<[String]>([])
-        let capture = CaptureController(makeTap: { factory.make() }, observeWake: false,
+        let capture = isolatedCapture(makeTap: { factory.make() }, observeWake: false,
                                         stallRebuildAfter: 0.4, sourceActivity: { _ in nil })
         capture.onEvent = { message in events.withLock { $0.append(message) } }
         try await capture.startAsync(fifoPath: fixture.path)
@@ -432,7 +473,7 @@ private struct CaptureLifecycleTests {
         let fixture = try PipeFixture(), factory = TapFactory()
         let entered = DispatchSemaphore(value: 0), release = DispatchSemaphore(value: 0)
         factory.configure = { tap in tap.onStart = { entered.signal(); release.wait() } }
-        let capture = CaptureController(makeTap: { factory.make() }, observeWake: false, sourceActivity: { _ in nil })
+        let capture = isolatedCapture(makeTap: { factory.make() }, observeWake: false, sourceActivity: { _ in nil })
         let starting = Task { [path = fixture.path] in try await capture.startAsync(fifoPath: path) }
         try await waitSignal(entered)
         let begin = DispatchTime.now().uptimeNanoseconds
@@ -450,7 +491,7 @@ private struct CaptureLifecycleTests {
         let fixture = try PipeFixture(), factory = TapFactory()
         let converted = DispatchSemaphore(value: 0), release = DispatchSemaphore(value: 0), finished = DispatchSemaphore(value: 0)
         let blockOnce = Mutex(true)
-        let capture = CaptureController(makeTap: { factory.make() }, observeWake: false, beforePublish: {
+        let capture = isolatedCapture(makeTap: { factory.make() }, observeWake: false, beforePublish: {
             if blockOnce.withLock({ let value = $0; $0 = false; return value }) {
                 converted.signal(); release.wait()
             }
@@ -475,7 +516,7 @@ private struct CaptureLifecycleTests {
 
     static func converterStallCannotRefreshOldAudio() async throws {
         let fixture = try PipeFixture(), factory = TapFactory()
-        let capture = CaptureController(makeTap: { factory.make() }, observeWake: false,
+        let capture = isolatedCapture(makeTap: { factory.make() }, observeWake: false,
                                         beforePublish: { usleep(300_000) }, sourceActivity: { _ in nil })
         try await capture.startAsync(fifoPath: fixture.path)
         factory.latest.emit()
@@ -491,7 +532,7 @@ private struct CaptureLifecycleTests {
         let fixture = try PipeFixture(), factory = TapFactory()
         let entered = DispatchSemaphore(value: 0), release = DispatchSemaphore(value: 0)
         factory.configure = { tap in tap.onStart = { entered.signal(); release.wait() } }
-        let capture = CaptureController(makeTap: { factory.make() }, observeWake: false, sourceActivity: { _ in nil })
+        let capture = isolatedCapture(makeTap: { factory.make() }, observeWake: false, sourceActivity: { _ in nil })
         let starting = Task { [path = fixture.path] in try await capture.startAsync(fifoPath: path) }
         try await waitSignal(entered)
         capture.setMasterGain(0) // handler was attached at gain 1, HAL still starting
@@ -505,7 +546,7 @@ private struct CaptureLifecycleTests {
 
     static func mutedStartRebuildAndSourceSelection() async throws {
         let fixture = try PipeFixture(), factory = TapFactory()
-        let capture = CaptureController(makeTap: { factory.make() }, observeWake: false, sourceActivity: { _ in nil })
+        let capture = isolatedCapture(makeTap: { factory.make() }, observeWake: false, sourceActivity: { _ in nil })
         capture.setMasterGain(0)
         try await capture.startAsync(fifoPath: fixture.path, muteLocal: true, source: .system)
         factory.latest.emit()
@@ -536,7 +577,7 @@ private struct CaptureLifecycleTests {
     static func stopCannotWaitForHardware() async throws {
         let fixture = try PipeFixture(), factory = TapFactory()
         let entered = DispatchSemaphore(value: 0), release = DispatchSemaphore(value: 0)
-        let capture = CaptureController(makeTap: { factory.make() }, observeWake: false, sourceActivity: { _ in nil })
+        let capture = isolatedCapture(makeTap: { factory.make() }, observeWake: false, sourceActivity: { _ in nil })
         try await capture.startAsync(fifoPath: fixture.path)
         factory.latest.onStop = { entered.signal(); release.wait() }
         let begin = DispatchTime.now().uptimeNanoseconds
@@ -554,7 +595,7 @@ private struct CaptureLifecycleTests {
 
     static func signalSnapshotsDistinguishMuteSilenceAndMissingMeasurements() async throws {
         let fixture = try PipeFixture(), factory = TapFactory()
-        let capture = CaptureController(makeTap: { factory.make() }, observeWake: false, sourceActivity: { _ in nil })
+        let capture = isolatedCapture(makeTap: { factory.make() }, observeWake: false, sourceActivity: { _ in nil })
         capture.setMasterGain(0)
         try await capture.startAsync(fifoPath: fixture.path)
         factory.latest.emit(rate: 44100)
@@ -580,7 +621,7 @@ private struct CaptureLifecycleTests {
                 if failOnce.withLock({ let value = $0; $0 = false; return value }) { throw Failure(description: "Injected tap creation failure") }
             }
         }
-        let capture = CaptureController(makeTap: { factory.make() }, observeWake: false, sourceActivity: { _ in nil })
+        let capture = isolatedCapture(makeTap: { factory.make() }, observeWake: false, sourceActivity: { _ in nil })
         do { try await capture.startAsync(fifoPath: fixture.path); throw Failure(description: "Injected start failure disappeared") }
         catch let error as Failure { try expect(error.description == "Injected tap creation failure", "Wrong failure") }
         try expect(!capture.isRunning && factory.latest.stops == 1, "Failed start was not cleaned up")

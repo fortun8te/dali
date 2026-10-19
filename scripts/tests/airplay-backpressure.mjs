@@ -41,12 +41,13 @@ function definition(text, name) {
 const common = [
   ...['AIRPLAY_CONFIG_MAX_VOLUME', 'AIRPLAY_STREAM_CONTROL_TIMEOUT_SEC'].map(name => definition(airplay, name)),
   definition(raop, 'RAOP_CONFIG_MAX_VOLUME'),
-  ...['AIRPLAY_RESEND_MAX_LEN', 'AIRPLAY_RESEND_RATE_PER_SEC', 'AIRPLAY_RESEND_BURST_MAX', 'AIRPLAY_RESEND_DEDUP_MS', 'AIRPLAY_RESEND_MIN_LEAD_MS'].map(name => definition(airplay, name)),
+  ...['AIRPLAY_RESEND_MAX_LEN', 'AIRPLAY_RESEND_RATE_PER_SEC', 'AIRPLAY_RESEND_BURST_MAX', 'AIRPLAY_RESEND_DEDUP_MS', 'AIRPLAY_RESEND_MIN_LEAD_MS', 'AIRPLAY_SEND_BLOCKED_GRACE_MS'].map(name => definition(airplay, name)),
   '#define AIRPLAY_VOLUME_PROCEED_NON_OK ' + airplay.match(/\{ AIRPLAY_SEQ_SEND_VOLUME, "SET_PARAMETER \(volume\)"[^\n]*, (true|false) \}/)[1],
   functionBody(source('httpd_jsonapi.c'), 'jsonapi_reply_player_volume'),
   functionBody(source('outputs.c'), 'outputs_device_volume_set'),
   ...['airplay_volume_from_pct', 'airplay_volume_to_pct', 'volume_command_failure', 'deferred_session_failure_cb', 'deferred_session_failure', 'deferred_volume_failure', 'data_socket_prepare', 'packet_send', 'packets_resend', 'sequence_continue_cb', 'sequence_continue'].map(name => functionBody(airplay, name)),
   ...['raop_volume_from_pct', 'raop_volume_to_pct'].map(name => functionBody(raop, name)),
+  ...['PLAYER_STALL_REPAY_MAX_MS', 'PLAYER_PTS_BEHIND_REPAY_MS'].map(name => definition(player, name)),
   ...['session_update_read', 'session_update_read_ts', 'device_volume_cb'].map(name => functionBody(player, name)),
 ].join('\n');
 

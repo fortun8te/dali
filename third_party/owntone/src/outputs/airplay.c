@@ -102,6 +102,9 @@
 // DALI: 1000 ≈ 8 s at 352/44100. Bluesound PowerNodes keep asking for aged
 // seqnums during WiFi blips; a deeper ring avoids delivery_unrecoverable
 // misses that used to cascade into session thrash. Memory cost is small.
+// DALI patch: how long a full local UDP queue (ENOBUFS/EAGAIN) may last before
+// the session is failed. See packet_send().
+#define AIRPLAY_SEND_BLOCKED_GRACE_MS 3000
 #define AIRPLAY_PACKET_BUFFER_SIZE    2000
 
 // DALI: scheduling lead uses start_buffer_ms minus this, NOT minus the full
@@ -2137,10 +2140,12 @@ packet_send(struct airplay_session *session, struct rtp_packet *pkt)
                 }
               int64_t elapsed_ns = ((int64_t)now.tv_sec - session->send_blocked_since.tv_sec) * 1000000000
                                  + now.tv_nsec - session->send_blocked_since.tv_nsec;
-              // A 1.5 s grace can exceed the presentation lead. It avoids
-              // tearing down the session for a brief local Wi-Fi queue stall;
-              // audible delivery during that stall is not guaranteed.
-              if (elapsed_ns >= 0 && elapsed_ns < 1500000000)
+              // The grace can exceed the presentation lead. It avoids tearing
+              // down the session for a brief local Wi-Fi queue stall; audible
+              // delivery during that stall is not guaranteed. 1.5 s was too
+              // short: a 2 s queue stall on 2026-10-19 14:53 failed both
+              // receivers and cost ~40 s of reconnects for a 2 s gap.
+              if (elapsed_ns >= 0 && elapsed_ns < (int64_t)AIRPLAY_SEND_BLOCKED_GRACE_MS * 1000000)
                 return -1;
             }
         }
