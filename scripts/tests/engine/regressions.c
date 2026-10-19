@@ -33,6 +33,10 @@ struct evrtsp_connection { int placeholder; };
 struct event { bool pending; struct airplay_session *session; };
 static struct event fake_event;
 struct airplay_session {
+  struct airplay_master_session *master_session;
+  uint16_t resend_last_seq, resend_last_len;
+  struct timespec resend_last_ts, resend_tokens_ts;
+  double resend_tokens;
   const char *devname;
   int state, server_fd, callback_id, reqs_in_flight;
   uint64_t device_id;
@@ -85,6 +89,7 @@ struct airplay_seq_ctx {
 static struct timespec fake_now;
 static bool fake_clock_failure;
 static int fake_send_error, status_callbacks, failures, deferred_failures;
+static int fake_send_calls, fake_send_fail_on_call;
 static int fake_make_result, request_frees;
 static bool fail_request_allocation;
 static struct evrtsp_request *queued_request;
@@ -106,6 +111,8 @@ static int test_clock_gettime(int clock, struct timespec *out) {
 }
 #define clock_gettime test_clock_gettime
 static ssize_t test_send(int fd, const void *data, size_t len, int flags) {
+  fake_send_calls++;
+  if (fake_send_fail_on_call == fake_send_calls) { errno=EAGAIN; return -1; }
   if (fake_send_error) { errno = fake_send_error; return -1; }
   return (ssize_t)len;
 }
@@ -145,6 +152,18 @@ static void sequence_continue(struct airplay_seq_ctx *ctx);
 
 
 struct media_quality { uint32_t sample_rate; };
+struct rtp_session { uint16_t seqnum; size_t pktbuf_len; };
+struct airplay_master_session {
+  struct rtp_session *rtp_session;
+  struct media_quality quality;
+  unsigned samples_per_packet, output_buffer_samples;
+};
+static uint8_t resend_data[32];
+static struct rtp_packet resend_packet={resend_data,sizeof resend_data};
+static bool resend_missing;
+static struct rtp_packet *rtp_packet_get(struct rtp_session *session,uint16_t seq) {
+  return resend_missing ? NULL : &resend_packet;
+}
 struct player_source {
   struct media_quality quality;
   uint64_t play_start;
@@ -215,17 +234,54 @@ static void test_backpressure(void) {
       event_prepare(&session); deferred_failures=0; fake_send_error=transient[i]; fake_now=ts(100000000000LL);
       assert(packet_send(&session, &pkt) == -1);
       assert(session.send_blocked && deferred_failures == 0 && session.state == AIRPLAY_STATE_STREAMING);
-      fake_now=ts(101499999999LL); assert(packet_send(&session, &pkt) == -1); assert(deferred_failures==0);
+      fake_now=ts(102999999999LL); assert(packet_send(&session, &pkt) == -1); assert(deferred_failures==0);
       fake_send_error=0; assert(packet_send(&session, &pkt)==0); assert(!session.send_blocked);
       // Recovery resets the clock, so a separate burst gets its own grace.
-      fake_send_error=transient[i]; fake_now=ts(103000000000LL); assert(packet_send(&session,&pkt)==-1);
-      fake_now=ts(104500000000LL); assert(packet_send(&session,&pkt)==-1); assert(deferred_failures==1);
+      fake_send_error=transient[i]; fake_now=ts(105000000000LL); assert(packet_send(&session,&pkt)==-1);
+      fake_now=ts(108000000000LL); assert(packet_send(&session,&pkt)==-1); assert(deferred_failures==1);
     }
   }
   struct airplay_session session = {.state=AIRPLAY_STATE_STREAMING,.devname="test"};
   event_prepare(&session); deferred_failures=0; fake_send_error=EHOSTUNREACH; assert(packet_send(&session,&pkt)==-1); assert(deferred_failures==1);
   session.state=AIRPLAY_STATE_STREAMING; deferred_failures=0; fake_send_error=ENOBUFS; fake_clock_failure=true;
   assert(packet_send(&session,&pkt)==-1); assert(deferred_failures==1); fake_clock_failure=false; fake_send_error=0;
+}
+static void test_resend(void) {
+  struct rtp_session rtp={.seqnum=104,.pktbuf_len=256};
+  struct airplay_master_session master={.rtp_session=&rtp,.quality={44100},.samples_per_packet=352,.output_buffer_samples=22050};
+  struct airplay_session session={.state=AIRPLAY_STATE_STREAMING,.devname="resend fixture",.master_session=&master};
+  event_prepare(&session); fake_now=ts(100000000000LL);
+  fake_send_calls=0; fake_send_error=EAGAIN;
+  packets_resend(&session,100,1);
+  fake_send_error=0; fake_now=ts(100010000000LL);
+  packets_resend(&session,100,1);
+  assert(fake_send_calls==2); // Failed first attempt must not suppress the retry.
+  assert(session.retransmit_packets_window==1 && session.retransmit_suppressed_window==0);
+  assert(fabs(session.resend_tokens-(AIRPLAY_RESEND_BURST_MAX-2+0.08))<0.00001);
+  fake_now=ts(100020000000LL); packets_resend(&session,100,1);
+  assert(fake_send_calls==2 && session.retransmit_suppressed_window==1); // Successful ranges still deduplicate.
+
+  // One failure in the middle must not deduplicate the whole requested range.
+  session=(struct airplay_session){.state=AIRPLAY_STATE_STREAMING,.devname="resend fixture",.master_session=&master};
+  event_prepare(&session); fake_now=ts(200000000000LL);
+  fake_send_calls=0; fake_send_fail_on_call=2;
+  packets_resend(&session,100,3);
+  assert(fake_send_calls==3 && session.retransmit_packets_window==2);
+  fake_send_fail_on_call=0; fake_now=ts(200010000000LL);
+  packets_resend(&session,100,3);
+  assert(fake_send_calls==6 && session.retransmit_packets_window==5 && session.retransmit_suppressed_window==0);
+  assert(fabs(session.resend_tokens-(AIRPLAY_RESEND_BURST_MAX-6+0.08))<0.00001);
+
+  // Existing age, missing-history, length, and token gates remain bounded.
+  session.resend_last_len=0; master.output_buffer_samples=0;
+  packets_resend(&session,100,3); assert(fake_send_calls==6);
+  session.resend_last_len=0; master.output_buffer_samples=22050; resend_missing=true;
+  packets_resend(&session,100,3); assert(fake_send_calls==6); resend_missing=false;
+  session.resend_last_len=0; session.resend_tokens=0;
+  packets_resend(&session,100,8); assert(fake_send_calls==6);
+  session.resend_last_len=0; session.resend_tokens=AIRPLAY_RESEND_BURST_MAX;
+  rtp.seqnum=108;
+  packets_resend(&session,100,1000); assert(fake_send_calls==6+AIRPLAY_RESEND_MAX_LEN);
 }
 static struct airplay_seq_ctx *volume_context(struct airplay_session *session, struct airplay_seq_request *request) {
   struct airplay_seq_ctx *ctx=calloc(1,sizeof *ctx);
@@ -297,9 +353,22 @@ static void test_pts(void) {
   marker(98000000000LL); assert(timespec_cmp(pb_session.pts,fake_now)==0);
   pb_session.pts=ts(100004000000LL); marker(98000000000LL); assert(pb_session.pts.tv_nsec==4000000);
   pb_session.pts=ts(99800000000LL); marker(90000000000LL); assert(pb_session.pts.tv_nsec==800000000);
-  fake_now=ts(101000000000LL); marker(90000000000LL); assert(pb_session.pts.tv_nsec==800100000);
+  fake_now=ts(101000000000LL); pb_session.pts=ts(100800000000LL); marker(90000000000LL); assert(pb_session.pts.tv_nsec==800100000);
   fake_now=ts(102000000000LL); pb_tick_debt_ns=30000000; marker(90000000000LL); assert(pb_session.pts.tv_nsec==800100000);
   pb_tick_debt_ns=0;
+  // 2026-10-18: a 1.17 s lag used to creep back at 100 ppm for hours. It is
+  // now owed to the catch-up as debt, and pts itself is not moved.
+  fake_now=ts(200000000000LL); pb_session.pts=ts(198830000000LL); marker(150000000000LL);
+  assert(pb_tick_debt_ns==1170000000ULL && pb_session.pts.tv_sec==198 && pb_session.pts.tv_nsec==830000000);
+  // Outstanding debt means catch-up is already working on it: no double count.
+  marker(150000000000LL); assert(pb_tick_debt_ns==1170000000ULL);
+  pb_tick_debt_ns=0;
+  // Before the first read anchors pts, a marker changes nothing.
+  memset(&pb_session.pts,0,sizeof pb_session.pts); marker(150000000000LL);
+  assert(pb_session.pts.tv_sec==0 && pb_session.pts.tv_nsec==0 && pb_tick_debt_ns==0);
+  // Beyond the repay window the queued audio cannot exist: re-anchor.
+  pb_session.pts=ts(190000000000LL); marker(150000000000LL);
+  assert(timespec_cmp(pb_session.pts,fake_now)==0 && pb_tick_debt_ns==0);
 }
 static void test_timing(void) {
   pb_tick_debt_ns=0; pb_tick_last=ts(100000000000LL); fake_now=ts(100170000000LL);
@@ -319,7 +388,17 @@ static void test_timing(void) {
   assert(pb_tick_debt_ns==0 && reads==24);
 #ifndef HAVE_TIMERFD
   playback_timing_test(0,0,NULL); assert(test_skip_tick && test_overrun==0);
-  fake_now=timespec_add(fake_now,ts(1500000000)); playback_timing_test(0,0,NULL); assert(!test_skip_tick && test_overrun==0 && pb_tick_debt_ns==0);
+  // A 1.5 s scheduler stall is repaid at the paced rate (three reads per
+  // callback), not discarded: it drains in about 0.75 s of callbacks.
+  fake_now=timespec_add(fake_now,ts(1500000000)); playback_timing_test(0,0,NULL);
+  assert(!test_skip_tick && test_overrun==2 && pb_tick_debt_ns==1470000000ULL);
+  uint64_t repaid=3; int callbacks=1;
+  while(pb_tick_debt_ns>=10000000ULL) { fake_now=timespec_add(fake_now,ts(10000000)); playback_timing_test(0,0,NULL); repaid+=test_skip_tick?0:test_overrun+1; callbacks++; }
+  // Every 10 ms of wall time, stall included, is read exactly once.
+  assert(callbacks<=80 && repaid==150+(uint64_t)callbacks-1);
+  // A sleep-sized gap is still discarded.
+  pb_tick_debt_ns=0; fake_now=timespec_add(fake_now,ts(6000000000LL)); playback_timing_test(0,0,NULL);
+  assert(!test_skip_tick && test_overrun==0 && pb_tick_debt_ns==0);
   uint64_t total=0;
   for(int i=0;i<1000;i++) { fake_now=timespec_add(fake_now,ts(10070000)); playback_timing_test(0,0,NULL); total+=test_skip_tick?0:test_overrun+1; }
   assert(total==1007 && pb_tick_debt_ns==0);
@@ -330,5 +409,6 @@ int main(int argc, char **argv) {
 #define RUN(name,fn) if(!strcmp(only,"all") || !strcmp(only,name)) fn()
   RUN("socket",test_socket); RUN("volume",test_volume); RUN("backpressure",test_backpressure); RUN("timeout",test_volume_timeout);
   RUN("progress",test_progress); RUN("pts",test_pts); RUN("timing",test_timing);
+  RUN("resend",test_resend);
   printf("%s checks passed\n",only); return 0;
 }

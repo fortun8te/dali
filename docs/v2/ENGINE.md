@@ -10,16 +10,28 @@ from the pinned upstream archive.
 
 - PTS bounds use the monotonic clock when a pipe marker is consumed. A marker's
   earlier capture timestamp does not reset the playback clock. Ahead-of-clock
-  PTS is clamped after 5 ms; persistent behind drift receives only the existing
-  100 microsecond correction while timer debt is low.
+  PTS is clamped after 5 ms. Behind drift of 100 to 250 ms receives the 100
+  microsecond correction while timer debt is low. A larger lag is handed to
+  the paced catch-up as debt (pts advances only as real audio is read); a lag
+  beyond 5 s re-anchors pts to the monotonic clock.
+- macOS playback timing: the player thread requests Mach time-constraint
+  scheduling (2 ms of every 10 ms tick, preemptible) at user-interactive QoS,
+  and the 10 ms tick is a persistent libevent timeout on that thread instead
+  of SIGALRM/setitimer. Under a load average of about 328, a 60 s run showed
+  zero late ticks and a worst debt of 4 ms (2026-10-19). The app launches the
+  engine at user-interactive QoS and runs its FIFO writer and silence keepalive
+  at user-interactive QoS.
 - Fractional sample progress accumulates its remainder instead of losing a
   fraction of a millisecond on each short read.
 - macOS catch-up uses elapsed wall time, sends at most three reads per callback,
-  repays the remaining debt, and skips early coalesced callbacks. A gap of one
-  second or longer discards historical debt. This matches the current reviewed
-  local implementation, which supersedes the older immediate-burst repair.
-- Local UDP backpressure retains the session for less than 1.5 seconds. Exactly
-  1.5 seconds takes the normal deferred failure path. Successful sends reset
+  repays the remaining debt, and skips early coalesced callbacks. A scheduler
+  stall shorter than 5 s is repaid at that paced rate; only a longer gap (sleep,
+  debugger) discards its debt. Catch-up that finds the input empty drops the
+  remaining debt. Discarding every stall of one second or more used to leave
+  pts and the input buffer 1.2 to 2.5 s behind for hours (2026-10-18).
+- Local UDP backpressure retains the session for less than 3 seconds. Exactly
+  3 seconds takes the normal deferred failure path. (1.5 s failed both
+  receivers during a 2 s Wi-Fi queue stall on 2026-10-19.) Successful sends reset
   the allowance. This grace exceeds the default presentation lead and does not
   promise uninterrupted sound while the local queue is full.
 - Capture supplies forward-paced silence in the Swift transport. The engine's
@@ -158,3 +170,13 @@ network changes, sleep/wake or recovery on physical speakers.
 The first installed rebuild exposed a missing runtime-loaded `owntone-sqlext.so`; ordinary linked-library collection had missed it. The helper now carries that module in its `lib` directory and DALI passes `-s` with the binary-relative path. Shared-library dependencies use `@loader_path` so the module can relocate with the helper. Vendoring and release signing include the module. The relocated helper hash recorded above identifies the earlier bundle, before this packaging repair. The canonical C source and unvendored engine build did not change.
 
 `python3 scripts/tests/engine-packaging.py` checks the helper tree and loads the module into a fresh in-memory database after relocation. It does not start OwnTone, use the saved database, or operate speakers.
+
+## 17 October 2026 resend retry correction, source only
+
+Live diagnosis found a brief shared ENOBUFS event on both receivers, while capture remained healthy. Separately, an actual-function regression reproduced a recovery defect: a failed retransmit was counted as sent and its request range cached for120ms, suppressing a healthy retry10ms later. packets_resend now counts successful sends and caches the range only when no send failed. Attempted sends still consume tokens; successful-request deduplication,80ms age gate, history gate, maximum request size and token limits remain. The separate overlapping-request policy is unchanged.
+
+This source correction is not in the installed engine or current vendored binary. Source patch and manifest were regenerated and reconstructed against pinned upstream. It is not proof that retry suppression caused the observed live glitch, and no physical playback acceptance is claimed.
+
+## Network-recovery integration, 17 October 2026
+
+The source-only resend correction above is now rebuilt, installed and present in the vendor tree. The rebuilt executable uses the same dependency bytes as the preceding working app. Sanitized C regressions, source reconstruction and relocated runtime packaging pass. A sandboxed private startup test used a fresh empty database and no selected outputs; readiness was217ms. Live app playback subsequently connected both receivers in3.385s, with zero send errors in the recorded30s delivery window. Physical audibility/lip-sync remains separate. See build/network-recovery-20261017 receipts and the dated shared-project handoff.

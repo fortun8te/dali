@@ -59,6 +59,68 @@ final class RoomVolumeCoordinatorTests: XCTestCase {
         coordinator.stop(session: 2)
     }
 
+    func testRapidRoomChangesGiveBothSpeakersFairTurnsWithLatestIntent() async {
+        let transport = VolumeTransportFixture()
+        let coordinator = RoomVolumeCoordinator(minimumSpacing: .zero) { await transport.write($0, $1) }
+        coordinator.update(session: 1, active: true, targets: ["a": 40, "b": 40], eligible: ["a", "b"])
+        await waitFor { await transport.count == 1 }
+        for change in 1...8 {
+            let value = 40 + change
+            coordinator.update(session: 1, active: true, targets: ["a": value, "b": value], eligible: ["a", "b"])
+            await transport.finish()
+            await waitFor { await transport.count == change + 1 }
+            let latest = await transport.requests.last!
+            XCTAssertEqual(latest.id, change % 2 == 1 ? "b" : "a",
+                           "A changing first speaker must not monopolize the control lane")
+            XCTAssertEqual(latest.value, value, "A fair turn must use current intent, not a frozen batch")
+        }
+        await transport.finish()
+        await waitFor { await transport.count == 10 }
+        await transport.finish()
+        await waitFor { coordinator.applied == ["a": 48, "b": 48] }
+        coordinator.stop(session: 2)
+    }
+
+    func testUrgentMutePreemptsTheNextFairPositiveTurn() async {
+        let transport = VolumeTransportFixture()
+        let coordinator = RoomVolumeCoordinator(minimumSpacing: .zero) { await transport.write($0, $1) }
+        coordinator.update(session: 1, active: true, targets: ["a": 40, "b": 40], eligible: ["a", "b"])
+        await waitFor { await transport.count == 1 }
+        coordinator.update(session: 1, active: true, targets: ["a": 0, "b": 50], eligible: ["b"], urgent: true)
+        equal(await transport.count, 1) // The already-sent write remains serialized.
+        await transport.finish()
+        await waitFor { await transport.count == 2 }
+        let mute = await transport.requests.last!
+        XCTAssertEqual(mute.id, "a")
+        XCTAssertEqual(mute.value, 0)
+        await transport.finish()
+        await waitFor { await transport.count == 3 }
+        let positive = await transport.requests.last!
+        XCTAssertEqual(positive.id, "b")
+        XCTAssertEqual(positive.value, 50)
+        await transport.finish()
+        coordinator.stop(session: 2)
+    }
+
+    func testReplacementSessionDoesNotInheritPreviousFairTurn() async {
+        let transport = VolumeTransportFixture()
+        let coordinator = RoomVolumeCoordinator(minimumSpacing: .zero) { await transport.write($0, $1) }
+        coordinator.update(session: 1, active: true, targets: ["a": 40], eligible: ["a"])
+        await waitFor { await transport.count == 1 }
+        coordinator.stop(session: 2)
+        coordinator.update(session: 3, active: true, targets: ["a": 10, "b": 20], eligible: ["a", "b"])
+        await waitFor { await transport.count == 2 }
+        let fresh = await transport.requests.last!
+        XCTAssertEqual(fresh.id, "a", "A replacement session starts with its own fairness state")
+        await transport.finish() // Late reply to the old session.
+        XCTAssertNil(coordinator.applied["a"])
+        await transport.finish()
+        await waitFor { await transport.count == 3 }
+        await transport.finish()
+        await waitFor { coordinator.applied == ["a": 10, "b": 20] }
+        coordinator.stop(session: 4)
+    }
+
     func testLateCompletionCannotAlterReplacementSession() async {
         let transport = VolumeTransportFixture()
         let coordinator = RoomVolumeCoordinator(minimumSpacing: .zero) { await transport.write($0, $1) }
@@ -161,6 +223,32 @@ final class RoomVolumeCoordinatorTests: XCTestCase {
         equal(await transport.last, 0)
         await transport.finish()
         await waitFor { coordinator.applied["front"] == 0 }
+        coordinator.stop(session: 2)
+    }
+
+    func testReleasedRecoveryHoldWaitsForReadinessThenRestoresLatestIntent() async {
+        let coordinator = RoomVolumeCoordinator(minimumSpacing: .zero) { _, _ in .applied }
+        coordinator.update(session: 1, active: true, targets: ["front": 20], eligible: [])
+        isTrue(await coordinator.silence("front", session: 1))
+        coordinator.releaseHold("front", session: 1)
+        coordinator.update(session: 1, active: true, targets: ["front": 35], eligible: ["front"])
+        await waitFor { coordinator.applied["front"] == 35 }
+        coordinator.stop(session: 2)
+    }
+
+    func testForcedResyncReleasesOnlySelectedTemporaryHold() async {
+        let coordinator = RoomVolumeCoordinator(minimumSpacing: .zero) { _, _ in .applied }
+        coordinator.update(session: 1, active: true, targets: ["front": 20, "back": 30], eligible: [])
+        isTrue(await coordinator.silence("front", session: 1))
+        isTrue(await coordinator.silence("back", session: 1))
+        coordinator.update(session: 1, active: true, targets: ["front": 25, "back": 35],
+                           eligible: ["front", "back"], force: ["front"])
+        await waitFor { coordinator.applied["front"] == 25 }
+        equal(coordinator.applied["back"], 0)
+        coordinator.releaseHold("back", session: 0)
+        equal(coordinator.applied["back"], 0)
+        coordinator.releaseHold("back", session: 1)
+        await waitFor { coordinator.applied["back"] == 35 }
         coordinator.stop(session: 2)
     }
 

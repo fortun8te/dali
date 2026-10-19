@@ -37,6 +37,7 @@ public final class RoomVolumeCoordinator {
     private var revision = 0
     private var writes = 0
     private var urgent = false
+    private var lastPositiveWriteID: String?
     public private(set) var applied: [String: Int] = [:]
     public private(set) var isWriting = false
     public private(set) var lastCompletionAt = Date.distantPast
@@ -71,7 +72,10 @@ public final class RoomVolumeCoordinator {
             desired = bounded
         }
         self.eligible = eligible
-        for id in force { applied[id] = nil; failures[id] = nil; retryAt[id] = nil }
+        for id in force {
+            if temporary.removeValue(forKey: id) != nil { revision += 1 }
+            applied[id] = nil; failures[id] = nil; retryAt[id] = nil
+        }
         self.urgent = self.urgent || urgent
         if intentChanged || eligibilityChanged || urgent || !force.isEmpty { sleeper?.cancel() }
         settleObsoleteWaiters()
@@ -85,6 +89,16 @@ public final class RoomVolumeCoordinator {
         temporary[id] = 0; revision += 1; urgent = true
         failures[id] = nil; retryAt[id] = nil; sleeper?.cancel()
         return await awaitApplication(id, value: 0, session: session)
+    }
+
+    /// Remove a completed setup/recovery hold without declaring a missing
+    /// receiver ready. Its current desired volume is sent once it is eligible.
+    public func releaseHold(_ id: String, session: Int) {
+        guard active, self.session == session, temporary.removeValue(forKey: id) != nil else { return }
+        revision += 1
+        failures[id] = nil; retryAt[id] = nil; sleeper?.cancel()
+        settleObsoleteWaiters()
+        startDriver()
     }
 
     public func restore(_ id: String, session: Int) async -> Bool {
@@ -117,6 +131,7 @@ public final class RoomVolumeCoordinator {
         driverGeneration += 1; sleeper?.cancel(); sleeper = nil; task?.cancel(); task = nil; isWriting = false
         desired.removeAll(); applied.removeAll(); eligible.removeAll(); temporary.removeAll()
         failures.removeAll(); retryAt.removeAll(); urgent = false; revision += 1
+        lastPositiveWriteID = nil
         let old = waiters; waiters.removeAll()
         for waiter in old { waiter.continuation.resume(returning: false) }
     }
@@ -164,13 +179,20 @@ public final class RoomVolumeCoordinator {
             let ids = pendingIDs()
             guard !ids.isEmpty else { finishSatisfiedWaiters(); return }
             let instant = now()
-            guard let id = ids.first(where: { (retryAt[$0] ?? instant) <= instant }) else {
+            let ready = ids.filter { (retryAt[$0] ?? instant) <= instant }
+            guard !ready.isEmpty else {
                 let wake = ids.compactMap { retryAt[$0] }.min() ?? instant
                 do { try await pause(instant.duration(to: wake)) } catch { return }
                 continue
             }
+            // Repeated master changes leave every speaker pending. Rotate
+            // positive writes so the first ID cannot monopolize the lane;
+            // ready mutes always take precedence, regardless of that rotation.
+            let nextPositive = lastPositiveWriteID.flatMap { previous in ready.first { $0 > previous } }
+            let id = ready.first { target($0) == 0 } ?? nextPositive ?? ready[0]
             guard let value = target(id) else { continue }
             let epoch = session
+            if value > 0 { lastPositiveWriteID = id }
             isWriting = true; writes += 1
             let result = await write(id, value)
             guard active, generation == driverGeneration, epoch == session, !Task.isCancelled else { return }

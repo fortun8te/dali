@@ -36,7 +36,7 @@ importScripts('beacon.js');
 
 // Bump BUILD on every edit — it is what tells you whether Chrome is running
 // the code you just wrote. Keep it in step with the same constant in content.js.
-const BUILD = '2026-09-30.a';
+const BUILD = '2026-10-17.d';
 
 // Stamp every request with who we are, so the app can show that the extension
 // is really running (its beacon echoes this back as `extensionVersion`).
@@ -273,7 +273,9 @@ function setCutState(on) {
     // Invalidates the cached beacon reading: the app's own state just changed
     // because we changed it, and a stale "streaming, delay 1000" would be
     // handed to the next frame that asks.
-    cache = { at: 0, value: null, pending: null };
+    // Keep the active fetch shared. Losing it permits overlapping reads,
+    // so an older reply can overwrite newer room status and restart delay.
+    cache = { at: 0, value: null, pending: cache.pending };
     queueSignal(on);
   }
   if (on) {

@@ -1,4 +1,24 @@
 import Foundation
+import AVFoundation
+import Synchronization
+
+private final class RecoveryFixtureTap: CaptureTap, @unchecked Sendable {
+    var clockAnchored = true
+    var overrunCount = 0
+    var onBuffer: ((AVAudioPCMBuffer) -> Void)?
+    var onInvalidated: ((String) -> Void)?
+    func start(muteLocal: Bool, source: ProcessTap.Source) throws {}
+    func stop() {}
+    func emitSilence() { emit(0) }
+    func emit(_ sample: Float) {
+        let format = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 44100,
+                                   channels: 2, interleaved: false)!
+        let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 441)!
+        buffer.frameLength = 441
+        for channel in 0..<2 { for frame in 0..<441 { buffer.floatChannelData![channel][frame] = sample } }
+        onBuffer?(buffer)
+    }
+}
 
 // Only the hardware boundary is a fixture. DALIStore, RoomVolumePolicy, and
 // RoomVolumeCoordinator below are the same production sources built by the app.
@@ -66,6 +86,90 @@ struct AppControllerRegression {
         defaults.set("mirror", forKey: "dali.mode")
         defaults.set("keep", forKey: "unrelated.preference")
 
+        // Exercise the production controller's restart budget with the real
+        // CaptureController and fake hardware, including rebuild clock resets.
+        do {
+            let directory = FileManager.default.temporaryDirectory.appendingPathComponent("dali-recovery-\(UUID().uuidString)")
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: directory) }
+            let pipe = directory.appendingPathComponent("capture.pipe").path
+            try expect(mkfifo(pipe, 0o600) == 0, "recovery fixture creates isolated FIFO")
+            let reader = open(pipe, O_RDONLY | O_NONBLOCK)
+            try expect(reader >= 0, "recovery fixture opens isolated FIFO")
+            defer { close(reader) }
+            let taps = Mutex<[RecoveryFixtureTap]>([])
+            let sourceActivity = Mutex<Bool?>(nil)
+            let capture = CaptureController(makeTap: {
+                let tap = RecoveryFixtureTap(); taps.withLock { $0.append(tap) }; return tap
+            }, observeWake: false, sourceActivity: { _ in sourceActivity.withLock { $0 } }, micInUse: { _ in false })
+            let recoveryStore = DALIStore(defaults: defaults, backendEnabled: false, capture: capture)
+            try await capture.startAsync(fifoPath: pipe)
+            defer { capture.stop() }
+            try expect(recoveryStore.claimCaptureRecoveryRestart(), "first capture outage can restart once")
+            for _ in 0..<2 {
+                try expect(!recoveryStore.acknowledgeCaptureRecovery(within: 1),
+                           "seeded tap-start clocks cannot acknowledge recovery")
+                try expect(!recoveryStore.claimCaptureRecoveryRestart(), "missing callbacks cannot restore restart budget")
+                let rebuilt = await capture.rebuildAsync(fifoPath: pipe, muteLocal: true, source: .system,
+                                                         expectedSession: capture.sessionID)
+                try expect(rebuilt, "silent fixture tap rebuild succeeds")
+            }
+            taps.withLock { $0.first! }.emitSilence()
+            try expect(!recoveryStore.acknowledgeCaptureRecovery(within: 2), "retired callback cannot restore budget")
+            taps.withLock { $0.last! }.emitSilence()
+            _ = capture.readMetrics()
+            try expect(recoveryStore.acknowledgeCaptureRecovery(within: 2), "fresh silent PCM acknowledges recovery after metrics read")
+            try expect(recoveryStore.claimCaptureRecoveryRestart(), "real recovery restores one restart for a later outage")
+            try expect(!recoveryStore.claimCaptureRecoveryRestart(), "later outage still has only one restart")
+            capture.stop()
+            sourceActivity.withLock { $0 = false }
+            try await capture.startAsync(fifoPath: pipe)
+            try await Task.sleep(for: .milliseconds(600))
+            try expect(capture.callbackExpectation.sourceIsInactive &&
+                       capture.callbackExpectation.secondsMissingExpectedBuffer == 0,
+                       "idle-source callback expectation cannot trigger room recovery")
+            try expect(!recoveryStore.acknowledgeCaptureRecovery(within: 2) &&
+                       !recoveryStore.claimCaptureRecoveryRestart(),
+                       "idle keepalive neither proves recovery nor restores room restart budget")
+            sourceActivity.withLock { $0 = nil }
+            // A cut once confirmed by real silence must release when a
+            // different source starts, without a browser resume request.
+            recoveryStore.phase = .streaming
+            recoveryStore.systemVolume = 0.5
+            for _ in 0..<24 {
+                taps.withLock { $0.last! }.emitSilence()
+                try await Task.sleep(for: .milliseconds(10))
+            }
+            recoveryStore.setExtensionCut(true)
+            recoveryStore.reviewCutCredibility()
+            try expect(recoveryStore.roomVolumePlan.pcmGain == 0, "real silence confirms browser cut")
+            try await Task.sleep(for: .milliseconds(450))
+            taps.withLock { $0.last! }.emit(0.5)
+            try await Task.sleep(for: .milliseconds(30))
+            recoveryStore.reviewCutCredibility()
+            try expect(recoveryStore.roomVolumePlan.pcmGain == 1, "new Mac sound releases an already believed cut")
+            recoveryStore.setExtensionCut(false)
+            recoveryStore.phase = .idle
+        }
+
+        // A ready snapshot must not rejoin a receiver still wearing its old
+        // trouble badge while the second confirmation poll is pending.
+        try expect(!DALIStore.shouldRejoinOutput(troubleReadings: 0, readyNow: true), "ready output cannot rejoin")
+        try expect(!DALIStore.shouldRejoinOutput(troubleReadings: 1, readyNow: false), "one miss cannot rejoin")
+        try expect(DALIStore.shouldRejoinOutput(troubleReadings: 2, readyNow: false), "two misses can rejoin")
+        try expect(!DALIStore.shouldRejoinOutput(troubleReadings: 5, readyNow: true), "new ready reading beats old trouble")
+        do {
+            let wakeStore = DALIStore(defaults: defaults, backendEnabled: false)
+            wakeStore.phase = .streaming
+            wakeStore.handleSystemSleep()
+            try expect(wakeStore.phase == .idle && wakeStore.hasPendingWake, "sleep remembers a stopped mirror session")
+            wakeStore.handleSystemWake()
+            wakeStore.stopStream()
+            try expect(!wakeStore.hasPendingWake, "Stop synchronously cancels pending wake")
+            try await Task.sleep(for: .milliseconds(1100))
+            try expect(wakeStore.phase == .idle && !wakeStore.hasPendingWake, "cancelled wake cannot start the room later")
+        }
+
         let transport = RecordedVolumes()
         let store = DALIStore(defaults: defaults, backendEnabled: false,
                               volumeWrite: { id, value in await transport.send(id: id, value: value) })
@@ -95,12 +199,13 @@ struct AppControllerRegression {
         try expect(hardware["front"] == 10 && hardware["back"] == 5,
                    "half Mac master restores V1 receiver commands")
         // Independent expected values from V1 effectiveVolume, not the V2 policy.
-        for (master, front, back) in [(0.01, 1, 0), (0.125, 4, 2), (0.5, 10, 5), (1.0, 16, 8)] {
+        for (master, front, back, pcm) in [(0.01, 1, 0, 0.018176), (0.0625, 2, 1, 0.5),
+                                         (0.125, 4, 2, 1.0), (0.5, 10, 5, 1.0), (1.0, 16, 8, 1.0)] {
             store.systemVolume = master
             try expect(store.roomVolumePlan.hardware == ["front": front, "back": back],
                        "Mac master changes receiver commands as V1 did")
-            try expect(store.captureMasterGain == 1,
-                       "positive system master does not substitute a PCM curve for receiver volume")
+            try expect(abs(store.captureMasterGain - pcm) < 1e-12,
+                       "shared low-volume attenuation reaches capture while normal levels stay unity")
             try await waitUntil({
                 let writes = await transport.snapshot()
                 return writes.last(where: { $0.id == "front" })?.value == front &&
@@ -108,6 +213,14 @@ struct AppControllerRegression {
             }, "Mac volume reaches both receivers through the production coordinator")
         }
         try expect(store.captureMasterGain == 1, "full Mac volume has unity PCM gain")
+
+        store.systemVolume = 1.0 / 16
+        try await waitUntil({
+            let writes = await transport.snapshot()
+            return writes.last(where: { $0.id == "front" })?.value == 2 &&
+                writes.last(where: { $0.id == "back" })?.value == 1
+        }, "first step preserves both calibrated receiver commands")
+        try expect(store.captureMasterGain == 0.5, "first step lowers the whole captured room by half amplitude")
 
         let beforeMute = await transport.snapshot().count
         store.systemVolume = 0
@@ -117,8 +230,15 @@ struct AppControllerRegression {
                "zero master mutes receiver commands and captured PCM")
         try expect(store.statusText == "Muted" && store.roomChrome.menuLabel == "Room muted",
                    "zero master must not tell the user the room is playing")
-        store.systemVolume = 0.5
+        store.systemVolume = 1.0 / 16
         try await waitUntil({ await transport.snapshot().count == beforeMute + 4 }, "unmute restores V1 receiver commands for the current master")
+        try expect(store.captureMasterGain == 0.5, "unmute restores the quieter first step")
+        store.systemVolume = 0.5
+        try await waitUntil({
+            let writes = await transport.snapshot()
+            return writes.last(where: { $0.id == "front" })?.value == 10 &&
+                writes.last(where: { $0.id == "back" })?.value == 5
+        }, "normal volume restores unity and the original receiver response")
         let gainBeforeDisable = store.captureMasterGain
         let backBeforeDisable = store.effectiveVolume(store.back!)
         store.toggle(store.front!)
@@ -269,6 +389,65 @@ struct AppControllerRegression {
         let reset = timing.update(sample(tick: 0), target: 0.7)
         try expect(reset.ratio == 1 && timing.refill.sessionAdded == 0,
                "explicit new-session reset clears timing state at unity")
+
+        // Per-master-step leveling of the DALI speaker, through the production store:
+        // discovery attaches the curve, the plan uses it, saved settings stay untouched.
+        do {
+            let curveSuite = "DALI.AppControllerTest.curve.\(UUID().uuidString)"
+            let curveDefaults = UserDefaults(suiteName: curveSuite)!
+            defer { curveDefaults.removePersistentDomain(forName: curveSuite) }
+            for version in ["v2", "v3", "v4", "v5", "v8", "v9", "v10", "volumeLimit20"] {
+                curveDefaults.set(true, forKey: "dali.migrated.\(version)")
+            }
+            let saved: [String: Any] = [
+                "dali.frontName": "MICHAEL D", "dali.backName": "MICHAEL S",
+                "dali.vol.MICHAEL D": 100.0, "dali.vol.MICHAEL S": 100.0,
+                "dali.gain.MICHAEL D": 1.343581627155172, "dali.gain.MICHAEL S": 1.0,
+                "dali.volumeLimit": 100.0,
+                "dali.curveOn.MICHAEL D": false,   // retired switch: must be ignored, never deleted
+            ]
+            for (key, value) in saved { curveDefaults.set(value, forKey: key) }
+            let curveStore = DALIStore(defaults: curveDefaults, backendEnabled: false,
+                                       volumeWrite: { _, _ in .applied })
+            let outputs = try JSONDecoder().decode([Output].self, from: Data(#"[{"id":"d","name":"MICHAEL D","type":"AirPlay 2","selected":true,"connected":true,"streaming":true,"volume":10},{"id":"s","name":"MICHAEL S","type":"AirPlay 2","selected":true,"connected":true,"streaming":true,"volume":10}]"#.utf8))
+            curveStore.applyDiscoveredSpeakers(outputs)
+            curveStore.phase = .streaming
+            let dali = curveStore.speakers.first { $0.name == "MICHAEL D" }!
+            let other = curveStore.speakers.first { $0.name == "MICHAEL S" }!
+            try expect(dali.levelCurve != nil && dali.balanceTrim == 0 && other.levelCurve == nil,
+                       "discovery attaches the leveling curve (trim 0) to the DALI speaker only, whatever the retired switch says")
+            let targets: [(step: Int, percent: Double, d: Int, s: Int)] = [
+                (1, 250, 36, 14), (2, 205, 48, 23), (3, 182, 56, 31), (4, 156, 59, 38),
+                (5, 143, 63, 44), (6, 136, 68, 50), (7, 136, 76, 56), (8, 136, 84, 62), (16, 136, 100, 100),
+            ]
+            for target in targets {
+                curveStore.systemVolume = Double(target.step) / 16
+                let plan = curveStore.roomVolumePlan.hardware
+                try expect(plan["d"] == target.d && plan["s"] == target.s,
+                           "Mac volume step \(target.step) sends the leveled receiver commands")
+                try expect(abs(curveStore.effectiveGain(dali) * 100 - target.percent) < 1e-6 &&
+                           curveStore.effectiveGain(other) == 1,
+                           "effective adjustment shown for step \(target.step) is \(target.percent)%")
+            }
+            curveStore.systemVolume = 3.0 / 16
+            let neutral = curveStore.roomVolumePlan.hardware
+            curveStore.setBalanceTrim(10, for: dali)
+            let boosted = curveStore.roomVolumePlan.hardware
+            try expect(neutral["d"] == 56 && boosted["d"] == 62 && boosted["s"] == neutral["s"],
+                       "Balance +10% raises only the DALI speaker, by 10% of its curve value (56 to 62)")
+            try expect(abs(curveStore.effectiveGain(curveStore.speakers.first { $0.name == "MICHAEL D" }!) - 1.82 * 1.1) < 1e-9,
+                       "effective adjustment includes the trim")
+            curveStore.setBalanceTrim(500, for: dali)
+            try expect(curveStore.speakers.first { $0.name == "MICHAEL D" }!.balanceTrim == 30 &&
+                       curveDefaults.double(forKey: "dali.balance.MICHAEL D") == 30, "trim is limited to +30")
+            curveStore.setBalanceTrim(0, for: dali)
+            try expect(curveStore.roomVolumePlan.hardware == neutral, "Reset (trim 0) restores the measured curve")
+            for (key, value) in saved {
+                try expect((curveDefaults.object(forKey: key) as? NSObject) == (value as? NSObject), "saved \(key) is untouched")
+            }
+            try expect(curveDefaults.object(forKey: "dali.balance.MICHAEL D") as? Double == 0,
+                       "the balance trim is the only setting this feature writes")
+        }
 
         func milliseconds(_ elapsed: Duration) -> Double {
             let value = elapsed.components

@@ -5,9 +5,16 @@ public struct RoomVolumeSpeaker: Equatable, Sendable {
     public var slider: Double
     public var gain: Double
     public var enabled: Bool
+    /// The speaker's one loudness mode: a curve over the Mac master volume plus a
+    /// single balance trim in percent (-30...30) that shifts the whole curve. When
+    /// set, the saved fixed `gain` is ignored (it stays saved, untouched).
+    public var curve: SpeakerLevelCurve?
+    public var trim: Double
 
-    public init(id: String, slider: Double, gain: Double = 1, enabled: Bool = true) {
+    public init(id: String, slider: Double, gain: Double = 1, enabled: Bool = true,
+                curve: SpeakerLevelCurve? = nil, trim: Double = 0) {
         self.id = id; self.slider = slider; self.gain = gain; self.enabled = enabled
+        self.curve = curve; self.trim = trim
     }
 }
 
@@ -16,8 +23,8 @@ public struct RoomVolumePlan: Equatable, Sendable {
     public let pcmGain: Double
 }
 
-/// Preserve V1's receiver master curve. Captured PCM stays at unity for positive
-/// master settings; zero and explicit cuts also silence PCM for safe admission.
+/// Preserve V1's receiver master curve. A shared low-volume fade lowers the
+/// room below Mac step two; normal levels and non-system sources stay at unity.
 public enum RoomVolumePolicy {
     public static func plan(speakers: [RoomVolumeSpeaker], ceiling: Double,
                             systemMaster: Double? = nil, muted: Bool = false) -> RoomVolumePlan {
@@ -28,13 +35,36 @@ public enum RoomVolumePolicy {
         var hardware: [String: Int] = [:]
         for speaker in speakers {
             let slider = bounded(speaker.slider, fallback: 0, lower: 0, upper: 100)
-            let gain = bounded(speaker.gain, fallback: 1, lower: 0.25, upper: 4)
+            let gain = effectiveGain(for: speaker, systemMaster: master)
             let base = curve.map { slider * $0 * (ceiling / 100) } ?? slider
             // V1 applies both caps before rounding, including fractional ceilings.
             let limited = min(min(base * gain, 100), ceiling)
             hardware[speaker.id] = silent || !speaker.enabled ? 0 : Int(max(limited, 0).rounded())
         }
-        return RoomVolumePlan(hardware: hardware, pcmGain: silent ? 0 : 1)
+        // Keep every speaker's receiver calibration intact while giving the
+        // whole room a quieter first step. Smoothstep is half amplitude at
+        // step one and joins unity with zero slope at step two.
+        let t = min((master ?? 1) / (2.0 / 16), 1)
+        let lowVolumeGain = t * t * (3 - 2 * t)
+        return RoomVolumePlan(hardware: hardware, pcmGain: silent ? 0 : lowVolumeGain)
+    }
+
+    public static let trimRange: ClosedRange<Double> = -30...30
+
+    /// The multiplier actually applied to a speaker at this Mac master volume
+    /// (0...1; nil when the Mac volume is not driving the room, where the curve's
+    /// settled top value applies). A speaker with a level curve is the curve times
+    /// (1 + trim/100); everything else keeps its fixed saved gain.
+    public static func effectiveGain(for speaker: RoomVolumeSpeaker, systemMaster: Double?) -> Double {
+        let raw: Double
+        if let curve = speaker.curve {
+            let master = systemMaster.map { bounded($0, fallback: 0, lower: 0, upper: 1) } ?? 1
+            let trim = bounded(speaker.trim, fallback: 0, lower: trimRange.lowerBound, upper: trimRange.upperBound)
+            raw = curve.gain(atMaster: master) * (1 + trim / 100)
+        } else {
+            raw = speaker.gain
+        }
+        return bounded(raw, fallback: 1, lower: 0.25, upper: 4)
     }
 
     private static func bounded(_ value: Double, fallback: Double,

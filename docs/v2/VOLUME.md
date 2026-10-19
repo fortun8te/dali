@@ -2,7 +2,7 @@
 
 ## Current behavior: V1 master response restored
 
-The user rejected the fixed-receiver, software-master behavior, including its later quadratic curve. System-audio master volume now uses the original V1 receiver calculation: `round(min(slider × master^0.7 × ceiling / 100 × gain, 100, ceiling))`. Bounds and invalid-input protection remain explicit. Positive system master leaves captured PCM at unity; zero master or an explicit cut mutes both PCM and receiver commands. App capture, Spotify Connect and library-player modes retain their existing direct speaker control semantics.
+The user rejected the fixed-receiver, software-master behavior, including its later quadratic curve. System-audio master volume now uses the original V1 receiver calculation: `round(min(slider × master^0.7 × ceiling / 100 × gain, 100, ceiling))`. Bounds and invalid-input protection remain explicit. System master at or above the second Mac volume step leaves captured PCM at unity. Below that, the quiet-end taper described below lowers both speakers together; zero master or an explicit cut mutes both PCM and receiver commands. App capture, Spotify Connect and library-player modes retain their existing direct speaker control semantics.
 
 Mac volume changes again lower and raise the actual speaker commands through the V2 serialized coordinator. Full-master saved speaker settings are retained. Disabling a speaker cannot increase its partner's command. This deliberately restores V1 volume response rather than approximating native receiver behavior with an assumed dB curve.
 
@@ -13,6 +13,22 @@ V2 zero emits protocol mute (-144 dB). The existing 15 ms PCM ramp remains for m
 ## Visible speaker adjustments
 
 A non-neutral saved gain is shown beside the main front/back slider and in the speaker list as an adjustment percentage, with a per-speaker Reset action. Reset sets that gain to one through the existing coordinator, preserving the slider, other speakers and Mac master. Fine tuning uses the same rounded percentage instead of a one-decimal multiplier. These percentages describe saved settings, not measured acoustic output. No general preference migration or master-curve change is performed.
+
+## Per-master-step leveling (DALI speaker, 13 Oct 2026)
+
+Michael's physical listening (first set 220, 186, 171, 149, 140, 136; revised the same evening after he heard MICHAEL S still too loud at low volume, top unchanged) shows the speaker he calls "dali" (`MICHAEL D`) needs a different boost over the other speaker (`MICHAEL S`, always 100 %) at each macOS volume step, not the single fixed percentage (saved as `dali.gain.MICHAEL D` = 134 %). These are his listening targets, and they are the evidence for this curve:
+
+| Mac volume step (of 16) | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 and up |
+|---|---|---|---|---|---|---|---|---|
+| DALI speaker vs. MICHAEL S | 250 % | 205 % | 182 % | 156 % | 143 % | 136 % | 136 % | 136 % |
+
+Steps above 7 were not measured. The trend had flattened, so they keep 136 %. `SpeakerLevelCurve` interpolates smoothly between steps (monotone cubic: no overshoot, no hard jump at a step) and holds 250 % below step 1. The multiplier replaces the speaker's fixed gain while the Mac master drives the room; the V1 master response (`slider × master^0.7 × ceiling`) is unchanged and `MICHAEL S` is exactly as before. With no Mac master (app capture, Spotify Connect, library player) the saved fixed gain applies as it always did.
+
+One mode, no switch (13 Oct 2026, evening): the leveling curve is the only loudness mode for `MICHAEL D`, plus one **Balance** trim that shifts the whole curve by -30 % to +30 % (default 0, whole numbers). Trim is multiplicative: effective gain = curve(master) x (1 + trim/100), so +10 % turns 182 % at step 3 into 200 %. With no Mac master (app capture, Spotify Connect, library player) the curve's settled top value (136 %) times the trim applies. The room card row shows "Balance +0%" with - / + (2 % steps) and a Reset that appears only when the trim is not zero and changes nothing but the trim. Settings > Fine tuning shows the same control, the effective percentage now, and the step table. Speakers without a curve keep their fixed adjustment slider as before.
+
+Nothing saved is changed or erased. `dali.gain.*` and `dali.vol.*` are kept as they are, and the old `dali.curveOn.*` switch and the saved `dali.gain.MICHAEL D` are ignored for a curve speaker (they stay on disk). The one setting this writes is `dali.balance.<name>` (percent, clamped to +/-30). An optional `dali.curve.<name>` list of percentages for steps 1...n overrides the built-in table; nothing writes it. The percentages are settings applied to receiver commands, not measured loudness.
+
+Limit: the receiver command cannot exceed 100. With the volume limit at 100 and both sliders at 100 the DALI speaker reaches 100 at step 11, so from step 11 to 16 the gap to `MICHAEL S` narrows (130 % at step 11 down to 100 % at step 16). Receiver commands by step (DALI speaker / MICHAEL S): 1: 36/14, 2: 48/23, 3: 56/31, 4: 59/38, 5: 63/44, 6: 68/50, 7: 76/56, 8: 84/62, 9: 91/67, 10: 98/72, 11 to 15: 100/77 to 96, 16: 100/100.
 
 ## Ownership and asynchronous behavior
 
@@ -29,3 +45,9 @@ Unknown writes retry at bounded cooldowns of 3, 6, 12, 24 and 30 seconds, with s
 Policy tests compare against an independent extraction of V1's original arithmetic across master, ceiling, slider and calibration values, including clipping and fractional ceilings. The actual app-controller fixture verifies master changes submit the expected V1 receiver commands through the production coordinator, rather than merely changing a local calculated gain. Zero master, explicit cuts, disabled speakers, source changes and invalid inputs remain covered.
 
 The historical `docs/v2/v1-volume-baseline.swift` reproduces the original balance drift and still intentionally exits with failure. That issue is acknowledged, not relabeled as fixed. Tests and compilation establish code behavior, not physical loudness or receiver latency. Installation follows the user's request with no post-build app launch or playback test.
+
+## Quieter whole-room floor, 17 October 2026
+
+Michael confirmed that the whole room is too loud at the lowest Mac volume. Receiver commands retain the familiar V1 master^0.7 arithmetic and the existing per-speaker leveling/balance. Only shared captured PCM below the second Mac step changes: t=master/(2/16), clamped0...1, and gain=t*t*(3-2*t). At the first Mac step the PCM amplitude is0.5, approximately6.02dB below the previous behavior. At step two and above the gain is1. Quarter steps below step one become progressively quieter; explicit mute remains zero. Existing capture gain smoothing applies.
+
+No saved dali.vol.*, dali.gain.*, dali.balance.* or custom curve values are rewritten. This applies when system master drives captured room audio, not Spotify Connect or library playback. The taper is a conservative starting value based on the quieter-floor request, not a measured subjective loudness target. Installed/listening status must be read from the current dated handoff rather than inferred from this source contract.

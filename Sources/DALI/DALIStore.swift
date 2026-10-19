@@ -7,6 +7,7 @@ import Foundation
 import SwiftUI
 import Observation
 import Network
+import SystemConfiguration
 
 enum StreamPhase: Equatable {
     case idle
@@ -29,6 +30,8 @@ struct RoomSpeaker: Identifiable, Equatable {
     var relVolume: Double   // 0...100, the speaker's own slider
     var gain: Double = 1.0  // calibration multiplier (0.25...4): balances an
                             // amp+passive front against a self-amped Sonos
+    var levelCurve: SpeakerLevelCurve? = nil  // measured gain by Mac volume step; when set it replaces `gain`
+    var balanceTrim: Double = 0               // -30...30 %, shifts the whole curve
     var offsetMs: Int = 0   // sync trim (±ms, positive = plays later); engine-persisted
     var health: Health
     var available: Bool = true
@@ -133,10 +136,16 @@ final class DALIStore {
         source = .app(pid: app.processIdentifier, name: saved)
     }
 
-    /// The Mac's output volume 0...1 controls a common system-capture PCM gain.
-    /// Receiver calibration stays fixed across ordinary nonzero master changes;
-    /// zero additionally mutes buffered audio through the receiver controls.
-    var systemVolume: Double = 0.5 { didSet { scheduleVolumePush() } }
+    /// V1 receiver response plus the shared quiet-end taper below Mac step two.
+    var systemVolume: Double = 0.5 {
+        didSet {
+            if backendEnabled, oldValue != systemVolume {
+                aiEvent("volume_intent", fields: ["master": systemVolume,
+                    "pcm_gain": roomVolumePlan.pcmGain, "targets": roomVolumePlan.hardware])
+            }
+            scheduleVolumePush()
+        }
+    }
 
     /// Music level 0...1 for the room visualization.
     var audioLevel: Double = 0
@@ -562,6 +571,7 @@ final class DALIStore {
     private func rebuildStarvedCapture(expectedGeneration: Int) {
         guard phase == .streaming,
               streamGeneration == expectedGeneration,
+              capture.callbackExpectation.secondsMissingExpectedBuffer > 10,
               !captureWatchdogInFlight else { return }
         captureWatchdogInFlight = true
         let cap = capture
@@ -585,11 +595,19 @@ final class DALIStore {
                   self.phase == .streaming else { return }
 
             let silenceAfterRebuild = cap.secondsSinceLastBuffer
-            guard silenceAfterRebuild > 2 else {
+            if self.acknowledgeCaptureRecovery(within: 2) {
                 self.captureWatchdogInFlight = false
-                self.captureStallRestartUsed = false
                 self.dlog("tap callbacks recovered after rebuild")
                 self.aiEvent("capture_recovered", fields: ["path": "tap_rebuild"])
+                return
+            }
+
+            let expectation = cap.callbackExpectation
+            if expectation.sourceIsInactive || expectation.secondsMissingExpectedBuffer <= 2 {
+                // No active source can legitimately mean no callbacks. Keep
+                // waiting without declaring real recovery or resetting its budget.
+                self.captureWatchdogInFlight = false
+                self.dlog("tap waiting for source audio before callback recovery")
                 return
             }
 
@@ -597,12 +615,11 @@ final class DALIStore {
             self.aiEvent("capture_rebuild_no_callbacks", level: "error", fields: [
                 "seconds": Int(silenceAfterRebuild),
             ])
-            if self.captureStallRestartUsed {
+            if self.claimCaptureRecoveryRestart() {
+                await self.restartStreamForCaptureRecovery(expectedGeneration: expectedGeneration)
+            } else {
                 await self.failCaptureRecovery(expectedGeneration: expectedGeneration,
                                                reason: "capture stayed silent after restart")
-            } else {
-                self.captureStallRestartUsed = true
-                await self.restartStreamForCaptureRecovery(expectedGeneration: expectedGeneration)
             }
         }
     }
@@ -675,7 +692,7 @@ final class DALIStore {
     private let supervisor: EngineSupervisor
     private let spotifySupervisor: SpotifySupervisor
     private let api = BeamAPI()
-    private let capture = CaptureController()
+    private let capture: CaptureController
     private let roomSession = RoomSessionController()
     private var healthTask: Task<Void, Never>?
 
@@ -749,7 +766,9 @@ final class DALIStore {
     static func savedStartBufferMs() -> Int { RoomDelayPolicy.automaticStartBufferMs }
 
     init(defaults: UserDefaults = .standard, backendEnabled: Bool = true,
-         volumeWrite: RoomVolumeCoordinator.Write? = nil) {
+         volumeWrite: RoomVolumeCoordinator.Write? = nil,
+         capture: CaptureController = CaptureController()) {
+        self.capture = capture
         self.preferences = defaults
         self.backendEnabled = backendEnabled
         self.injectedVolumeWrite = volumeWrite
@@ -868,6 +887,7 @@ final class DALIStore {
             return
         }
 
+        logLaunch()
         Task { await bootEngine() }
         reapEngineOnQuit(confPath: cfg.confFile.path)
         startIdleGuard()
@@ -950,18 +970,44 @@ final class DALIStore {
 
     // MARK: engine lifecycle
 
+    /// One line a person (or an AI) can read to answer "which launch was this
+    /// and how long did it take to become ready". The debug log carries only the
+    /// time of day, so the date and build go here, once per launch.
+    private func logLaunch() {
+        let info = Bundle.main.infoDictionary
+        let version = info?["CFBundleShortVersionString"] as? String ?? "dev"
+        let build = info?["CFBundleVersion"] as? String ?? "?"
+        let pid = getpid()
+        dlog("launch \(ISO8601DateFormatter().string(from: Date())) v\(version) build \(build) pid \(pid)")
+        aiEvent("app_launch", fields: ["version": version, "build": build, "pid": Int(pid)])
+    }
+
+    private var launchToReadyMs: Int? {
+        StartupTiming.processStart().map { StartupTiming.milliseconds(from: $0) }
+    }
+
     private func bootEngine() async {
         do {
             try await supervisor.start()
             lastEngineStartAt = Date()
+            let engineMs = launchToReadyMs
             ptpDegraded = await supervisor.ptpAvailable == false
             if ptpDegraded { dlog("PTP degraded — front/back sync may drift (NTP-only)") }
             await refreshSpeakers()
+            let found = speakers.filter { $0.available }.count
+            if let engineMs, let total = launchToReadyMs {
+                dlog("ready: engine answering \(StartupTiming.label(milliseconds: engineMs)) after launch, \(found) speaker(s) listed after \(StartupTiming.label(milliseconds: total))")
+                aiEvent("engine_ready", fields: ["engine_ms": engineMs, "ready_ms": total,
+                                                 "speakers_listed": found, "ptp": !ptpDegraded])
+            }
             await reconcileEngineState()
             await loadLibrary()
         } catch {
             // A late boot failure must not overwrite a session the user has
             // already started (startStream boots the engine itself if needed).
+            dlog("engine failed to start \(launchToReadyMs.map { StartupTiming.label(milliseconds: $0) } ?? "?") after launch: \(error)")
+            aiEvent("engine_start_failed", level: "error",
+                    fields: ["ms": launchToReadyMs ?? -1, "error": String(describing: error)])
             guard !phase.isOn else { return }
             phase = .error("The audio engine could not start.\n\(error)")
         }
@@ -1110,6 +1156,8 @@ final class DALIStore {
                 enabled: wasEnabled,
                 relVolume: preferences.volume(name: o.name),
                 gain: preferences.gain(name: o.name),
+                levelCurve: preferences.levelCurve(name: o.name),
+                balanceTrim: preferences.balanceTrim(name: o.name),
                 offsetMs: o.offset_ms ?? 0,   // engine persists this in its own DB
                 health: existing?.health ?? .off))
         }
@@ -1126,7 +1174,10 @@ final class DALIStore {
             list.append(RoomSpeaker(
                 id: "unavailable:\(name)", name: name, type: "AirPlay", kind: kind,
                 enabled: enabled, relVolume: preferences.volume(name: name),
-                gain: preferences.gain(name: name), health: enabled && phase.isOn ? .trouble : .off,
+                gain: preferences.gain(name: name),
+                levelCurve: preferences.levelCurve(name: name),
+                balanceTrim: preferences.balanceTrim(name: name),
+                health: enabled && phase.isOn ? .trouble : .off,
                 available: false))
         }
         // Front, back, then extras alphabetically.
@@ -1156,7 +1207,11 @@ final class DALIStore {
     /// the main actor every health poll — cache it.
     private func hostName() -> String {
         if let c = hostNameCache, Date().timeIntervalSince(c.at) < 300 { return c.name }
-        let name = Host.current().localizedName ?? ""
+        // The computer name comes straight from the system configuration store:
+        // local, instant, and identical to `Host.current().localizedName` on
+        // this Mac. Host.current() stays as the fallback only.
+        let name = (SCDynamicStoreCopyComputerName(nil, nil) as String?)
+            ?? Host.current().localizedName ?? ""
         hostNameCache = (name, Date())
         return name
     }
@@ -1237,8 +1292,17 @@ final class DALIStore {
             return
         }
         resolveSavedSource()
+        // Play means the room: the front and back pair always join a new
+        // session. Switching one off is for the current session only; a saved
+        // "off" left a speaker silently missing on every later start.
+        for i in speakers.indices where speakers[i].kind != .extra && !speakers[i].enabled {
+            speakers[i].enabled = true
+            preferences.set(true, forKey: "dali.on.\(speakers[i].name)")
+            dlog("\(speakers[i].name) was switched off; re-included for this start")
+        }
         let sessionSource = source
         let precedingTeardown = teardownTask
+        let requestedAt = Date()
         dlog("start requested (\(reason))")
         sessionMembership.reset()
         streamGeneration += 1
@@ -1337,7 +1401,7 @@ final class DALIStore {
             pipeTrackURI: { try await self.api.pipeTrackURI(named: "beam.pipe") },
             playPipe: { try await self.api.playPipe(uri: $0) },
             didTearDown: { self.lastTeardownAt = Date() },
-            event: { self.aiEvent("startup_recovery", level: "warn", fields: ["event": String(describing: $0)]) }
+            event: { self.noteStartupRecovery($0) }
         )
         Task { @MainActor in
             guard phase == .starting, gen == streamGeneration else { return }
@@ -1354,17 +1418,41 @@ final class DALIStore {
                 enforceZeroOffsets(force: true)
                 phase = .streaming
                 startHealthLoop(); startLevelLoop(); startFlightRecorder()
+                let readyMs = StartupTiming.milliseconds(from: requestedAt)
+                dlog("stream live \(StartupTiming.label(milliseconds: readyMs)) after start (\(reason)); \(result.readyIDs.count) of \(result.plan.ids.count) speaker(s) up")
+                aiEvent("stream_ready", fields: ["ms": readyMs, "reason": reason,
+                                                 "ready": result.readyIDs.count, "wanted": result.plan.ids.count])
                 await fadeIn()
             } catch let error as ProcessTap.TapError {
                 guard gen == streamGeneration else { return }
+                noteStartFailure(error, after: requestedAt, reason: reason)
                 markHealth(of: sessionSpeakers().map(\.id), .off)
                 phase = .error("DALI needs permission to capture your Mac's audio. (\(error.stage))")
             } catch {
                 guard gen == streamGeneration else { return }
+                noteStartFailure(error, after: requestedAt, reason: reason)
                 markHealth(of: sessionSpeakers().map(\.id), .off)
                 phase = .error("Could not start the stream.\n\(error.localizedDescription)")
             }
         }
+    }
+
+    /// A failed start used to leave nothing in either log (`stream_start` is
+    /// written only once a start has succeeded, and the V2 recovery steps wrote
+    /// no readable line), so a 60-second spinner that ended in an error could
+    /// not be reconstructed afterwards.
+    private func noteStartFailure(_ error: Error, after requestedAt: Date, reason: String) {
+        let ms = StartupTiming.milliseconds(from: requestedAt)
+        dlog("start failed after \(StartupTiming.label(milliseconds: ms)) (\(reason)): \(error.localizedDescription)")
+        aiEvent("stream_start_failed", level: "error",
+                fields: ["ms": ms, "reason": reason, "error": String(describing: error)])
+    }
+
+    private func noteStartupRecovery(_ event: RoomSessionController.Event) {
+        let names = event.missingIDs.map { id in speakers.first { $0.id == id }?.name ?? id }
+        dlog("startup recovery \(event.step): not ready yet: \(names.joined(separator: ", "))")
+        aiEvent("startup_recovery", level: "warn",
+                fields: ["step": event.step, "missing": names])
     }
 
     private var teardownTask: Task<Void, Never>?
@@ -1372,6 +1460,7 @@ final class DALIStore {
     /// All terminal phases drain startup and the previous producer before a
     /// replacement can use the same FIFO. Next generation never skips teardown.
     private func enqueueSessionTeardown() {
+        lastTeardownAt = Date()
         capture.stop()
         let sessionCleanup = roomSession.invalidateAndStop()
         let previousTeardown = teardownTask
@@ -1388,6 +1477,7 @@ final class DALIStore {
     }
 
     func stopStream() {
+        cancelPendingWake()
         guard backendEnabled else { phase = .idle; return }
         lastTeardownAt = Date()
         streamGeneration += 1
@@ -1518,20 +1608,7 @@ final class DALIStore {
         for speaker in chosen { sessionMembership.retain(speaker.name) }
         markHealth(of: chosen.map(\.id), .connecting)
         updateVolumeIntent()
-        do {
-            try await api.setOutputs(ids: chosen.map(\.id))
-            guard current() else { return false }
-            for sp in chosen {
-                guard current() else { return false }
-                try await silenceOutput(sp.id)
-                guard current() else { return false }
-            }
-            return current()
-        } catch {
-            guard current() else { return false }
-            phase = .error("Could not prepare the selected speakers.\n\(error.localizedDescription)")
-            return false
-        }
+        return current()
     }
 
     private func playToRoom(_ start: @escaping (BeamAPI) async throws -> Void) {
@@ -1562,7 +1639,18 @@ final class DALIStore {
                 return
             }
             guard await prepareRoom(current: current), current() else { return }
-            do { try await start(api) }
+            await settleAfterTeardown(gen: stream)
+            guard current() else { return }
+            do {
+                let ids = sessionSpeakers().map(\.id)
+                try await api.setOutputs(ids: ids)
+                guard current() else { return }
+                for id in ids {
+                    try await silenceOutput(id)
+                    guard current() else { return }
+                }
+                try await start(api)
+            }
             catch {
                 guard current() else { return }
                 markHealth(of: sessionSpeakers().map(\.id), .off)
@@ -1578,10 +1666,19 @@ final class DALIStore {
                 return
             }
             guard current() else { return }
+            let ids = Set(sessionSpeakers().map(\.id))
+            let missing = await awaitOutputsReady(ids: ids, timeoutMs: 8_000)
+            guard current() else { return }
+            guard missing.count < ids.count else {
+                markHealth(of: Array(missing), .trouble)
+                phase = .error("The room's speakers did not connect.")
+                return
+            }
             hasQueue = true
             isPlaying = true
             phase = .streaming
-            markHealth(of: sessionSpeakers().map(\.id), .live)
+            markHealth(of: Array(ids.subtracting(missing)), .live)
+            markHealth(of: Array(missing), .trouble)
             dlog("player: started -> \(sessionSpeakers().map(\.name).joined(separator: ", "))")
             startHealthLoop()
             startNowPlayingLoop()
@@ -1632,6 +1729,7 @@ final class DALIStore {
     func previous() { Task { try? await api.previous() } }
 
     func stopPlayback() {
+        cancelPendingWake()
         guard backendEnabled else { phase = .idle; return }
         streamGeneration += 1
         playerCommandGeneration += 1
@@ -1715,7 +1813,10 @@ final class DALIStore {
             speakerRecoveryInFlight.insert(sp.id)
             Task { @MainActor in
                 defer {
-                    if generation == streamGeneration { speakerRecoveryInFlight.remove(sp.id) }
+                    if generation == streamGeneration {
+                speakerRecoveryInFlight.remove(sp.id)
+                volumeController.releaseHold(sp.id, session: generation)
+            }
                 }
                 do {
                     // Join quietly. Reading readiness before restoring volume
@@ -1781,6 +1882,16 @@ final class DALIStore {
         let clamped = min(max(g, 0.25), 4)
         speakers[idx].gain = clamped
         preferences.set(clamped, forKey: "dali.gain.\(speaker.name)")
+        scheduleVolumePush()
+    }
+
+    /// The one balance trim (percent, whole numbers, -30...30) that shifts a curve
+    /// speaker's whole leveling curve up or down. 0 is the measured curve.
+    func setBalanceTrim(_ percent: Double, for speaker: RoomSpeaker) {
+        guard let idx = speakers.firstIndex(where: { $0.id == speaker.id }), percent.isFinite else { return }
+        let clamped = min(max(percent.rounded(), RoomVolumePolicy.trimRange.lowerBound), RoomVolumePolicy.trimRange.upperBound)
+        speakers[idx].balanceTrim = clamped
+        preferences.set(clamped, forKey: "dali.balance.\(speaker.name)")
         scheduleVolumePush()
     }
 
@@ -2077,16 +2188,22 @@ final class DALIStore {
             // playing over the top of it stops).
             if cutOverridden {
                 cutOverridden = false
+                cutDisbeliefLogged = false
                 dlog("audio cut believed again — the source really did go silent")
                 applyCutMute()
             }
             return
         }
-        // Not silent. A cut that was never believed stays that way; log it
-        // once so the flight record shows the browser was overruled.
-        guard cutOverridden, !cutDisbeliefLogged, let armed = cutArmedAt else { return }
+        // New sound disproves even a previously confirmed cut. A paused
+        // browser tab cannot keep another Mac source muted by renewing it.
+        guard let armed = cutArmedAt else { return }
         let age = Date().timeIntervalSince(armed)
         guard age > 0.4 else { return }
+        if !cutOverridden {
+            cutOverridden = true
+            applyCutMute()
+        }
+        guard !cutDisbeliefLogged else { return }
         cutDisbeliefLogged = true
         dlog(String(format: "audio cut IGNORED: the Mac is still making sound %.1fs after the browser's cut — something else is playing", age))
         aiEvent("audio_cut_overridden", level: "info", fields: ["age_s": Int(age)])
@@ -2097,15 +2214,41 @@ final class DALIStore {
             $0.kind != .extra || $0.enabled
                 || sessionMembership.contains(name: $0.name, enabled: false, primary: false)
         }.map {
-            RoomVolumeSpeaker(id: $0.id, slider: $0.relVolume, gain: $0.gain, enabled: $0.enabled)
-        }, ceiling: volumeLimit, systemMaster: !playerMode && source == .system ? systemVolume : nil,
-           muted: roomMutedByCut)
+            RoomVolumeSpeaker(id: $0.id, slider: $0.relVolume, gain: $0.gain, enabled: $0.enabled,
+                              curve: $0.levelCurve, trim: $0.balanceTrim)
+        }, ceiling: volumeLimit, systemMaster: roomMaster, muted: roomMutedByCut)
+    }
+
+    /// The Mac master volume when it is what drives the room (system-audio mode).
+    private var roomMaster: Double? { !playerMode && source == .system ? systemVolume : nil }
+
+    /// The adjustment actually applied to a speaker right now: its curve value at
+    /// the current Mac volume, or its fixed saved gain.
+    func effectiveGain(_ speaker: RoomSpeaker) -> Double {
+        RoomVolumePolicy.effectiveGain(
+            for: RoomVolumeSpeaker(id: speaker.id, slider: speaker.relVolume, gain: speaker.gain,
+                                   enabled: speaker.enabled,
+                                   curve: speaker.levelCurve, trim: speaker.balanceTrim),
+            systemMaster: roomMaster)
     }
 
     func effectiveVolume(_ speaker: RoomSpeaker) -> Int { roomVolumePlan.hardware[speaker.id] ?? 0 }
     private(set) var captureMasterGain = 1.0
-    @ObservationIgnored private lazy var volumeController = RoomVolumeCoordinator(write: injectedVolumeWrite ?? { [api] id, value in
-        switch await api.setVolumeConfirmed(outputID: id, volume: value) {
+    @ObservationIgnored private lazy var volumeController = RoomVolumeCoordinator(write: injectedVolumeWrite ?? { [weak self, api] id, value in
+        let began = DispatchTime.now().uptimeNanoseconds
+        let result = await api.setVolumeConfirmed(outputID: id, volume: value)
+        let elapsedMs = Double(DispatchTime.now().uptimeNanoseconds - began) / 1_000_000
+        let label: String
+        switch result {
+        case .applied: label = "applied"
+        case .superseded: label = "superseded"
+        case .unknown: label = "unknown"
+        }
+        Task { @MainActor [weak self] in
+            self?.aiEvent("volume_write", fields: ["speaker": id, "target": value,
+                "ms": elapsedMs, "result": label])
+        }
+        switch result {
         case .applied: return .applied
         case .superseded: return .superseded
         case .unknown: return .unknown
@@ -2188,6 +2331,20 @@ final class DALIStore {
     private var rememberedNamesCache: Set<String> = []
     private var rememberedNamesAt = Date.distantPast
     private var captureStallRestartUsed = false
+
+    /// Only newly published PCM can give a failed capture path another restart.
+    @discardableResult
+    func acknowledgeCaptureRecovery(within seconds: Double) -> Bool {
+        guard capture.publicationProgress.isRecent(within: seconds) else { return false }
+        captureStallRestartUsed = false
+        return true
+    }
+
+    func claimCaptureRecoveryRestart() -> Bool {
+        guard !captureStallRestartUsed else { return false }
+        captureStallRestartUsed = true
+        return true
+    }
     /// After a failed hard rejoin, back off before trying again — endless
     /// deselect/select every poll is what thrash-kills AirPlay 2 sessions.
     private var recoveryCooldownUntil: [String: Date] = [:]
@@ -2241,7 +2398,11 @@ final class DALIStore {
             // Stamp the END too: the engine API stalls on the RTSP handshake
             // this deselect/select started (see noteEngineAPIFailure).
             lastRecoveryActivityAt = Date()
-            if generation == streamGeneration { speakerRecoveryInFlight.remove(sp.id) }
+            if generation == streamGeneration {
+                speakerRecoveryInFlight.remove(sp.id)
+                volumeController.releaseHold(sp.id, session: generation)
+                scheduleVolumePush()
+            }
         }
         speakers.indices.filter { speakers[$0].id == sp.id }.forEach { speakers[$0].health = .connecting }
         // Silence first so a mid-rejoin device never blasts at its own default.
@@ -2325,7 +2486,14 @@ final class DALIStore {
     private func fadeIn() async {
         let generation = streamGeneration
         fading = true
-        defer { if generation == streamGeneration { fading = false; scheduleVolumePush() } }
+        defer {
+            if generation == streamGeneration {
+                for id in sessionSpeakers().map(\.id) where !speakerRecoveryInFlight.contains(id) {
+                    volumeController.releaseHold(id, session: generation)
+                }
+                fading = false; scheduleVolumePush()
+            }
+        }
         do { try await Task.sleep(for: .milliseconds(180)) } catch { return }
         for id in sessionSpeakers().map(\.id) {
             guard streamIsCurrent(generation) else { return }
@@ -2360,6 +2528,14 @@ final class DALIStore {
         guard streamIsCurrent(generation) else { return }
         let ids = sessionSpeakers().map(\.id)
         guard !ids.isEmpty else { return }
+        defer {
+            if generation == streamGeneration {
+                for id in ids where !speakerRecoveryInFlight.contains(id) {
+                    volumeController.releaseHold(id, session: generation)
+                }
+                scheduleVolumePush()
+            }
+        }
         // Replaying the pipe resets item_progress_ms to ~0. Without re-anchoring,
         // the fill diagnostic computes rendered-bytes from a stale anchor and
         // reads absurd values for the rest of the session — exactly the numbers
@@ -2430,6 +2606,11 @@ final class DALIStore {
             // outputs so chrome stops claiming LIVE / healthy.
             markHealth(of: Array(missing), .trouble)
             for id in missing { readyStrikes[id] = 0 }
+            // Restore the already-ready members even when another speaker
+            // remains missing. Its failure must not leave its partner held at 0.
+            markHealth(of: Array(Set(ids).subtracting(missing)), .live)
+            await fadeIn()
+            guard streamIsCurrent(generation) else { return }
             // A dead speaker beside a playing engine is recoverSpeaker's job and
             // must not count as a failed resume; a silent engine must.
             let enginePlaying = (try? await api.playerState())?.state == "play"
@@ -2522,7 +2703,15 @@ final class DALIStore {
         // second — an overlapping burst at the moment it is least able to take
         // one. Hand the flag back afterwards.
         let resumeFlag = await supervisor.resumePlaybackOnRestart
+        guard streamIsCurrent(generation) else { return }
         await supervisor.setResumePlayback(false)
+        defer {
+            Task { @MainActor [weak self] in
+                guard let self, generation == self.streamGeneration else { return }
+                await self.supervisor.setResumePlayback(resumeFlag)
+            }
+        }
+        guard streamIsCurrent(generation) else { return }
         await supervisor.killForRespawn()
         // Poll for the replacement instead of a blind 8 s sleep + 2 s steps.
         // killForRespawn waits for process exit and transport drain, so the old engine no longer
@@ -2545,7 +2734,9 @@ final class DALIStore {
             // persistently-wedging engine loop kill->respawn->wedge forever,
             // each cycle getting a fresh breaker.
             if case .failed = s {
+                guard streamIsCurrent(generation) else { return }
                 try? await supervisor.restart(resettingBudgets: false)
+                guard streamIsCurrent(generation) else { return }
                 engineBack = await supervisor.state == .running
                 break
             }
@@ -2556,7 +2747,6 @@ final class DALIStore {
         // rejoin fired 13-19 s later (2026-09-22 00:43:52->00:44:08,
         // 02:14:03->02:14:20, 02:16:20->02:16:39, 02:21:53->02:22:06), and the
         // rejoin itself then took 1-3 s. Rebuild the session now instead.
-        if generation == streamGeneration { await supervisor.setResumePlayback(resumeFlag) }
         guard engineBack, streamIsCurrent(generation) else { return }
         dlog("engine back after respawn -> resuming session")
         // Output ids belong to the engine that issued them; re-read them from
@@ -2567,6 +2757,10 @@ final class DALIStore {
         enforceZeroOffsets(force: true)
         resumeFailStreak = 0; resumeCooldownUntil = .distantPast
         await resumePlaybackOnce(reason: "engine respawned")
+    }
+
+    static func shouldRejoinOutput(troubleReadings: Int, readyNow: Bool) -> Bool {
+        troubleReadings >= 2 && !readyNow
     }
 
     // MARK: health loop (websocket-lite: poll while streaming)
@@ -2663,11 +2857,10 @@ final class DALIStore {
                 // 17:55:23 on 2026-08-02, creating a 242ms capture gap and a
                 // measured 218ms sync jump on both speakers — the reported echo.
                 // A speculative recovery must not manufacture the audible fault.
-                let starvedSec = capture.secondsSinceLastBuffer
-                if capture.isRunning && starvedSec <= 1 {
-                    // A real callback proves the capture path has recovered.
-                    captureStallRestartUsed = false
-                }
+                let starvedSec = capture.callbackExpectation.secondsMissingExpectedBuffer
+                // Start/rebuild seeds the stall clock even without callbacks.
+                // Only fresh PCM from the current tap restores the budget.
+                acknowledgeCaptureRecovery(within: 1)
                 if capture.isRunning && starvedSec > 10 && !captureWatchdogInFlight {
                     dlog(String(format: "tap: no buffers for %.0fs -> rebuilding tap", starvedSec))
                     aiEvent("capture_no_buffers", level: "warn", fields: ["seconds": Int(starvedSec)])
@@ -2828,12 +3021,15 @@ final class DALIStore {
                 // outputs. Both at once deselected a speaker mid-resume
                 // (2026-09-22 20:42:44-20:43:01: two 3-strike rejoins interleaved
                 // with a resume that ended "resume did NOT reach play state").
-                for sp in speakers where sp.enabled && sp.health == .trouble && !resumeInFlight {
+                for sp in speakers where sp.enabled && sp.health == .trouble && !resumeInFlight
+                    && (troubleStrikes[sp.id] ?? 0) >= 2 {
                     // The loop iterates a snapshot and each rejoin takes many
                     // seconds; the next speaker may have healed (or the stream
                     // ended) in the meantime.
                     guard !Task.isCancelled, phase == .streaming,
-                          speakers.first(where: { $0.id == sp.id })?.health == .trouble else { continue }
+                          speakers.first(where: { $0.id == sp.id })?.health == .trouble,
+                          Self.shouldRejoinOutput(troubleReadings: troubleStrikes[sp.id] ?? 0,
+                              readyNow: outputIsReady(outs.first(where: { $0.id == sp.id }))) else { continue }
                     await recoverSpeaker(sp)
                 }
                 updateVolumeIntent()
@@ -2871,41 +3067,82 @@ final class DALIStore {
     /// EngineSupervisor.reapEngines). Posted synchronously on the main thread
     /// before exit, so blocking up to ~3 s here is the whole point.
     private func reapEngineOnQuit(confPath: String) {
+        let api = self.api
         NotificationCenter.default.addObserver(forName: NSApplication.willTerminateNotification,
                                                object: nil, queue: nil) { _ in
+            // Release the receivers first: a killed engine never tears its
+            // AirPlay sessions down, and the next launch then waits for them.
+            api.releaseOutputsForQuit()
             EngineSupervisor.reapEngines(matchingConfig: confPath, graceSeconds: 3.0)
+        }
+    }
+
+    private struct SleepResume {
+        let generation: Int
+        let mode: RoomMode
+        let hadQueue: Bool
+        let wasPlaying: Bool
+    }
+    private var sleepResume: SleepResume?
+    private var wakeTask: Task<Void, Never>?
+    private var wakeTaskID: UUID?
+    var hasPendingWake: Bool { sleepResume != nil || wakeTask != nil }
+
+    private func cancelPendingWake() {
+        wakeTask?.cancel(); wakeTask = nil; wakeTaskID = nil
+        sleepResume = nil
+    }
+
+    func handleSystemSleep() {
+        guard phase.isOn else {
+            // The lid can close again while the previous wake is settling.
+            // Keep the resume snapshot, but invalidate that delayed task.
+            wakeTask?.cancel(); wakeTask = nil; wakeTaskID = nil
+            return
+        }
+        let savedMode = mode, queued = hasQueue, playing = isPlaying
+        if playerMode { stopPlayback() } else { stopStream() }
+        sleepResume = SleepResume(generation: streamGeneration, mode: savedMode,
+                                  hadQueue: queued, wasPlaying: playing)
+    }
+
+    func handleSystemWake() {
+        guard let resume = sleepResume, wakeTask == nil else { return }
+        let token = UUID()
+        wakeTaskID = token
+        wakeTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer {
+                if self.wakeTaskID == token {
+                    self.sleepResume = nil; self.wakeTask = nil; self.wakeTaskID = nil
+                }
+            }
+            await self.awaitNetwork()
+            do { try await Task.sleep(for: .seconds(1)) } catch { return }
+            guard !Task.isCancelled, self.pathSatisfied, self.phase == .idle,
+                  self.streamGeneration == resume.generation, self.mode == resume.mode else { return }
+            if resume.mode == .player {
+                // stop pauses OwnTone's queue; do not replace it with shuffle
+                // or start Mac capture under a library-player interface.
+                self.hasQueue = resume.hadQueue
+                if resume.hadQueue && resume.wasPlaying {
+                    self.playToRoom { try await $0.play() }
+                }
+            } else {
+                self.startStream(reason: "wake")
+            }
         }
     }
 
     private func observeSleepWake() {
         let nc = NSWorkspace.shared.notificationCenter
         nc.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: .main) { [weak self] _ in
-            Task { @MainActor in
-                // `.starting` counts: a start still connecting when the lid
-                // closes would otherwise run on into the sleep and land as an
-                // error (or a half-built session) on wake.
-                guard let self, self.phase.isOn else { return }
-                self.wasStreamingBeforeSleep = true
-                if self.playerMode { self.stopPlayback() } else { self.stopStream() }
-            }
+            Task { @MainActor in self?.handleSystemSleep() }
         }
         nc.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in
-            Task { @MainActor in
-                guard let self, self.wasStreamingBeforeSleep else { return }
-                self.wasStreamingBeforeSleep = false
-                // Wait for the network to actually come back rather than
-                // guessing 3s — Wi-Fi after a lid-open regularly takes longer,
-                // and starting early just fails discovery and shows an error.
-                await self.awaitNetwork()
-                try? await Task.sleep(nanoseconds: 1_000_000_000)   // let mDNS settle
-                // Player mode has no capture stream to restart; starting one
-                // here would begin mirroring the Mac under a player-mode UI.
-                guard !self.playerMode else { return }
-                self.startStream(reason: "wake")
-            }
+            Task { @MainActor in self?.handleSystemWake() }
         }
     }
-    private var wasStreamingBeforeSleep = false
 
     // MARK: network resilience
     //
@@ -3005,7 +3242,7 @@ final class DALIStore {
     /// a fixed sleep is a guess, and guessing short means the resume fails.
     private func awaitNetwork(timeoutMs: Int = 15_000) async {
         var waited = 0
-        while !pathSatisfied && waited < timeoutMs {
+        while !Task.isCancelled && !pathSatisfied && waited < timeoutMs {
             try? await Task.sleep(nanoseconds: 250_000_000)
             waited += 250
         }

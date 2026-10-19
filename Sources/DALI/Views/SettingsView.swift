@@ -192,11 +192,26 @@ struct RoomSettings: View {
                             .font(.caption).foregroundStyle(Color.paper62)
                             .padding(.horizontal, Space.m)
                         ForEach(store.speakers.filter { $0.kind != .extra || $0.enabled }) { sp in
-                            SliderRow(value: Binding(get: { (sp.gain - 0.25) / 3.75 * 100 },
-                                                     set: { store.setGain(0.25 + $0 / 100 * 3.75, for: sp) }),
-                                      readout: "\(safeInt((sp.gain * 100).rounded()))%", labelWidth: 96) {
-                                Text(sp.name).font(.body13).foregroundStyle(Color.paper)
-                                    .lineLimit(1).help("\(sp.name) loudness adjustment")
+                            if let curve = sp.levelCurve {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    HStack(spacing: Space.s) {
+                                        Text(sp.name).font(.body13).foregroundStyle(Color.paper).lineLimit(1)
+                                        Spacer(minLength: 0)
+                                        Text("\(safeInt((store.effectiveGain(sp) * 100).rounded()))% now")
+                                            .font(.readout).foregroundStyle(Color.paper62)
+                                    }
+                                    BalanceTrimControl(speaker: sp)
+                                    Text("Levels with the Mac volume. \(curve.stepSummary)")
+                                        .font(.caption).foregroundStyle(Color.paper62)
+                                }
+                                .padding(.horizontal, Space.m)
+                            } else {
+                                SliderRow(value: Binding(get: { (sp.gain - 0.25) / 3.75 * 100 },
+                                                         set: { store.setGain(0.25 + $0 / 100 * 3.75, for: sp) }),
+                                          readout: "\(safeInt((sp.gain * 100).rounded()))%", labelWidth: 96) {
+                                    Text(sp.name).font(.body13).foregroundStyle(Color.paper)
+                                        .lineLimit(1).help("\(sp.name) loudness adjustment")
+                                }
                             }
                         }
                     }

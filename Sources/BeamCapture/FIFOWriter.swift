@@ -67,7 +67,7 @@ public final class FIFOWriter: @unchecked Sendable {
     public convenience init(path: String) {
         self.init(path: path, capacityBytes: Self.maximumPendingBytes,
                   maximumAge: Self.maximumAudioAge,
-                  queue: DispatchQueue(label: "beam.fifo.write", qos: .userInitiated),
+                  queue: DispatchQueue(label: "beam.fifo.write", qos: .userInteractive),
                   now: { clock_gettime_nsec_np(CLOCK_MONOTONIC) })
     }
     // Internal clock/queue injection keeps slow-reader/close tests deterministic.

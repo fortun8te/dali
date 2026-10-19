@@ -58,6 +58,12 @@
 #include <stdint.h>
 #include <errno.h>
 #include <time.h>
+#ifdef __APPLE__
+#include <mach/mach.h>
+#include <mach/mach_time.h>
+#include <mach/thread_policy.h>
+#include <pthread/qos.h>
+#endif
 #include <pthread.h>
 
 #ifdef HAVE_TIMERFD
@@ -114,6 +120,17 @@
 // gets above this value, we will suspend playback and reset the output.
 // (value is in milliseconds)
 #define PLAYER_WRITE_BEHIND_MAX 1500
+
+// DALI patch: a scheduler stall shorter than this is repaid by the paced
+// catch-up (three reads per callback) instead of being discarded. Discarding it
+// left pts and the input buffer that far behind real time for hours, because
+// only the 100 ppm slew remained to correct it (measured 1.2-2.5 s lags on
+// 2026-10-18). Longer gaps (sleep, debugger) are still dropped.
+#define PLAYER_STALL_REPAY_MAX_MS 5000
+
+// DALI patch: a pts lag above this, with no timer debt outstanding, is handed
+// to the catch-up loop as debt. Smaller lags keep the gentle 100 ppm slew.
+#define PLAYER_PTS_BEHIND_REPAY_MS 250
 
 // If a speaker fails during playback we try to bring it back by reconnecting
 // after this number of seconds. When this feature was added, we had an issue
@@ -982,10 +999,33 @@ session_update_read_ts(struct timespec *ts)
   if (clock_gettime(CLOCK_MONOTONIC, &now_ts) < 0)
     goto out;
 
+  // Not anchored yet: the first read sets pts from start_ts.
+  if (pb_session.pts.tv_sec == 0 && pb_session.pts.tv_nsec == 0)
+    goto out;
+
   if (timespec_cmp(pb_session.pts, now_ts) <= 0)
     {
       diff = timespec_sub(now_ts, pb_session.pts);
       diff_ms = (int64_t)diff.tv_sec * 1000 + diff.tv_nsec / 1000000;
+      // A large lag after the timer debt is paid means audio is still queued
+      // that the room should already be playing. Hand it to the paced
+      // catch-up, which advances pts only as real audio is read. Beyond the
+      // repay window the queued audio cannot exist any more: re-anchor.
+      if (diff_ms > PLAYER_PTS_BEHIND_REPAY_MS && pb_tick_debt_ns <= 20000000ULL)
+	{
+	  if (diff_ms > PLAYER_STALL_REPAY_MAX_MS)
+	    {
+	      DPRINTF(E_LOG, L_PLAYER, "AI event=pts_reanchor_behind lag_ms=%" PRIi64 "\n", diff_ms);
+	      pb_session.pts = now_ts;
+	    }
+	  else
+	    {
+	      DPRINTF(E_LOG, L_PLAYER, "AI event=pts_repay_behind lag_ms=%" PRIi64 "\n", diff_ms);
+	      pb_tick_debt_ns += (uint64_t)diff_ms * 1000000ULL;
+	    }
+	  pb_session.last_pts_slew_ts = now_ts;
+	  goto out;
+	}
       if (pb_session.last_pts_slew_ts.tv_sec != 0)
 	{
 	  elapsed = timespec_sub(now_ts, pb_session.last_pts_slew_ts);
@@ -1438,10 +1478,10 @@ playback_cb(int fd, short what, void *arg)
             struct timespec el = timespec_sub(tick_now, pb_tick_last);
             uint64_t el_ns = (uint64_t)el.tv_sec * 1000000000ULL + (uint64_t)el.tv_nsec;
 
-            // A pause/resume or a debugger stop can hand us a huge gap; that is
-            // not audio we owe anyone, so discard it rather than reading a
-            // burst. One second of catch-up is already far more than any real
-            // scheduling hiccup.
+            // A sleep or a debugger stop can hand us a huge gap; that is not
+            // audio we owe anyone, so a gap of PLAYER_STALL_REPAY_MAX_MS or
+            // more is discarded rather than read. (Pause/resume and restarts
+            // clear pb_tick_last, so they never reach this accounting.)
             //
             // Wall time is authoritative for the TOTAL number of reads. libevent
             // may deliver accumulated SIGALRM callbacks back-to-back; consuming
@@ -1449,10 +1489,18 @@ playback_cb(int fd, short what, void *arg)
             // wall-clock catch-up reads double-counted those ticks and drained a
             // real-time pipe by 8–10%. Send at most three reads now and preserve
             // the remainder as debt for later callbacks.
-            if (el_ns < 1000000000ULL)
+            //
+            // A stall of up to PLAYER_STALL_REPAY_MAX_MS is still audio the
+            // room is owed: the producer kept writing in real time, so the
+            // input holds it. Repay it at the same paced rate rather than
+            // dropping the debt, which used to leave pts permanently behind.
+            if (el_ns < (uint64_t)PLAYER_STALL_REPAY_MAX_MS * 1000000ULL)
               {
                 uint64_t reads_due;
                 uint64_t reads_now;
+
+                if (el_ns >= 1000000000ULL)
+                  DPRINTF(E_LOG, L_PLAYER, "AI event=timer_stall gap_ms=%" PRIu64 " repaying\n", el_ns / 1000000ULL);
 
                 pb_tick_debt_ns += el_ns;
                 reads_due = pb_tick_debt_ns / tick_ns;
@@ -1581,6 +1629,11 @@ playback_cb(int fd, short what, void *arg)
 	}
       if (nbytes == 0)
 	{
+	  // DALI patch: catch-up found the input empty, so the audio it was
+	  // repaying is not there. Stop pressing for it; a real remaining lag is
+	  // re-measured from pts at the next pipe marker.
+	  if (overrun > 0)
+	    pb_tick_debt_ns = 0;
 	  break;
 	}
 
@@ -2009,7 +2062,25 @@ pb_timer_start(void)
   // playback loop has been kicked off, we deactivate them
   outputs_stop_delayed_cancel();
 
+  // DALI patch: time while the timer was stopped (stop, pause, a quick
+  // Stop then Play) is not a scheduler stall. Without this reset a 3 s
+  // Stop/Play was "repaid" as a catch-up burst on 2026-10-19 15:33, which
+  // pushed the RTP timeline ahead of pts and left the Sonos silent.
+  pb_tick_last.tv_sec = 0;
+  pb_tick_last.tv_nsec = 0;
+  pb_tick_debt_ns = 0;
+
+#ifdef HAVE_TIMERFD
   ret = event_add(pb_timer_ev, NULL);
+#else
+  // DALI patch: on macOS the tick is a persistent libevent timeout on the
+  // (real-time) player thread. The old SIGALRM/setitimer tick was delivered to
+  // whichever thread the kernel picked, so a busy Mac delayed every tick.
+  {
+    struct timeval tv = { 0, (suseconds_t)(player_tick_interval.tv_nsec / 1000) };
+    ret = event_add(pb_timer_ev, &tv);
+  }
+#endif
   if (ret < 0)
     {
       DPRINTF(E_LOG, L_PLAYER, "Could not add playback timer\n");
@@ -2023,7 +2094,8 @@ pb_timer_start(void)
 #ifdef HAVE_TIMERFD
   ret = timerfd_settime(pb_timer_fd, 0, &tick, NULL);
 #else
-  ret = timer_settime(pb_timer, 0, &tick, NULL);
+  (void)tick;
+  ret = 0;
 #endif
   if (ret < 0)
     {
@@ -2048,7 +2120,7 @@ pb_timer_stop(void)
 #ifdef HAVE_TIMERFD
   ret = timerfd_settime(pb_timer_fd, 0, &tick, NULL);
 #else
-  ret = timer_settime(pb_timer, 0, &tick, NULL);
+  ret = 0; // libevent timeout, removed by event_del() above
 #endif
   if (ret < 0)
     {
@@ -4228,6 +4300,35 @@ player_raop_verification_kickoff(char **arglist)
 
 /* ---------------------------- Thread: player ------------------------------ */
 
+#ifdef __APPLE__
+// DALI patch: reserve CPU for the playback clock, as Core Audio does for its
+// I/O threads. On a heavily loaded Mac (load 90-300 measured 2026-10-19) the
+// default-priority player thread stalled for up to 3 s, which is every
+// glitch and drift. Time-constraint scheduling gives it 2 ms of every 10 ms
+// tick ahead of ordinary work; the kernel demotes it if it ever overruns.
+static void
+player_thread_realtime(void)
+{
+  mach_timebase_info_data_t tb;
+  thread_time_constraint_policy_data_t policy;
+  uint64_t period_ns = (uint64_t)player_tick_interval.tv_nsec;
+  kern_return_t kr;
+
+  pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
+
+  if (period_ns == 0 || mach_timebase_info(&tb) != KERN_SUCCESS || tb.numer == 0)
+    return;
+
+  policy.period = (uint32_t)(period_ns * tb.denom / tb.numer);
+  policy.computation = (uint32_t)(2000000ULL * tb.denom / tb.numer);
+  policy.constraint = policy.period;
+  policy.preemptible = 1;
+  kr = thread_policy_set(mach_thread_self(), THREAD_TIME_CONSTRAINT_POLICY,
+			 (thread_policy_t)&policy, THREAD_TIME_CONSTRAINT_POLICY_COUNT);
+  DPRINTF(E_LOG, L_PLAYER, "AI event=player_thread_realtime result=%s\n", kr == KERN_SUCCESS ? "ok" : "refused");
+}
+#endif
+
 static void *
 player(void *arg)
 {
@@ -4235,6 +4336,9 @@ player(void *arg)
   int ret;
 
   thread_setname("player");
+#ifdef __APPLE__
+  player_thread_realtime();
+#endif
 
   ret = db_perthread_init();
   if (ret < 0)
@@ -4326,7 +4430,7 @@ player_init(void)
 #ifdef HAVE_TIMERFD
   CHECK_NULL(L_PLAYER, pb_timer_ev = event_new(evbase_player, pb_timer_fd, EV_READ | EV_PERSIST, playback_cb, NULL));
 #else
-  CHECK_NULL(L_PLAYER, pb_timer_ev = event_new(evbase_player, SIGALRM, EV_SIGNAL | EV_PERSIST, playback_cb, NULL));
+  CHECK_NULL(L_PLAYER, pb_timer_ev = event_new(evbase_player, -1, EV_PERSIST, playback_cb, NULL));
 #endif
   CHECK_NULL(L_PLAYER, cmdbase = commands_base_new(evbase_player, NULL));
 
