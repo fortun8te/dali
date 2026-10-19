@@ -620,6 +620,9 @@ public actor EngineSupervisor {
             // nobody drains eventually blocks the child on write.
             p.standardOutput = FileHandle.nullDevice
             p.standardError = FileHandle.nullDevice
+            // Audio first on a busy Mac: the engine's own player thread also
+            // asks for real-time scheduling (see player_thread_realtime).
+            p.qualityOfService = .userInteractive
             // Stamp this child with a generation so its death handler can prove
             // it is reporting the CURRENT engine's exit and not a superseded one.
             engineGeneration += 1

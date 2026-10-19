@@ -58,6 +58,12 @@
 #include <stdint.h>
 #include <errno.h>
 #include <time.h>
+#ifdef __APPLE__
+#include <mach/mach.h>
+#include <mach/mach_time.h>
+#include <mach/thread_policy.h>
+#include <pthread/qos.h>
+#endif
 #include <pthread.h>
 
 #ifdef HAVE_TIMERFD
@@ -2064,7 +2070,17 @@ pb_timer_start(void)
   pb_tick_last.tv_nsec = 0;
   pb_tick_debt_ns = 0;
 
+#ifdef HAVE_TIMERFD
   ret = event_add(pb_timer_ev, NULL);
+#else
+  // DALI patch: on macOS the tick is a persistent libevent timeout on the
+  // (real-time) player thread. The old SIGALRM/setitimer tick was delivered to
+  // whichever thread the kernel picked, so a busy Mac delayed every tick.
+  {
+    struct timeval tv = { 0, (suseconds_t)(player_tick_interval.tv_nsec / 1000) };
+    ret = event_add(pb_timer_ev, &tv);
+  }
+#endif
   if (ret < 0)
     {
       DPRINTF(E_LOG, L_PLAYER, "Could not add playback timer\n");
@@ -2078,7 +2094,8 @@ pb_timer_start(void)
 #ifdef HAVE_TIMERFD
   ret = timerfd_settime(pb_timer_fd, 0, &tick, NULL);
 #else
-  ret = timer_settime(pb_timer, 0, &tick, NULL);
+  (void)tick;
+  ret = 0;
 #endif
   if (ret < 0)
     {
@@ -2103,7 +2120,7 @@ pb_timer_stop(void)
 #ifdef HAVE_TIMERFD
   ret = timerfd_settime(pb_timer_fd, 0, &tick, NULL);
 #else
-  ret = timer_settime(pb_timer, 0, &tick, NULL);
+  ret = 0; // libevent timeout, removed by event_del() above
 #endif
   if (ret < 0)
     {
@@ -4283,6 +4300,35 @@ player_raop_verification_kickoff(char **arglist)
 
 /* ---------------------------- Thread: player ------------------------------ */
 
+#ifdef __APPLE__
+// DALI patch: reserve CPU for the playback clock, as Core Audio does for its
+// I/O threads. On a heavily loaded Mac (load 90-300 measured 2026-10-19) the
+// default-priority player thread stalled for up to 3 s, which is every
+// glitch and drift. Time-constraint scheduling gives it 2 ms of every 10 ms
+// tick ahead of ordinary work; the kernel demotes it if it ever overruns.
+static void
+player_thread_realtime(void)
+{
+  mach_timebase_info_data_t tb;
+  thread_time_constraint_policy_data_t policy;
+  uint64_t period_ns = (uint64_t)player_tick_interval.tv_nsec;
+  kern_return_t kr;
+
+  pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
+
+  if (period_ns == 0 || mach_timebase_info(&tb) != KERN_SUCCESS || tb.numer == 0)
+    return;
+
+  policy.period = (uint32_t)(period_ns * tb.denom / tb.numer);
+  policy.computation = (uint32_t)(2000000ULL * tb.denom / tb.numer);
+  policy.constraint = policy.period;
+  policy.preemptible = 1;
+  kr = thread_policy_set(mach_thread_self(), THREAD_TIME_CONSTRAINT_POLICY,
+			 (thread_policy_t)&policy, THREAD_TIME_CONSTRAINT_POLICY_COUNT);
+  DPRINTF(E_LOG, L_PLAYER, "AI event=player_thread_realtime result=%s\n", kr == KERN_SUCCESS ? "ok" : "refused");
+}
+#endif
+
 static void *
 player(void *arg)
 {
@@ -4290,6 +4336,9 @@ player(void *arg)
   int ret;
 
   thread_setname("player");
+#ifdef __APPLE__
+  player_thread_realtime();
+#endif
 
   ret = db_perthread_init();
   if (ret < 0)
@@ -4381,7 +4430,7 @@ player_init(void)
 #ifdef HAVE_TIMERFD
   CHECK_NULL(L_PLAYER, pb_timer_ev = event_new(evbase_player, pb_timer_fd, EV_READ | EV_PERSIST, playback_cb, NULL));
 #else
-  CHECK_NULL(L_PLAYER, pb_timer_ev = event_new(evbase_player, SIGALRM, EV_SIGNAL | EV_PERSIST, playback_cb, NULL));
+  CHECK_NULL(L_PLAYER, pb_timer_ev = event_new(evbase_player, -1, EV_PERSIST, playback_cb, NULL));
 #endif
   CHECK_NULL(L_PLAYER, cmdbase = commands_base_new(evbase_player, NULL));
 

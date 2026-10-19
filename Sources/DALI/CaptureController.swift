@@ -1005,7 +1005,7 @@ final class CaptureController: @unchecked Sendable {
     // from a cancelled timer after a later start.
     private func startSilenceKeepaliveLocked(session: Int) {
         guard silenceTimer == nil else { return }
-        let t = DispatchSource.makeTimerSource(queue: DispatchQueue(label: "dali.silence"))
+        let t = DispatchSource.makeTimerSource(queue: DispatchQueue(label: "dali.silence", qos: .userInteractive))
         t.schedule(deadline: .now(), repeating: .milliseconds(50))
         t.setEventHandler { [weak self] in
             guard let self else { return }

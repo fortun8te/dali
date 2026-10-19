@@ -1280,10 +1280,23 @@ index 5b3d418..b1b05ea 100644
    return session;
  }
 diff --git a/src/player.c b/src/player.c
-index f9ce616..0500fd0 100644
+index f9ce616..3c4c9b3 100644
 --- a/src/player.c
 +++ b/src/player.c
-@@ -115,10 +115,21 @@
+@@ -58,6 +58,12 @@
+ #include <stdint.h>
+ #include <errno.h>
+ #include <time.h>
++#ifdef __APPLE__
++#include <mach/mach.h>
++#include <mach/mach_time.h>
++#include <mach/thread_policy.h>
++#include <pthread/qos.h>
++#endif
+ #include <pthread.h>
+ 
+ #ifdef HAVE_TIMERFD
+@@ -115,10 +121,21 @@
  // (value is in milliseconds)
  #define PLAYER_WRITE_BEHIND_MAX 1500
  
@@ -1306,7 +1319,7 @@ index f9ce616..0500fd0 100644
  
  // Shorthand condition for outputs_start and outputs_device_start, both need to
  // know if they should only probe the device, or fully start it.
-@@ -239,6 +250,10 @@ struct player_source
+@@ -239,6 +256,10 @@ struct player_source
    // This should at any time match the millisecond position of the media that is
    // coming out of your device. Will be 0 during initial buffering.
    uint32_t pos_ms;
@@ -1317,7 +1330,7 @@ index f9ce616..0500fd0 100644
  
    // How many samples the outputs buffer before playing (=delay)
    int output_buffer_samples;
-@@ -261,6 +276,9 @@ struct player_session
+@@ -261,6 +282,9 @@ struct player_session
    // It will be equal to:
    // pts = start_ts + ticks_elapsed * player_tick_interval
    struct timespec pts;
@@ -1327,7 +1340,7 @@ index f9ce616..0500fd0 100644
  
    // Equals current number of samples written to outputs
    uint32_t pos;
-@@ -313,6 +331,10 @@ static int clear_queue_on_stop_disabled;
+@@ -313,6 +337,10 @@ static int clear_queue_on_stop_disabled;
  
  // Player status
  static enum play_status player_state;
@@ -1338,7 +1351,7 @@ index f9ce616..0500fd0 100644
  static enum repeat_mode repeat;
  static char shuffle;
  static char consume;
-@@ -327,6 +349,17 @@ static struct event *pb_timer_ev;
+@@ -327,6 +355,17 @@ static struct event *pb_timer_ev;
  
  // Time between ticks, i.e. time between when playback_cb() is invoked
  static struct timespec player_tick_interval;
@@ -1356,7 +1369,7 @@ index f9ce616..0500fd0 100644
  // Timer resolution
  static struct timespec player_timer_res;
  
-@@ -855,6 +888,7 @@ session_update_read_start(uint32_t seek_ms)
+@@ -855,6 +894,7 @@ session_update_read_start(uint32_t seek_ms)
      return;
  
    pb_session.reading_now->pos_ms     = seek_ms;
@@ -1364,7 +1377,7 @@ index f9ce616..0500fd0 100644
    pb_session.reading_now->seek_ms    = seek_ms;
    pb_session.reading_now->read_start = pb_session.pos;
  
-@@ -864,7 +898,7 @@ session_update_read_start(uint32_t seek_ms)
+@@ -864,7 +904,7 @@ session_update_read_start(uint32_t seek_ms)
  static inline void
  session_update_read(int nsamples)
  {
@@ -1373,7 +1386,7 @@ index f9ce616..0500fd0 100644
  
    // Did we just complete our first read? Then set the start timestamp
    if (pb_session.start_ts.tv_sec == 0)
-@@ -881,11 +915,13 @@ session_update_read(int nsamples)
+@@ -881,11 +921,13 @@ session_update_read(int nsamples)
    if (!pb_session.playing_now->quality.sample_rate)
      return;
  
@@ -1390,7 +1403,7 @@ index f9ce616..0500fd0 100644
  }
  
  static void
-@@ -928,9 +964,94 @@ session_update_read_quality(struct media_quality *quality)
+@@ -928,9 +970,94 @@ session_update_read_quality(struct media_quality *quality)
  static void
  session_update_read_ts(struct timespec *ts)
  {
@@ -1469,7 +1482,7 @@ index f9ce616..0500fd0 100644
 +	pb_session.last_pts_slew_ts = now_ts;
 +      goto out;
 +    }
-+
+ 
 +  diff = timespec_sub(pb_session.pts, now_ts);
 +  diff_ms = (int64_t)diff.tv_sec * 1000 + diff.tv_nsec / 1000000;
 +  if (diff_ms < PTS_AHEAD_DEADBAND_MS)
@@ -1479,14 +1492,14 @@ index f9ce616..0500fd0 100644
 +    "AI event=pts_clamp_ahead diff_ms=%" PRIi64 "\n",
 +    diff_ms);
 +  pb_session.pts = now_ts;
- 
++
 + out:
    free(ts);
 +#undef PTS_AHEAD_DEADBAND_MS
  }
  
  static void
-@@ -947,7 +1068,10 @@ static void
+@@ -947,7 +1074,10 @@ static void
  session_update_play_metadata(struct input_metadata *metadata)
  {
    if (metadata->pos_is_updated)
@@ -1498,7 +1511,7 @@ index f9ce616..0500fd0 100644
    if (metadata->len_ms)
      pb_session.playing_now->len_ms = metadata->len_ms;
  }
-@@ -961,6 +1085,17 @@ session_restart(void)
+@@ -961,6 +1091,17 @@ session_restart(void)
    pb_session.pts.tv_nsec = 0;
    pb_session.read_deficit = 0;
    pb_session.metadata_sent = 0;
@@ -1516,7 +1529,7 @@ index f9ce616..0500fd0 100644
  }
  
  static void
-@@ -1272,7 +1407,10 @@ static void
+@@ -1272,7 +1413,10 @@ static void
  playback_cb(int fd, short what, void *arg)
  {
    struct timespec ts;
@@ -1527,7 +1540,7 @@ index f9ce616..0500fd0 100644
    int nbytes;
    int nsamples;
    int i;
-@@ -1280,20 +1418,161 @@ playback_cb(int fd, short what, void *arg)
+@@ -1280,20 +1424,161 @@ playback_cb(int fd, short what, void *arg)
  
    // Check if we missed any timer expirations
    overrun = 0;
@@ -1695,7 +1708,7 @@ index f9ce616..0500fd0 100644
    // We are too delayed, probably some output blocked: reset if first overrun or abort if second overrun
    if (overrun > pb_write_deficit_max)
      {
-@@ -1317,7 +1596,7 @@ playback_cb(int fd, short what, void *arg)
+@@ -1317,7 +1602,7 @@ playback_cb(int fd, short what, void *arg)
    else
      {
        if (overrun > 1) // An overrun of 1 is no big deal
@@ -1704,7 +1717,7 @@ index f9ce616..0500fd0 100644
  
        pb_write_recovery = false;
      }
-@@ -1344,6 +1623,11 @@ playback_cb(int fd, short what, void *arg)
+@@ -1344,6 +1629,11 @@ playback_cb(int fd, short what, void *arg)
  	}
        if (nbytes == 0)
  	{
@@ -1716,7 +1729,7 @@ index f9ce616..0500fd0 100644
  	  break;
  	}
  
-@@ -1372,6 +1656,17 @@ playback_cb(int fd, short what, void *arg)
+@@ -1372,6 +1662,17 @@ playback_cb(int fd, short what, void *arg)
  	}
      }
  
@@ -1734,7 +1747,7 @@ index f9ce616..0500fd0 100644
    if (pb_session.read_deficit_max && pb_session.read_deficit > pb_session.read_deficit_max)
      {
        DPRINTF(E_LOG, L_PLAYER, "Source is not providing sufficient data, temporarily suspending playback (deficit=%zu/%zu bytes)\n",
-@@ -1507,13 +1802,23 @@ device_streaming_cb(struct output_device *device, enum output_device_state statu
+@@ -1507,13 +1808,23 @@ device_streaming_cb(struct output_device *device, enum output_device_state statu
  
        // The device can fail outside of playback, e.g. if it disconnects after a
        // flush command
@@ -1763,7 +1776,7 @@ index f9ce616..0500fd0 100644
  	goto out;
  
        DPRINTF(E_LOG, L_PLAYER, "Attempting reconnection in %d sec to the %s device '%s'\n", PLAYER_SPEAKER_RESURRECT_TIME, device->type_name, device->name);
-@@ -1524,6 +1829,58 @@ device_streaming_cb(struct output_device *device, enum output_device_state statu
+@@ -1524,6 +1835,58 @@ device_streaming_cb(struct output_device *device, enum output_device_state statu
    else if (status == OUTPUT_STATE_STOPPED)
      {
        DPRINTF(E_INFO, L_PLAYER, "The %s device '%s' stopped\n", device->type_name, device->name);
@@ -1822,7 +1835,7 @@ index f9ce616..0500fd0 100644
      }
    else
      {
-@@ -1541,19 +1898,27 @@ device_streaming_cb(struct output_device *device, enum output_device_state statu
+@@ -1541,19 +1904,27 @@ device_streaming_cb(struct output_device *device, enum output_device_state statu
  static void
  device_volume_cb(struct output_device *device, enum output_device_state status)
  {
@@ -1850,7 +1863,7 @@ index f9ce616..0500fd0 100644
    outputs_device_cb_set(device, device_streaming_cb);
  
   out:
-@@ -1562,7 +1927,7 @@ device_volume_cb(struct output_device *device, enum output_device_state status)
+@@ -1562,7 +1933,7 @@ device_volume_cb(struct output_device *device, enum output_device_state status)
    if (outputs_sessions_count() == 0)
      pb_suspend();
  
@@ -1859,7 +1872,7 @@ index f9ce616..0500fd0 100644
  }
  
  static void
-@@ -1691,6 +2056,14 @@ pb_timer_start(void)
+@@ -1691,7 +2062,25 @@ pb_timer_start(void)
    // playback loop has been kicked off, we deactivate them
    outputs_stop_delayed_cancel();
  
@@ -1871,10 +1884,40 @@ index f9ce616..0500fd0 100644
 +  pb_tick_last.tv_nsec = 0;
 +  pb_tick_debt_ns = 0;
 +
++#ifdef HAVE_TIMERFD
    ret = event_add(pb_timer_ev, NULL);
++#else
++  // DALI patch: on macOS the tick is a persistent libevent timeout on the
++  // (real-time) player thread. The old SIGALRM/setitimer tick was delivered to
++  // whichever thread the kernel picked, so a busy Mac delayed every tick.
++  {
++    struct timeval tv = { 0, (suseconds_t)(player_tick_interval.tv_nsec / 1000) };
++    ret = event_add(pb_timer_ev, &tv);
++  }
++#endif
    if (ret < 0)
      {
-@@ -1803,6 +2176,7 @@ pb_session_stop(void)
+       DPRINTF(E_LOG, L_PLAYER, "Could not add playback timer\n");
+@@ -1705,7 +2094,8 @@ pb_timer_start(void)
+ #ifdef HAVE_TIMERFD
+   ret = timerfd_settime(pb_timer_fd, 0, &tick, NULL);
+ #else
+-  ret = timer_settime(pb_timer, 0, &tick, NULL);
++  (void)tick;
++  ret = 0;
+ #endif
+   if (ret < 0)
+     {
+@@ -1730,7 +2120,7 @@ pb_timer_stop(void)
+ #ifdef HAVE_TIMERFD
+   ret = timerfd_settime(pb_timer_fd, 0, &tick, NULL);
+ #else
+-  ret = timer_settime(pb_timer, 0, &tick, NULL);
++  ret = 0; // libevent timeout, removed by event_del() above
+ #endif
+   if (ret < 0)
+     {
+@@ -1803,6 +2193,7 @@ pb_session_stop(void)
  static void
  pb_abort(void)
  {
@@ -1882,7 +1925,7 @@ index f9ce616..0500fd0 100644
    // Immediate stop of all outputs
    outputs_stop(device_streaming_cb);
    outputs_metadata_purge();
-@@ -1984,6 +2358,7 @@ playing_now(void *arg, int *retval)
+@@ -1984,6 +2375,7 @@ playing_now(void *arg, int *retval)
  static enum command_state
  playback_stop(void *arg, int *retval)
  {
@@ -1890,7 +1933,7 @@ index f9ce616..0500fd0 100644
    if (player_state == PLAY_STOPPED)
      {
        *retval = 0;
-@@ -2030,6 +2405,7 @@ playback_start_bh(void *arg, int *retval)
+@@ -2030,6 +2422,7 @@ playback_start_bh(void *arg, int *retval)
  
    // We also ask listeners to update speaker/volume state, since it is possible
    // some of the speakers we tried to start responded with failure
@@ -1898,7 +1941,7 @@ index f9ce616..0500fd0 100644
    status_update(PLAY_PLAYING, LISTENER_PLAYER | LISTENER_SPEAKER | LISTENER_VOLUME);
  
    *retval = 0;
-@@ -2470,6 +2846,7 @@ playback_pause_bh(void *arg, int *retval)
+@@ -2470,6 +2863,7 @@ playback_pause_bh(void *arg, int *retval)
  static enum command_state
  playback_pause(void *arg, int *retval)
  {
@@ -1906,7 +1949,7 @@ index f9ce616..0500fd0 100644
    if (player_state == PLAY_STOPPED)
      {
        *retval = -1;
-@@ -2498,6 +2875,7 @@ playback_pause(void *arg, int *retval)
+@@ -2498,6 +2892,7 @@ playback_pause(void *arg, int *retval)
  static enum command_state
  playback_flush(void *arg, int *retval)
  {
@@ -1914,7 +1957,7 @@ index f9ce616..0500fd0 100644
    if (player_state == PLAY_STOPPED)
      {
        *retval = -1;
-@@ -2562,6 +2940,8 @@ device_to_speaker_info(struct player_speaker_info *spk, struct output_device *de
+@@ -2562,6 +2957,8 @@ device_to_speaker_info(struct player_speaker_info *spk, struct output_device *de
      spk->format = device->supported_formats;
  
    spk->selected = OUTPUTS_DEVICE_DISPLAY_SELECTED(device);
@@ -1923,7 +1966,7 @@ index f9ce616..0500fd0 100644
  
    spk->has_password = device->has_password;
    spk->has_video = device->has_video;
-@@ -2978,6 +3358,9 @@ speaker_resurrect(void *arg, int *retval)
+@@ -2978,6 +3375,9 @@ speaker_resurrect(void *arg, int *retval)
        // Playback was suspended by device_streaming_cb() because the speaker was
        // the only one playing. In that case we need to first resume the source,
        // then wait for the speaker to reactivate, and then run bottom half.
@@ -1933,6 +1976,61 @@ index f9ce616..0500fd0 100644
        *retval = pb_resume();
        if (*retval < 0)
  	goto out;
+@@ -3900,6 +4300,35 @@ player_raop_verification_kickoff(char **arglist)
+ 
+ /* ---------------------------- Thread: player ------------------------------ */
+ 
++#ifdef __APPLE__
++// DALI patch: reserve CPU for the playback clock, as Core Audio does for its
++// I/O threads. On a heavily loaded Mac (load 90-300 measured 2026-10-19) the
++// default-priority player thread stalled for up to 3 s, which is every
++// glitch and drift. Time-constraint scheduling gives it 2 ms of every 10 ms
++// tick ahead of ordinary work; the kernel demotes it if it ever overruns.
++static void
++player_thread_realtime(void)
++{
++  mach_timebase_info_data_t tb;
++  thread_time_constraint_policy_data_t policy;
++  uint64_t period_ns = (uint64_t)player_tick_interval.tv_nsec;
++  kern_return_t kr;
++
++  pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
++
++  if (period_ns == 0 || mach_timebase_info(&tb) != KERN_SUCCESS || tb.numer == 0)
++    return;
++
++  policy.period = (uint32_t)(period_ns * tb.denom / tb.numer);
++  policy.computation = (uint32_t)(2000000ULL * tb.denom / tb.numer);
++  policy.constraint = policy.period;
++  policy.preemptible = 1;
++  kr = thread_policy_set(mach_thread_self(), THREAD_TIME_CONSTRAINT_POLICY,
++			 (thread_policy_t)&policy, THREAD_TIME_CONSTRAINT_POLICY_COUNT);
++  DPRINTF(E_LOG, L_PLAYER, "AI event=player_thread_realtime result=%s\n", kr == KERN_SUCCESS ? "ok" : "refused");
++}
++#endif
++
+ static void *
+ player(void *arg)
+ {
+@@ -3907,6 +4336,9 @@ player(void *arg)
+   int ret;
+ 
+   thread_setname("player");
++#ifdef __APPLE__
++  player_thread_realtime();
++#endif
+ 
+   ret = db_perthread_init();
+   if (ret < 0)
+@@ -3998,7 +4430,7 @@ player_init(void)
+ #ifdef HAVE_TIMERFD
+   CHECK_NULL(L_PLAYER, pb_timer_ev = event_new(evbase_player, pb_timer_fd, EV_READ | EV_PERSIST, playback_cb, NULL));
+ #else
+-  CHECK_NULL(L_PLAYER, pb_timer_ev = event_new(evbase_player, SIGALRM, EV_SIGNAL | EV_PERSIST, playback_cb, NULL));
++  CHECK_NULL(L_PLAYER, pb_timer_ev = event_new(evbase_player, -1, EV_PERSIST, playback_cb, NULL));
+ #endif
+   CHECK_NULL(L_PLAYER, cmdbase = commands_base_new(evbase_player, NULL));
+ 
 diff --git a/src/player.h b/src/player.h
 index 258d8e1..bf34b6d 100644
 --- a/src/player.h

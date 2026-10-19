@@ -14,6 +14,13 @@ from the pinned upstream archive.
   microsecond correction while timer debt is low. A larger lag is handed to
   the paced catch-up as debt (pts advances only as real audio is read); a lag
   beyond 5 s re-anchors pts to the monotonic clock.
+- macOS playback timing: the player thread requests Mach time-constraint
+  scheduling (2 ms of every 10 ms tick, preemptible) at user-interactive QoS,
+  and the 10 ms tick is a persistent libevent timeout on that thread instead
+  of SIGALRM/setitimer. Under a load average of about 328, a 60 s run showed
+  zero late ticks and a worst debt of 4 ms (2026-10-19). The app launches the
+  engine at user-interactive QoS and runs its FIFO writer and silence keepalive
+  at user-interactive QoS.
 - Fractional sample progress accumulates its remainder instead of losing a
   fraction of a millisecond on each short read.
 - macOS catch-up uses elapsed wall time, sends at most three reads per callback,
