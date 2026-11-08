@@ -323,6 +323,28 @@ public final class ProcessTap: @unchecked Sendable {
 
     public init() {}
 
+    /// Leave this process out of a .system tap. Needed when the app itself plays
+    /// the captured audio (the Apple-managed sender); otherwise the tap hears its
+    /// own output. Off by default. When on and this process has no audio object
+    /// yet, start() throws rather than tapping, so it can never loop or mute.
+    public var excludeOwnProcess = false
+
+    /// True once Core Audio knows this process as an audio client.
+    public static func ownProcessObjectExists() -> Bool {
+        (try? processObject(for: getpid())) != nil
+    }
+
+    /// This process's audio object, found when the tap started and kept for refreshes.
+    private var ownExcludedObject: AudioObjectID?
+
+    private func ownExclusion() -> [AudioObjectID] {
+        guard excludeOwnProcess else { return [] }
+        if let own = ownExcludedObject { return [own] }
+        guard let own = try? Self.processObject(for: getpid()) else { return [] }
+        ownExcludedObject = own
+        return [own]
+    }
+
     public enum Source: Equatable, Sendable {
         case system            // everything the Mac plays
         case process(pid_t)    // one app only (e.g. Spotify)
@@ -357,8 +379,13 @@ public final class ProcessTap: @unchecked Sendable {
         case .system:
             // Call apps are excluded only when they are kept on the Mac
             // (CallAudio.keepCallsOnMac); otherwise they play in the room.
-            let calls = CallAudio.keepCallsOnMac
+            var calls = CallAudio.keepCallsOnMac
                 ? CallAudio.callProcessObjects(in: CallAudio.currentProcesses()) : []
+            if excludeOwnProcess {
+                let own = ownExclusion()
+                guard !own.isEmpty else { throw TapError(stage: "own process not an audio client", status: -4) }
+                calls.append(contentsOf: own.filter { !calls.contains($0) })
+            }
             excludedCallObjects = Set(calls)
             desc = CATapDescription(stereoGlobalTapButExcludeProcesses: calls)
         case .process(let pid):
@@ -538,8 +565,8 @@ public final class ProcessTap: @unchecked Sendable {
                   now.sampleRate != f.sampleRate || now.channelCount != f.channelCount {
             reason = "tap_format_changed"
         } else if trigger == "process_list_changed", let excluded = excludedCallObjects {
-            let requested = Set(CallAudio.keepCallsOnMac
-                ? CallAudio.callProcessObjects(in: CallAudio.currentProcesses()) : [])
+            let requested = Set((CallAudio.keepCallsOnMac
+                ? CallAudio.callProcessObjects(in: CallAudio.currentProcesses()) : []) + ownExclusion())
             let result = ProcessTapExclusionRefresh.apply(previous: excluded, requested: requested,
                 isCurrent: { !self.stopping.load(ordering: .acquiring) &&
                     self.eventGeneration.load(ordering: .acquiring) == generation },

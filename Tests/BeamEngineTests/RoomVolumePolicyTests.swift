@@ -5,15 +5,11 @@ final class RoomVolumePolicyTests: XCTestCase {
     private let room = [RoomVolumeSpeaker(id: "front", slider: 100, gain: 1.5),
                         RoomVolumeSpeaker(id: "back", slider: 84)]
 
-    func testLowVolumeFloorHasIndependentEndpointsAndPreservesReceiverCalibration() {
-        let points: [(Double, Double)] = [(0, 0), (1.0 / 32, 0.15625),
-                                          (1.0 / 16, 0.5), (3.0 / 32, 0.84375), (2.0 / 16, 1)]
-        for (master, gain) in points {
+    func testAudioStaysAtUnityWheneverTheRoomIsAudible() {
+        for step in 0...4096 {
+            let master = Double(step) / 4096
             let plan = RoomVolumePolicy.plan(speakers: room, ceiling: 100, systemMaster: master)
-            XCTAssertEqual(plan.pcmGain, gain, accuracy: 1e-12)
-            for speaker in room {
-                XCTAssertEqual(plan.hardware[speaker.id], v1Volume(speaker, master: master, ceiling: 100))
-            }
+            XCTAssertEqual(plan.pcmGain, master == 0 ? 0 : 1, "no second, delayed quiet-end fade")
         }
         let cut = RoomVolumePolicy.plan(speakers: room, ceiling: 100, systemMaster: 1.0 / 16, muted: true)
         XCTAssertEqual(cut.pcmGain, 0)
@@ -21,25 +17,25 @@ final class RoomVolumePolicyTests: XCTestCase {
         XCTAssertEqual(RoomVolumePolicy.plan(speakers: room, ceiling: 100).pcmGain, 1)
     }
 
-    func testLowVolumeFloorIsMonotonicBoundedAndJoinsUnitySmoothly() {
-        var previous = 0.0
-        for step in 0...4096 {
-            let master = Double(step) / 4096
-            let gain = RoomVolumePolicy.plan(speakers: room, ceiling: 100, systemMaster: master).pcmGain
-            XCTAssertGreaterThanOrEqual(gain, previous)
-            XCTAssertGreaterThanOrEqual(gain, 0)
-            XCTAssertLessThanOrEqual(gain, 1)
-            if master >= 2.0 / 16 { XCTAssertEqual(gain, 1) }
-            previous = gain
+    func testEveryVolumeKeyIsTheSameSizeStep() {
+        let speakers = [RoomVolumeSpeaker(id: "S", slider: 100)]
+        for ceiling in [40.0, 70, 100] {
+            let commands = (0...16).map {
+                Double(RoomVolumePolicy.plan(speakers: speakers, ceiling: ceiling, systemMaster: Double($0) / 16).hardware["S"]!)
+            }
+            let ideal = ceiling / 16
+            for step in 1...16 {
+                XCTAssertEqual(commands[step] - commands[step - 1], ideal, accuracy: 1.01,
+                               "step \(step) at limit \(ceiling) is one even step, rounding aside")
+            }
+            XCTAssertEqual(commands[16], ceiling)
         }
-        let nearJoin = RoomVolumePolicy.plan(speakers: room, ceiling: 100, systemMaster: 2.0 / 16 - 0.00001)
-        XCTAssertEqual(nearJoin.pcmGain, 1, accuracy: 0.000001)
     }
 
-    // Independent baseline copied from preserved V1 effectiveVolume arithmetic.
+    // Independent baseline: V1's effectiveVolume arithmetic with the even (linear) master.
     private func v1Volume(_ speaker: RoomVolumeSpeaker, master: Double?, ceiling: Double) -> Int {
         guard speaker.enabled else { return 0 }
-        let base = master.map { speaker.slider * pow($0, 0.7) * (ceiling / 100) } ?? speaker.slider
+        let base = master.map { speaker.slider * $0 * (ceiling / 100) } ?? speaker.slider
         return Int(max(min(min(base * speaker.gain, 100), ceiling), 0).rounded())
     }
 
@@ -51,23 +47,18 @@ final class RoomVolumePolicyTests: XCTestCase {
                     for master in [0.001, 0.01, 1.0 / 16, 0.18, 0.31, 0.5, 0.68, 0.99, 1] {
                         let plan = RoomVolumePolicy.plan(speakers: [speaker], ceiling: ceiling, systemMaster: master)
                         XCTAssertEqual(plan.hardware["speaker"], v1Volume(speaker, master: master, ceiling: ceiling))
-                        if master >= 2.0 / 16 {
-                            XCTAssertEqual(plan.pcmGain, 1, "normal volume retains unity PCM")
-                        } else {
-                            XCTAssertGreaterThan(plan.pcmGain, 0)
-                            XCTAssertLessThan(plan.pcmGain, 1, "only the low-volume floor adds shared attenuation")
-                        }
+                        XCTAssertEqual(plan.pcmGain, 1, "audible volume keeps unity PCM")
                     }
                 }
             }
         }
     }
 
-    func testLowestVolumeKeyUsesV1ReceiverLevelInsteadOfFullReference() {
+    func testLowestVolumeKeyIsOneSixteenthOfTheLimit() {
         let speakers = [RoomVolumeSpeaker(id: "front", slider: 100), RoomVolumeSpeaker(id: "back", slider: 100)]
         let plan = RoomVolumePolicy.plan(speakers: speakers, ceiling: 100, systemMaster: 1.0 / 16)
-        XCTAssertEqual(plan.hardware, ["front": 14, "back": 14])
-        XCTAssertEqual(plan.pcmGain, 0.5)
+        XCTAssertEqual(plan.hardware, ["front": 6, "back": 6])
+        XCTAssertEqual(plan.pcmGain, 1)
     }
 
     func testHardwareCommandsRiseMonotonicallyAndRespectV1Caps() {

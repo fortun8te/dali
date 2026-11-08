@@ -200,18 +200,24 @@ final class CaptureController: @unchecked Sendable {
     private var _level: Double = 0
     private var _bass: Double = 0
     private var _treble: Double = 0
+    private var _mid: Double = 0
+    /// The real spectrum (see SpectrumAnalyzer): its own analyser, and the newest bands with
+    /// the loudest value of each since the UI last read, so a quick hit is never missed.
+    private let spectrumAnalyzer = SpectrumAnalyzer()
+    private var _spectrum = [Float](repeating: 0, count: SpectrumAnalyzer.bandCount)
+    private var peakSpectrum = [Float](repeating: 0, count: SpectrumAnalyzer.bandCount)
     // Running loudness reference per band, in dB. The room's light is scaled
     // against the music's own recent peak rather than full scale, so a quiet
     // record swings as much as a loud one and a beat is a beat either way.
-    private var refDb: (level: Double, bass: Double, treble: Double) = (-45, -45, -45)
+    private var refDb: (level: Double, bass: Double, treble: Double, mid: Double) = (-45, -45, -45, -45)
     /// Running average loudness per band, in dB. A beat is a buffer that stands
     /// clearly ABOVE this — which is what makes the room move with the music
     /// instead of sitting at full brightness all the time.
-    private var slowDb: (level: Double, bass: Double, treble: Double) = (-45, -45, -45)
+    private var slowDb: (level: Double, bass: Double, treble: Double, mid: Double) = (-45, -45, -45, -45)
     private var levelPrimed = false
     // Peak since the UI last read. The panel polls at ~30 Hz and a transient
     // decays inside that window, so without this the canvas saw noise, not beats.
-    private var peakSinceRead: (level: Double, bass: Double, treble: Double) = (0, 0, 0)
+    private var peakSinceRead: (level: Double, bass: Double, treble: Double, mid: Double) = (0, 0, 0, 0)
     /// Monotonic count of detected beats (bass onsets), with a refractory gap so
     /// one kick is one beat.
     private var _beatCount = 0
@@ -355,15 +361,18 @@ final class CaptureController: @unchecked Sendable {
     /// One consistent reading for the room canvas: the peak of each band since
     /// the last call (so a transient between two 30 Hz polls is not lost), plus
     /// the beat counter. Consuming — call it once per UI tick and no more.
-    func readLevels() -> (at: Date?, level: Double, bass: Double, treble: Double,
-                          beats: Int, beatAt: Date?) {
+    func readLevels() -> (at: Date?, level: Double, bass: Double, treble: Double, mid: Double,
+                          spectrum: [Float], beats: Int, beatAt: Date?) {
         lock.lock(); defer { lock.unlock() }
         let v = (lastLevelAt,
                  max(_level, peakSinceRead.level),
                  max(_bass, peakSinceRead.bass),
                  max(_treble, peakSinceRead.treble),
+                 max(_mid, peakSinceRead.mid),
+                 zip(_spectrum, peakSpectrum).map { max($0, $1) },
                  _beatCount, lastBeatWallAt)
-        peakSinceRead = (0, 0, 0)
+        peakSinceRead = (0, 0, 0, 0)
+        for i in peakSpectrum.indices { peakSpectrum[i] = 0 }
         return v
     }
 
@@ -883,10 +892,10 @@ final class CaptureController: @unchecked Sendable {
             let oldLpSlow = self.lpSlow, oldLpMid = self.lpMid
             self.lock.unlock()
 
-            let (instant, bass, treble, lpSlow, lpMid) = data.withUnsafeBytes { raw -> (Double, Double, Double, Double, Double) in
+            let (instant, bass, treble, mid, lpSlow, lpMid) = data.withUnsafeBytes { raw -> (Double, Double, Double, Double, Double, Double) in
                 let s16 = raw.bindMemory(to: Int16.self)
-                guard !s16.isEmpty else { return (0, 0, 0, oldLpSlow, oldLpMid) }
-                var sumSq = 0.0, bassAcc = 0.0, trebAcc = 0.0, n = 0.0
+                guard !s16.isEmpty else { return (0, 0, 0, 0, oldLpSlow, oldLpMid) }
+                var sumSq = 0.0, bassAcc = 0.0, trebAcc = 0.0, midAcc = 0.0, n = 0.0
                 var lpS = oldLpSlow, lpM = oldLpMid
                 var i = 0
                 while i < s16.count {
@@ -902,6 +911,9 @@ final class CaptureController: @unchecked Sendable {
                     bassAcc += lpS * lpS
                     let hi = x - lpM
                     trebAcc += hi * hi
+                    // Between the bass corner and the treble split: voices, snare, guitars.
+                    let between = lpM - lpS
+                    midAcc += between * between
                     n += 1
                     i += 8                                   // decimate, left channel-ish
                 }
@@ -910,7 +922,11 @@ final class CaptureController: @unchecked Sendable {
                     let rms = (acc / n).squareRoot()
                     return rms > 0 ? 20 * log10(rms) : -120
                 }
-                return (db(sumSq), db(bassAcc), db(trebAcc), lpS, lpM)
+                return (db(sumSq), db(bassAcc), db(trebAcc), db(midAcc), lpS, lpM)
+            }
+            // The spectrum is computed here, off the lock the audio thread takes.
+            let bands = data.withUnsafeBytes { raw -> [Float]? in
+                self.spectrumAnalyzer.push(stereo: raw.bindMemory(to: Int16.self))
             }
             self.lock.lock()
             guard self._isRunning, self.sessionGeneration == session, self.activeToken == token else { self.lock.unlock(); return }
@@ -944,6 +960,7 @@ final class CaptureController: @unchecked Sendable {
             let (l, _) = band(instant, &self.slowDb.level, &self.refDb.level)
             let (b, bOnset) = band(bass, &self.slowDb.bass, &self.refDb.bass)
             let (t, _) = band(treble, &self.slowDb.treble, &self.refDb.treble)
+            let (m, _) = band(mid, &self.slowDb.mid, &self.refDb.mid)
             self.levelPrimed = true
             self.lastLevelAt = capturedAt
 
@@ -958,9 +975,17 @@ final class CaptureController: @unchecked Sendable {
             self._level = l > self._level ? l : self._level * 0.86 + l * 0.14
             self._bass = b > self._bass ? b : self._bass * 0.82 + b * 0.18
             self._treble = t > self._treble ? t : self._treble * 0.84 + t * 0.16
+            self._mid = m > self._mid ? m : self._mid * 0.84 + m * 0.16
+            if let bands {
+                for i in bands.indices where i < self._spectrum.count {
+                    self._spectrum[i] = bands[i] > self._spectrum[i] ? bands[i] : self._spectrum[i] * 0.8 + bands[i] * 0.2
+                    self.peakSpectrum[i] = max(self.peakSpectrum[i], bands[i])
+                }
+            }
             self.peakSinceRead = (max(self.peakSinceRead.level, l),
                                   max(self.peakSinceRead.bass, b),
-                                  max(self.peakSinceRead.treble, t))
+                                  max(self.peakSinceRead.treble, t),
+                                  max(self.peakSinceRead.mid, m))
             self.lock.unlock()
         }
     }
@@ -1115,8 +1140,10 @@ final class CaptureController: @unchecked Sendable {
         converterInputRate = 0; silentSec = 0; sourceSilent = false; staleConversions = 0
         sourceSquaresAcc = 0; outputSquaresAcc = 0; signalSamplesAcc = 0
         lpSlow = 0; lpMid = 0; levelPrimed = false
-        _level = 0; _bass = 0; _treble = 0
-        peakSinceRead = (0, 0, 0)
+        _level = 0; _bass = 0; _treble = 0; _mid = 0
+        peakSinceRead = (0, 0, 0, 0)
+        for i in _spectrum.indices { _spectrum[i] = 0; peakSpectrum[i] = 0 }
+        spectrumAnalyzer.reset()
         lastLevelAt = nil; lastBeatWallAt = nil
         _isRunning = false
         // Queue while holding the same lock used to admit a new start. New

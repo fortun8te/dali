@@ -81,6 +81,7 @@ public struct SpeakerSessionMembership {
     public mutating func reset() { names.removeAll() }
 
     public func contains(name: String, enabled: Bool, primary: Bool) -> Bool {
-        primary || enabled || names.contains(name)
+        // Placement is visual; only selection or joining this session grants membership.
+        enabled || names.contains(name)
     }
 }

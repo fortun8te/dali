@@ -51,3 +51,20 @@ The historical `docs/v2/v1-volume-baseline.swift` reproduces the original balanc
 Michael confirmed that the whole room is too loud at the lowest Mac volume. Receiver commands retain the familiar V1 master^0.7 arithmetic and the existing per-speaker leveling/balance. Only shared captured PCM below the second Mac step changes: t=master/(2/16), clamped0...1, and gain=t*t*(3-2*t). At the first Mac step the PCM amplitude is0.5, approximately6.02dB below the previous behavior. At step two and above the gain is1. Quarter steps below step one become progressively quieter; explicit mute remains zero. Existing capture gain smoothing applies.
 
 No saved dali.vol.*, dali.gain.*, dali.balance.* or custom curve values are rewritten. This applies when system master drives captured room audio, not Spotify Connect or library playback. The taper is a conservative starting value based on the quieter-floor request, not a measured subjective loudness target. Installed/listening status must be read from the current dated handoff rather than inferred from this source contract.
+
+## Quiet-end smoothing and the 800 ms buffer, 26 October 2026
+
+Measured by polling both speakers' real volume while the Mac volume was stepped (BluOS `/Status`, Sonos `GetVolume`). Three changes, all verified in code and unit tests, none heard by ear:
+
+- **Buffer stays at 500 ms.** An 800 ms trial was reverted the same day. Four weeks of engine logs (30 Sep to 26 Oct) show median Sonos retransmit requests of 0 and almost no send errors at 500 ms; 26 Oct alone had about 100 times the loss and both speakers failing at once (send errors on both, the Mac's Wi-Fi on 2.4 GHz channel 6 or weak 5 GHz channel 36), so it was the Mac's network, and a longer buffer only added latency to every volume change. Volume writes are normal (median about 25 ms, p90 about 120 ms on every logged day).
+- **`MuteHold`**: when the Mac volume reaches zero from the first two steps, the speakers keep their volume for 0.5 s (the audio itself is already silent), so a brush through zero never reaches them. A mute from a louder level is applied at once, and a browser cut is never held. Replaces the earlier note that zero "urgently mutes the receivers" for the quiet end only.
+- **`FloorSync`**: below the second Mac step the digital quiet-floor gain reaches the speakers one room delay after it changes, while their own volume changes at once. The speaker write is held back by room delay (about 0.7 s) minus 0.25 s so the two land as one change. Only a change in that gain is held; forced resyncs, joins and mutes are never held. Those two quietest steps therefore react about a second late.
+
+The speaker writes remain one at a time through the engine's single request lane (the engine must not receive concurrent or abandoned requests).
+
+
+## Even volume steps, 2 November 2026
+
+Michael: "the volume curve is weird". Measured read-only while playing: both receivers take DALI's command as their own volume percentage (command 42 → Powernode 43 %, 47 → Sonos 47 %), and the Powernode's dB is close to even across its scale (22 % = −49.8 dB, 43 % = −35.1 dB, ≈ 0.7 dB per percent). Under the V1 law (command = slider × master^0.7 × limit) plus the quiet-end PCM fade, the first Mac key was a ~10 dB jump, later keys shrank to ≈ 2 dB at the top, and the quiet end changed in two pieces a room delay apart.
+
+Now `RoomVolumePolicy.masterExponent = 1`: the command rises evenly with the Mac volume (limit 70 → 4.4 command points ≈ 3 dB per key), and the captured audio stays at unity unless muted, so every change is one change at the speaker with no FloorSync hold. The per-step leveling for MICHAEL D, balance trim, sliders and volume limit are unchanged and still multiply the command. Consequence: at the same Mac key the room is quieter in the middle (step 8 ≈ 5 dB quieter than before), equal at the top, and the first two keys are quiet. Not yet heard by Michael.

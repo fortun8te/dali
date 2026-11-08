@@ -419,7 +419,7 @@ final class RoomSessionControllerTests: XCTestCase {
         await controller.invalidateAndStop().value
     }
 
-    func testHealthyPartnerIsPreservedWithFullRoomReassert() async throws {
+    func testHealthyPartnerStartsWithoutWaitingForFailedMemberRecovery() async throws {
         let fixture = Fixture()
         fixture.outputsForSelection = { selection in
             selection == 1 ? [Fixture.ready("front"), Fixture.failed("back")]
@@ -427,12 +427,14 @@ final class RoomSessionControllerTests: XCTestCase {
         }
         let controller = fixture.makeController()
         let result = try await controller.start(using: fixture.dependencies)
-        XCTAssertEqual(result?.missing, [])
-        XCTAssertEqual(fixture.events, [.reassert(attempt: 1, missing: ["back"])])
+        XCTAssertEqual(result?.missing, ["back"])
+        XCTAssertEqual(result?.readyIDs, ["front"])
+        XCTAssertTrue(fixture.events.isEmpty)
         XCTAssertEqual(fixture.captures, 1)
         XCTAssertEqual(fixture.stops, 1)
         XCTAssertFalse(fixture.calls.contains { $0.hasPrefix("member:") })
-        XCTAssertEqual(fixture.selections, 2)
+        XCTAssertEqual(fixture.selections, 1)
+        XCTAssertLessThan(fixture.time, 7, "A failed member must not consume the later recovery windows")
         await controller.invalidateAndStop().value
     }
 
@@ -457,29 +459,29 @@ final class RoomSessionControllerTests: XCTestCase {
         }
     }
 
-    func testEveryReassertRevalidatesThePreviouslyReadyPartner() async throws {
+    func testReassertStopsAsSoonAsAWorkingMemberIsEstablished() async throws {
         let fixture = Fixture()
         fixture.outputsForSelection = { selection in
             switch selection {
-            case 1: [Fixture.ready("front"), Fixture.warming("back")]
-            case 2: [Fixture.warming("front"), Fixture.ready("back")]
+            case 1: [Fixture.warming("front"), Fixture.warming("back")]
+            case 2: [Fixture.ready("front"), Fixture.warming("back")]
             default: [Fixture.ready("front"), Fixture.ready("back")]
             }
         }
         let controller = fixture.makeController()
         let result = try await controller.start(using: fixture.dependencies)
-        XCTAssertEqual(result?.missing, [])
-        XCTAssertEqual(fixture.events, [
-            .reassert(attempt: 1, missing: ["back"]), .reassert(attempt: 2, missing: ["front"])
-        ])
-        XCTAssertEqual(fixture.selections, 3)
+        XCTAssertEqual(result?.missing, ["back"])
+        XCTAssertEqual(result?.readyIDs, ["front"])
+        XCTAssertEqual(fixture.events, [.reassert(attempt: 1, missing: ["front", "back"])])
+        XCTAssertEqual(fixture.selections, 2)
+        XCTAssertFalse(fixture.calls.contains { $0.hasPrefix("member:") })
         await controller.invalidateAndStop().value
     }
 
-    func testHardRejoinTargetsMissingMemberThenChecksEntireRoomAgain() async throws {
+    func testHardRejoinOnlyRunsWhileNoMembersAreReadyAndCanReturnPartialRoom() async throws {
         let fixture = Fixture()
         fixture.outputsForSelection = { selection in
-            selection < 4 ? [Fixture.ready("front"), Fixture.warming("back")]
+            selection < 4 ? [Fixture.warming("front"), Fixture.warming("back")]
                 : [Fixture.warming("front"), Fixture.ready("back")]
         }
         let controller = fixture.makeController()
@@ -487,10 +489,12 @@ final class RoomSessionControllerTests: XCTestCase {
         XCTAssertEqual(result?.missing, ["front"])
         XCTAssertEqual(result?.readyIDs, ["back"])
         XCTAssertEqual(fixture.events, [
-            .reassert(attempt: 1, missing: ["back"]), .reassert(attempt: 2, missing: ["back"]),
-            .hardRejoin(["back"])
+            .reassert(attempt: 1, missing: ["front", "back"]),
+            .reassert(attempt: 2, missing: ["front", "back"]),
+            .hardRejoin(["front", "back"])
         ])
-        XCTAssertEqual(fixture.calls.filter { $0.hasPrefix("member:") }, ["member:back:false"])
+        XCTAssertEqual(fixture.calls.filter { $0.hasPrefix("member:") },
+                       ["member:front:false", "member:back:false"])
         XCTAssertEqual(fixture.selections, 4)
         XCTAssertTrue(fixture.captureRunning, "A partial room keeps its working speaker")
         await controller.invalidateAndStop().value

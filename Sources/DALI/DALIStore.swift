@@ -5,6 +5,7 @@
 
 import Foundation
 import SwiftUI
+import CoreWLAN
 import Observation
 import Network
 import SystemConfiguration
@@ -64,6 +65,20 @@ final class DALIStore {
             }
             // What-is-playing only matters while the room can hear it.
             if backendEnabled { NowPlayingMonitor.shared.setActive(phase == .streaming) }
+            // While the room is live or connecting, ask macOS for precise timers and no App Nap
+            // so a busy Mac does not coalesce or stretch the capture, level and recovery timing.
+            if backendEnabled { setLatencyCritical(phase.isOn) }
+        }
+    }
+    private var latencyActivity: NSObjectProtocol?
+    private func setLatencyCritical(_ on: Bool) {
+        if on, latencyActivity == nil {
+            latencyActivity = ProcessInfo.processInfo.beginActivity(
+                options: [.userInitiated, .latencyCritical, .idleSystemSleepDisabled],
+                reason: "Streaming audio to the speakers")
+        } else if !on, let token = latencyActivity {
+            ProcessInfo.processInfo.endActivity(token)
+            latencyActivity = nil
         }
     }
     var speakers: [RoomSpeaker] = []
@@ -151,6 +166,9 @@ final class DALIStore {
     var audioLevel: Double = 0
     var bassLevel: Double = 0
     var trebleLevel: Double = 0
+    var midLevel: Double = 0
+    /// The real spectrum, 32 log-spaced bands 0...1 (empty when there is no capture).
+    var spectrum: [Float] = []
     /// The capture and health loops continue when the window is covered; only
     /// visual state publication pauses with the canvas.
     var roomCanvasVisible = true
@@ -194,7 +212,7 @@ final class DALIStore {
 
     /// THE ROOM IS BEHIND THE MAC, AND SO IS ITS PICTURE.
     ///
-    /// Every speaker deliberately waits `startBuffer + 200 ms` (≈0.9 s) before
+    /// Every speaker deliberately waits `startBuffer + 200 ms` (≈0.7 s with the 500 ms buffer) before
     /// playing what the tap just captured — that lead is the whole reason the
     /// browser extension holds video back. The room canvas was reading the tap
     /// DIRECTLY, so it drew each beat a second before the speakers played it:
@@ -489,6 +507,7 @@ final class DALIStore {
         Self.flog("v2 fill_estimate=\(fill)s hold=\(result.hold) refill=\(refill.label) ratio=\(result.ratio) gain=\(captureMasterGain) source_dbfs=\(f.signalSamples > 0 ? String(format: "%.1f", f.sourceRMSDBFS) : "unknown") output_dbfs=\(f.signalSamples > 0 ? String(format: "%.1f", f.outputRMSDBFS) : "unknown") signal_samples=\(f.signalSamples) pending=\(f.pending) dropped=\(f.dropped) maxgap=\(Int(f.maxGapMs))ms api=\(queryMs)ms \(links) \(flags)")
         applyRoomDelay()
         syncBeacon.publish(streaming: true, delaySeconds: roomDelaySec)
+        checkPacketLoss()
     }
 
     /// One value drives both video and visualization. Telemetry remains useful
@@ -497,6 +516,9 @@ final class DALIStore {
         roomDelaySec = RoomDelayPolicy.seconds(startBufferMs: config.startBufferMs,
                                               trimMs: delayTrimMs)
     }
+
+    /// How far ahead of the heard sound the light is sampled, to cancel drawing latency.
+    private static let visualLeadSec = 0.07
 
     private func startLevelLoop() {
         levelTask?.cancel()
@@ -508,11 +530,14 @@ final class DALIStore {
                 let r = capture.readLevels()
                 if let capturedAt = r.at {
                     levelDelayLine.append(RoomLevelSample(at: capturedAt, level: r.level,
-                                                           bass: r.bass, treble: r.treble,
-                                                           beats: r.beats, beatAt: r.beatAt))
+                                                           bass: r.bass, treble: r.treble, mid: r.mid,
+                                                           spectrum: r.spectrum, beats: r.beats, beatAt: r.beatAt))
                 }
                 // Publish the newest sample the room has actually reached.
-                let newest = levelDelayLine.latestDue(at: now, delay: roomDelaySec)
+                // The light is drawn a frame or two after it is sampled (30 Hz levels, a
+                // canvas frame, display latency, the bars' own rise), so it leads by
+                // `visualLeadSec` to land with the sound, not just after it.
+                let newest = levelDelayLine.latestDue(at: now, delay: max(0, roomDelaySec - Self.visualLeadSec))
                 let visible = roomCanvasVisible
                 if let s = newest, visible {
                     // @Observable fires on every assignment, equal value or not,
@@ -520,22 +545,27 @@ final class DALIStore {
                     if audioLevel != s.level { audioLevel = s.level }
                     if bassLevel != s.bass { bassLevel = s.bass }
                     if trebleLevel != s.treble { trebleLevel = s.treble }
+                    if midLevel != s.mid { midLevel = s.mid }
+                    if spectrum != s.spectrum { spectrum = s.spectrum }
                     if s.beats != beatCount {
-                        beatPlayedAt = s.beatAt?.addingTimeInterval(roomDelaySec)
+                        beatPlayedAt = s.beatAt?.addingTimeInterval(max(0, roomDelaySec - Self.visualLeadSec))
                         beatCount = s.beats
                     }
                 }
                 // Cheap, and it is the only thing standing between a browser bug
                 // and a room that stays silent while the Mac is playing.
-                if !visible || tick.isMultiple(of: 2) { reviewCutCredibility() }
+                if !visible || tick.isMultiple(of: 4) { reviewCutCredibility() }
                 logCaptureStats()
-                // ~30 Hz to match the canvas; nothing is drawn while it is
-                // hidden, so 10 Hz is plenty for the cut rail and saves wakeups.
-                try? await Task.sleep(nanoseconds: visible ? 33_000_000 : 100_000_000)
+                // ~60 Hz while drawn, so the newest sample is never more than a frame
+                // old when the canvas reads it (it was up to 33 ms at 30 Hz); nothing
+                // is drawn while hidden, so 10 Hz is plenty for the cut rail.
+                try? await Task.sleep(nanoseconds: visible ? 16_000_000 : 100_000_000)
             }
             audioLevel = 0
             bassLevel = 0
             trebleLevel = 0
+            midLevel = 0
+            spectrum = []
             beatPlayedAt = nil
             levelDelayLine.clear()
         }
@@ -665,7 +695,7 @@ final class DALIStore {
     /// Placement is optional. It keeps the original front/back room drawing for
     /// configured rooms; other speakers have the same playback controls.
     func setPlacement(_ kind: RoomSpeaker.Kind, for speaker: RoomSpeaker?) {
-        guard !phase.isOn, kind != .extra else { return }
+        guard kind != .extra else { return }
         let name = speaker?.name ?? ""
         // Layout changes do not change the playback selection. Persist implicit
         // legacy front/back selections before changing what counts as primary.
@@ -763,7 +793,64 @@ final class DALIStore {
     /// DALI has one automatic buffer. Video synchronization happens in the
     /// browser companion by delaying the picture to the room's published
     /// delay; changing the audio buffer is not a video-sync mode.
-    static func savedStartBufferMs() -> Int { RoomDelayPolicy.automaticStartBufferMs }
+    /// The AirPlay buffer for the Wi-Fi link the Mac has now: short on a wired or strong
+    /// 5 GHz link, longer on a weak or 2.4 GHz one (see `BufferPolicy`). Read when the
+    /// engine starts, so it follows the link as of launch or the last engine restart.
+    static func savedStartBufferMs() -> Int {
+        let wifi = CWWiFiClient.shared().interface()
+        let rssi = wifi?.rssiValue()
+        let is24 = wifi?.wlanChannel()?.channelBand == .band2GHz
+        let until = UserDefaults.standard.double(forKey: lossBufferKey)
+        return BufferPolicy.startBufferMs(rssi: rssi, is24GHz: is24,
+                                          lossRaisedUntil: until > 0 ? Date(timeIntervalSince1970: until) : nil)
+    }
+
+    /// Until when a sustained packet loss keeps the longer buffer (seconds since 1970).
+    private static let lossBufferKey = "dali.lossBufferUntil"
+    private var packetLoss = PacketLossMonitor()
+    private var lossLogOffset: UInt64?
+    private var lossLogGeneration = -1
+    private var lastLossCheckAt = Date.distantPast
+
+    /// Reads what the engine has reported about delivery since the last look. When a speaker
+    /// keeps losing packets, remember it: the next session starts with the longer buffer, which
+    /// gives lost packets time to be sent again. Never changes the room that is playing now.
+    private func checkPacketLoss() {
+        let now = Date()
+        guard now.timeIntervalSince(lastLossCheckAt) >= 15 else { return }   // the engine reports every 30 s
+        lastLossCheckAt = now
+        guard let handle = try? FileHandle(forReadingFrom: config.logFile) else { return }
+        defer { try? handle.close() }
+        guard let size = try? handle.seekToEnd() else { return }
+        if lossLogGeneration != streamGeneration || lossLogOffset == nil {
+            // A new session: only what the engine says from now on.
+            lossLogGeneration = streamGeneration; lossLogOffset = size; packetLoss.reset()
+            return
+        }
+        var offset = lossLogOffset ?? size
+        if size < offset { offset = 0 }                                      // the engine's log was rotated
+        lossLogOffset = size
+        let from = max(offset, size > 65_536 ? size - 65_536 : 0)
+        guard size > from, (try? handle.seek(toOffset: from)) != nil,
+              let data = try? handle.read(upToCount: Int(size - from)) else { return }
+        for line in String(decoding: data, as: UTF8.self).split(separator: "\n") {
+            guard let report = DeliveryReport.parse(String(line)) else { continue }
+            if packetLoss.record(report, at: now) {
+                packetLoss.reset()
+                let until = now.addingTimeInterval(BufferPolicy.lossMemorySeconds)
+                UserDefaults.standard.set(until.timeIntervalSince1970, forKey: Self.lossBufferKey)
+                let next = Self.savedStartBufferMs()
+                dlog("packet loss to \(report.device) (\(report.resendRequests) resends asked, \(report.resendSuppressed) too late): the next start uses a \(next) ms buffer")
+                aiEvent("loss_buffer_raised", level: "warn", fields: [
+                    "device": report.device, "resend_req": report.resendRequests,
+                    "resend_supp": report.resendSuppressed, "buffer_ms": config.startBufferMs,
+                    "next_buffer_ms": next])
+            }
+        }
+    }
+
+    /// The buffer the engine is running with.
+    var currentStartBufferMs: Int { config.startBufferMs }
 
     init(defaults: UserDefaults = .standard, backendEnabled: Bool = true,
          volumeWrite: RoomVolumeCoordinator.Write? = nil,
@@ -888,7 +975,14 @@ final class DALIStore {
         }
 
         logLaunch()
-        Task { await bootEngine() }
+        if AppleSender.savedSelection {
+            // The Apple AirPlay sender needs the AirPlay clock ports (UDP 319/320)
+            // that the engine holds while it runs, so the engine stays off.
+            engineReleased = true
+            applyDiscoveredSpeakers([])
+        } else {
+            Task { await bootEngine() }
+        }
         reapEngineOnQuit(confPath: cfg.confFile.path)
         startIdleGuard()
         observeSleepWake()
@@ -955,8 +1049,35 @@ final class DALIStore {
             RoomSpeaker(id: "preview-back", name: "MICHAEL S", type: "AirPlay 2",
                         kind: .back, enabled: true, relVolume: 100, health: .live),
         ]
-        audioLevel = 0.62; bassLevel = 0.5; trebleLevel = 0.4
-        if env["DALI_PREVIEW_PHASE"] != "idle" { phase = .streaming }
+        audioLevel = 0.62; bassLevel = 0.5; trebleLevel = 0.4; midLevel = 0.55
+        switch env["DALI_PREVIEW_PHASE"] {
+        case "idle": break
+        case "starting": phase = .starting
+        default: phase = .streaming
+        }
+        // Preview only: a made-up music signal so the animation can be screenshotted.
+        if env["DALI_PREVIEW_ANIMATE"] == "1" {
+            Task { @MainActor [weak self] in
+                var t = 0.0, lastBeat = 0.0
+                while let self, !Task.isCancelled {
+                    t += 0.033
+                    self.audioLevel = min(1, max(0, 0.45 + 0.30 * sin(t * 1.9) * sin(t * 0.55) + 0.12 * sin(t * 7.3)))
+                    self.bassLevel = min(1, max(0, 0.5 + 0.45 * sin(t * 3.1)))
+                    self.trebleLevel = min(1, max(0, 0.4 + 0.4 * sin(t * 5.3 + 1)))
+                    self.midLevel = min(1, max(0, 0.45 + 0.4 * sin(t * 2.3 + 2) * sin(t * 0.9)))
+                    // A made-up spectrum shaped like music: strong low end, falling away, each band with its own pulse.
+                    self.spectrum = (0..<32).map { k in
+                        let x = Double(k) / 31
+                        let body = 0.62 * exp(-x * 1.6) + 0.12
+                        let pulse = 0.5 + 0.5 * sin(t * (1.3 + 0.37 * Double(k % 7)) + Double(k) * 1.9)
+                        let hit = max(0, sin(t * 6.0 - x * 4)) * (1 - x) * 0.25
+                        return Float(min(1, max(0, body * (0.55 + 0.6 * pulse) + hit)))
+                    }
+                    if t - lastBeat > 0.52 { lastBeat = t; self.beatPlayedAt = Date(); self.beatCount += 1 }
+                    try? await Task.sleep(for: .milliseconds(33))
+                }
+            }
+        }
     }
 
     @ObservationIgnored private lazy var volumeObserver = SystemVolumeObserver()
@@ -1028,6 +1149,47 @@ final class DALIStore {
         }
     }
 
+    // MARK: engine release for the Apple AirPlay sender
+
+    /// True while the engine is stopped on purpose. The engine holds UDP 319/320
+    /// (the AirPlay clock ports) for as long as it runs, which stops Apple's own
+    /// AirPlay from connecting to AirPlay 2 speakers. While released, speakers
+    /// come from what DALI remembers and the sliders and volume rules still work.
+    private(set) var engineReleased = false
+
+    /// Stop the engine (or keep it stopped) so the Apple AirPlay sender can connect.
+    func releaseEngineForAppleSender() async {
+        guard backendEnabled else { return }
+        // Set at once, so a Play pressed while this is under way is ignored, not started
+        // and then killed. Switching while DALI is playing simply stops it first.
+        engineReleased = true
+        if phase.isOn { stopStream() }
+        await teardownTask?.value
+        dlog("engine released to the Apple AirPlay sender")
+        aiEvent("engine_released", fields: [:])
+        await supervisor.stop()
+        discoveryMessage = nil
+        applyDiscoveredSpeakers([])
+    }
+
+    /// Bring the engine back for DALI's own sender.
+    func reclaimEngine() async {
+        guard backendEnabled, engineReleased else { return }
+        engineReleased = false
+        dlog("engine reclaimed from the Apple AirPlay sender")
+        aiEvent("engine_reclaimed", fields: [:])
+        // The AirPlay clock ports can take a few seconds to come free after Apple's
+        // AirPlay lets go, so a failed start is retried before it is shown.
+        for attempt in 0..<4 {
+            guard !engineReleased else { return }   // released again while waiting
+            await bootEngine()
+            guard case .error = phase, attempt < 3 else { break }
+            dlog("engine start after the Apple AirPlay sender failed; retrying")
+            phase = .idle
+            try? await Task.sleep(for: .seconds(3))
+        }
+    }
+
     func shutdown() async {
         guard backendEnabled else { return }
         stopStream()
@@ -1041,6 +1203,10 @@ final class DALIStore {
 
     func restartEngine() {
         guard backendEnabled else { return }
+        guard !engineReleased else {
+            dlog("engine restart ignored: the engine is released to the Apple AirPlay sender")
+            return
+        }
         guard !engineRestartInFlight else {
             dlog("engine restart ignored: one already in flight")
             return
@@ -1115,7 +1281,7 @@ final class DALIStore {
     private var discoveryTask: Task<Void, Never>?
 
     func refreshSpeakers() async {
-        guard backendEnabled, !Self.isPreview else { return }
+        guard backendEnabled, !Self.isPreview, !engineReleased else { return }
         // Join a discovery already running instead of returning at once: boot
         // discovery is slow, and a Play pressed during it used to read the still
         // EMPTY speaker list and fail with "Choose at least one speaker".
@@ -1178,7 +1344,7 @@ final class DALIStore {
                 levelCurve: preferences.levelCurve(name: name),
                 balanceTrim: preferences.balanceTrim(name: name),
                 health: enabled && phase.isOn ? .trouble : .off,
-                available: false))
+                available: engineReleased))
         }
         // Front, back, then extras alphabetically.
         let sorted = list.sorted {
@@ -1287,19 +1453,17 @@ final class DALIStore {
     /// an unexpected second start is attributable.
     func startStream(reason: String = "user") {
         guard backendEnabled else { return }
+        guard !engineReleased else {
+            dlog("start ignored (\(reason)): the engine is released to the Apple AirPlay sender")
+            return
+        }
         guard !phase.isOn else {
             dlog("start ignored (\(reason)): already \(phase == .streaming ? "streaming" : "starting")")
             return
         }
         resolveSavedSource()
-        // Play means the room: the front and back pair always join a new
-        // session. Switching one off is for the current session only; a saved
-        // "off" left a speaker silently missing on every later start.
-        for i in speakers.indices where speakers[i].kind != .extra && !speakers[i].enabled {
-            speakers[i].enabled = true
-            preferences.set(true, forKey: "dali.on.\(speakers[i].name)")
-            dlog("\(speakers[i].name) was switched off; re-included for this start")
-        }
+        // Respect the saved selection. Front/back describe placement only;
+        // an explicitly disabled speaker must not join a replacement room.
         let sessionSource = source
         let precedingTeardown = teardownTask
         let requestedAt = Date()
@@ -1323,6 +1487,21 @@ final class DALIStore {
                 while self.engineRestartInFlight {
                     try context.check()
                     try await Task.sleep(for: .milliseconds(250))
+                }
+                // A longer buffer is wanted than the engine was started with (it lost packets
+                // last time, or the link got weaker): restart it with that before this session.
+                // Only ever longer, so a start is never slowed by a buffer shrinking back.
+                let wanted = Self.savedStartBufferMs()
+                if wanted > self.config.startBufferMs, !self.engineReleased {
+                    self.dlog("raising the buffer \(self.config.startBufferMs) -> \(wanted) ms: restarting the engine first")
+                    self.config = OwnToneConfig(rootDir: self.config.rootDir, startBufferMs: wanted)
+                    await self.supervisor.updateConfig(self.config)
+                    await self.supervisor.setResumePlayback(false)
+                    try? await self.api.stop()
+                    try? await self.supervisor.restart()
+                    self.lastEngineStartAt = Date()
+                    self.applyRoomDelay()
+                    try context.check()
                 }
                 if await !self.api.isUp() {
                     try await self.supervisor.start()
@@ -1702,7 +1881,7 @@ final class DALIStore {
         nowTask?.cancel(); nowTask = nil
         isPlaying = shouldPlay
         if !shouldPlay {
-            audioLevel = 0; bassLevel = 0; trebleLevel = 0
+            audioLevel = 0; bassLevel = 0; trebleLevel = 0; midLevel = 0; spectrum = []
         }
         Task { @MainActor in
             guard playerMode, command == playerCommandGeneration,
@@ -1782,7 +1961,7 @@ final class DALIStore {
                 if trebleLevel != t { trebleLevel = t }
                 try? await Task.sleep(nanoseconds: 700_000_000)
             }
-            audioLevel = 0; bassLevel = 0; trebleLevel = 0
+            audioLevel = 0; bassLevel = 0; trebleLevel = 0; midLevel = 0; spectrum = []
         }
     }
 
@@ -1814,9 +1993,10 @@ final class DALIStore {
             Task { @MainActor in
                 defer {
                     if generation == streamGeneration {
-                speakerRecoveryInFlight.remove(sp.id)
-                volumeController.releaseHold(sp.id, session: generation)
-            }
+                        speakerRecoveryInFlight.remove(sp.id)
+                        volumeController.releaseHold(sp.id, session: generation)
+                        scheduleVolumePush()
+                    }
                 }
                 do {
                     // Join quietly. Reading readiness before restoring volume
@@ -1846,14 +2026,38 @@ final class DALIStore {
             // preserving the shared clock for both primary and extra speakers.
             let ready = readyOutputIDs.contains(sp.id)
             speakers[idx].health = enabling ? (ready ? .live : .connecting) : .off
-            if enabling { readyStrikes[sp.id] = ready ? 2 : 0; troubleStrikes[sp.id] = 0 }
+            if enabling {
+                readyStrikes[sp.id] = ready ? 2 : 0
+                troubleStrikes[sp.id] = 0
+                if !ready {
+                    // A deliberate retry must not inherit an automatic five-minute backoff.
+                    recoveryCooldownUntil[sp.id] = nil
+                    recoveryFailCounts[sp.id] = 0
+                    if backendEnabled {
+                        let generation = streamGeneration
+                        Task { @MainActor in
+                            // Whole-room recovery owns selection until it finishes.
+                            while resumeInFlight {
+                                guard streamIsCurrent(generation),
+                                      speakers.contains(where: { $0.id == sp.id && $0.enabled }) else { return }
+                                do { try await Task.sleep(for: .milliseconds(100)) } catch { return }
+                            }
+                            guard streamIsCurrent(generation),
+                                  let current = speakers.first(where: { $0.id == sp.id }),
+                                  current.enabled, current.available, current.health != .live else { return }
+                            recoveryCooldownUntil[sp.id] = nil
+                            recoveryFailCounts[sp.id] = 0
+                            await recoverSpeaker(current)
+                        }
+                    }
+                }
+            }
             scheduleVolumePush()
         }
     }
 
-    /// Speakers that are part of the live AirPlay session: the front/back pair is
-    /// always in the group while streaming (muted when "off" to preserve sync);
-    /// extras join when enabled and remain silently joined until playback stops.
+    /// Selected speakers join regardless of placement. Once joined, switching
+    /// one off mutes it until playback stops, preserving the shared clock.
     private func sessionSpeakers() -> [RoomSpeaker] {
         speakers.filter {
             $0.available && sessionMembership.contains(name: $0.name, enabled: $0.enabled,
@@ -2267,17 +2471,67 @@ final class DALIStore {
         if backendEnabled { capture.setMasterGain(gain) }
     }
 
+    @ObservationIgnored private var floorSyncTask: Task<Void, Never>?
+    @ObservationIgnored private var lastSentTargets: [String: Int] = [:]
+    @ObservationIgnored private var lastSentPcmGain = 1.0
+    @ObservationIgnored private var muteHold = MuteHold()
+    @ObservationIgnored private var muteRecheck: Task<Void, Never>?
+
     private func updateVolumeIntent(force: Set<String> = []) {
         applyMasterGain()
         guard backendEnabled || injectedVolumeWrite != nil else { return }
         let members = sessionSpeakers()
         let plan = roomVolumePlan
-        let targets = Dictionary(members.map { ($0.id, plan.hardware[$0.id] ?? 0) },
+        var targets = Dictionary(members.map { ($0.id, plan.hardware[$0.id] ?? 0) },
                                  uniquingKeysWith: { a, _ in a })
+        if phase == .streaming {
+            // A brush through zero at the quiet end of the Mac volume must not mute the
+            // speakers: hold their volume for a moment (the audio itself is already silent).
+            let resolved = muteHold.resolve(targets: targets, master: roomMaster,
+                                            mutedByOther: roomMutedByCut, now: Date())
+            targets = resolved.targets
+            muteRecheck?.cancel(); muteRecheck = nil
+            if let after = resolved.recheckAfter {
+                muteRecheck = Task { [weak self] in
+                    try? await Task.sleep(for: .seconds(after))
+                    guard !Task.isCancelled else { return }
+                    self?.updateVolumeIntent()
+                }
+            }
+            // At the quiet end the digital gain reaches the speakers one room delay after
+            // it changes, but their own volume changes at once. Hold the speaker volume
+            // at what was last sent for that delay so the two land as one change. Anything
+            // else (a forced resync, a speaker joining, a mute) goes through untouched.
+            let silencing = plan.pcmGain == 0 || roomMutedByCut
+            if !force.isEmpty || silencing {
+                floorSyncTask?.cancel(); floorSyncTask = nil
+                lastSentPcmGain = plan.pcmGain
+            } else if floorSyncTask == nil,
+                      FloorSync.shouldHold(previousGain: lastSentPcmGain, newGain: plan.pcmGain) {
+                floorSyncTask = Task { [weak self] in
+                    try? await Task.sleep(for: .seconds(FloorSync.holdSeconds(roomDelaySeconds: self?.roomDelaySec ?? 1)))
+                    guard !Task.isCancelled, let self else { return }
+                    self.floorSyncTask = nil
+                    self.lastSentPcmGain = self.roomVolumePlan.pcmGain
+                    self.updateVolumeIntent()
+                }
+            }
+            if floorSyncTask != nil {
+                for id in targets.keys { if let sent = lastSentTargets[id] { targets[id] = sent } }
+            } else {
+                lastSentPcmGain = plan.pcmGain
+            }
+        } else {
+            floorSyncTask?.cancel(); floorSyncTask = nil
+            lastSentPcmGain = plan.pcmGain
+            muteHold.reset()
+            lastSentTargets = [:]
+        }
         let eligible = Set(members.filter {
             phase == .streaming && (!$0.enabled || $0.health == .live)
                 && !speakerRecoveryInFlight.contains($0.id)
         }.map(\.id))
+        if phase == .streaming { lastSentTargets = targets }
         volumeController.update(session: streamGeneration, active: phase.isOn,
                                 targets: targets, eligible: eligible,
                                 urgent: targets.values.contains(0), force: force)
@@ -2386,7 +2640,11 @@ final class DALIStore {
 
     private func recoverSpeaker(_ sp: RoomSpeaker) async {
         let generation = streamGeneration
-        guard sp.available, streamIsCurrent(generation), !speakerRecoveryInFlight.contains(sp.id) else { return }
+        func stillWanted() -> Bool {
+            streamIsCurrent(generation)
+                && speakers.contains { $0.id == sp.id && $0.available && $0.enabled }
+        }
+        guard stillWanted(), !speakerRecoveryInFlight.contains(sp.id) else { return }
         if let until = recoveryCooldownUntil[sp.id], until > Date() { return }
         let fails = recoveryFailCounts[sp.id] ?? 0
         // Never give up for good: a speaker abandoned after a few failures stayed
@@ -2407,26 +2665,27 @@ final class DALIStore {
         speakers.indices.filter { speakers[$0].id == sp.id }.forEach { speakers[$0].health = .connecting }
         // Silence first so a mid-rejoin device never blasts at its own default.
         try? await silenceOutput(sp.id)
-        guard streamIsCurrent(generation) else { return }
+        guard stillWanted() else { return }
         // GENTLE FIRST. Re-asserting the whole output list keeps the shared
         // AirPlay 2 session (a per-member deselect can take the PARTNER down
         // with it: the "it plays one or the other" failure). Only after two
         // gentle failures is this one member hard-cycled, and then both are
         // re-added together.
-        let sessionIDs = sessionSpeakers().filter(\.available).map(\.id)
         if fails < 2 {
-            try? await api.setOutputs(ids: sessionIDs)
+            try? await api.setOutputs(ids: sessionSpeakers().map(\.id))
         } else {
             dlog("\(sp.name) gentle re-assert failed \(fails)x -> per-member rejoin")
             try? await api.setSelected(outputID: sp.id, selected: false)
-            guard streamIsCurrent(generation) else { return }
+            guard stillWanted() else { return }
             try? await Task.sleep(nanoseconds: 750_000_000)
-            guard streamIsCurrent(generation) else { return }
-            try? await api.setOutputs(ids: sessionIDs)
+            guard stillWanted() else { return }
+            // A speaker may have been added during the deselect/settle waits.
+            // Re-read membership so this recovery cannot remove its new session.
+            try? await api.setOutputs(ids: sessionSpeakers().map(\.id))
         }
-        guard streamIsCurrent(generation) else { return }
+        guard stillWanted() else { return }
         let missing = await awaitOutputsReady(ids: Set([sp.id]), timeoutMs: 8_000)
-        guard streamIsCurrent(generation) else { return }
+        guard stillWanted() else { return }
         guard missing.isEmpty else {
             speakers.indices.filter { speakers[$0].id == sp.id }.forEach { speakers[$0].health = .trouble }
             let nextFails = fails + 1
@@ -2444,16 +2703,16 @@ final class DALIStore {
         // command storm and one ignored receiver reply can block OwnTone's
         // global command lane.
         try? await silenceOutput(sp.id)
-        guard streamIsCurrent(generation) else { return }
+        guard stillWanted() else { return }
         try? await Task.sleep(nanoseconds: 180_000_000)
-        guard streamIsCurrent(generation),
+        guard stillWanted(),
               let current = speakers.first(where: { $0.id == sp.id }) else { return }
         let target = min(effectiveVolume(current), Int(volumeLimit.rounded()))
         do {
             try await restoreOutput(sp.id)
-            guard streamIsCurrent(generation) else { return }
+            guard stillWanted() else { return }
         } catch {
-            guard streamIsCurrent(generation) else { return }
+            guard stillWanted() else { return }
             dlog("\(sp.name) setVolume(\(target)) failed after rejoin: \(error)")
         }
         troubleStrikes[sp.id] = 0
@@ -2528,6 +2787,11 @@ final class DALIStore {
         guard streamIsCurrent(generation) else { return }
         let ids = sessionSpeakers().map(\.id)
         guard !ids.isEmpty else { return }
+        // Muted retained members keep their clock, but do not hold up recovery.
+        // Re-read after awaits so turning a speaker off cancels its recovery need.
+        func requiredIDs() -> Set<String> {
+            Set(speakers.filter { ids.contains($0.id) && $0.enabled && $0.available }.map(\.id))
+        }
         defer {
             if generation == streamGeneration {
                 for id in ids where !speakerRecoveryInFlight.contains(id) {
@@ -2541,7 +2805,7 @@ final class DALIStore {
         // reads absurd values for the rest of the session — exactly the numbers
         // we need trustworthy when diagnosing whatever caused this resume.
         resetDriftAnchors()
-        markHealth(of: ids, .connecting)
+        markHealth(of: Array(requiredIDs()), .connecting)
         try? await api.setOutputs(ids: ids)
         guard streamIsCurrent(generation) else { return }
         if playerMode {
@@ -2588,16 +2852,22 @@ final class DALIStore {
         guard streamIsCurrent(generation) else { return }
         try? await Task.sleep(nanoseconds: 1_200_000_000)
         guard streamIsCurrent(generation) else { return }
-        var missing = await awaitOutputsReady(ids: Set(ids), timeoutMs: 8_000)
+        var checkedIDs = requiredIDs()
+        var missing = await awaitOutputsReady(ids: checkedIDs, timeoutMs: 8_000)
         guard streamIsCurrent(generation) else { return }
+        // A newly enabled member was not covered by the previous readiness read.
+        missing = requiredIDs().subtracting(checkedIDs.subtracting(missing))
         if !missing.isEmpty {
-            for sp in sessionSpeakers() where missing.contains(sp.id) {
+            for sp in sessionSpeakers() where sp.enabled && missing.contains(sp.id) {
                 await recoverSpeaker(sp)
                 guard streamIsCurrent(generation) else { return }
             }
-            missing = await awaitOutputsReady(ids: Set(ids), timeoutMs: 3_000)
+            checkedIDs = requiredIDs()
+            missing = await awaitOutputsReady(ids: checkedIDs, timeoutMs: 3_000)
         }
         guard streamIsCurrent(generation) else { return }
+        missing = requiredIDs().subtracting(checkedIDs.subtracting(missing))
+        let confirmedReadyIDs = checkedIDs.subtracting(missing)
         guard missing.isEmpty else {
             let names = sessionSpeakers().filter { missing.contains($0.id) }.map(\.name).joined(separator: ", ")
             dlog("resume incomplete; not all speakers streaming: \(names)")
@@ -2608,7 +2878,7 @@ final class DALIStore {
             for id in missing { readyStrikes[id] = 0 }
             // Restore the already-ready members even when another speaker
             // remains missing. Its failure must not leave its partner held at 0.
-            markHealth(of: Array(Set(ids).subtracting(missing)), .live)
+            markHealth(of: Array(requiredIDs().intersection(confirmedReadyIDs)), .live)
             await fadeIn()
             guard streamIsCurrent(generation) else { return }
             // A dead speaker beside a playing engine is recoverSpeaker's job and
@@ -2623,13 +2893,14 @@ final class DALIStore {
         let st = try? await api.playerState()
         guard streamIsCurrent(generation) else { return }
         if st?.state == "play" {
-            markHealth(of: ids, .live)
-            for id in ids { readyStrikes[id] = 2; troubleStrikes[id] = 0 }
+            let ready = requiredIDs().intersection(confirmedReadyIDs)
+            markHealth(of: Array(ready), .live)
+            for id in ready { readyStrikes[id] = 2; troubleStrikes[id] = 0 }
             dlog("resume succeeded, volumes faded in")
             noteResumeOutcome(ok: true)
         } else {
             dlog("resume did NOT reach play state")
-            markHealth(of: ids, .connecting)
+            markHealth(of: Array(requiredIDs()), .connecting)
             noteResumeOutcome(ok: false)
         }
     }

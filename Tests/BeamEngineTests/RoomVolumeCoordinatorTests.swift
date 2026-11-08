@@ -26,7 +26,14 @@ private actor RetryingVolumeFixture {
 @MainActor
 private final class VolumeClockFixture {
     var instant = ContinuousClock.now
-    func advance(_ duration: Duration) { instant = instant.advanced(by: duration) }
+    var sleeps: [Duration] = []
+    func advance(_ duration: Duration) { sleeps.append(duration); instant = instant.advanced(by: duration) }
+}
+
+private actor InstantVolumeFixture {
+    var calls: [String] = []
+    func write(_ id: String) -> RoomVolumeWriteResult { calls.append(id); return .applied }
+    var count: Int { calls.count }
 }
 
 @MainActor
@@ -177,6 +184,22 @@ final class RoomVolumeCoordinatorTests: XCTestCase {
         isFalse(await waiter.value)
         await transport.finish()
         await waitFor { coordinator.applied["front"] == 0 }
+        coordinator.stop(session: 2)
+    }
+
+    func testSpacingHoldsOneSpeakerButNeverMakesTheOtherWait() async {
+        let transport = InstantVolumeFixture()
+        let clock = VolumeClockFixture()
+        let coordinator = RoomVolumeCoordinator(minimumSpacing: .milliseconds(60), now: { clock.instant },
+                                                sleep: { await clock.advance($0); await Task.yield() }) {
+            id, _ in await transport.write(id)
+        }
+        coordinator.update(session: 1, active: true, targets: ["back": 30, "front": 20], eligible: ["back", "front"])
+        await waitFor { coordinator.applied["front"] == 20 && coordinator.applied["back"] == 30 }
+        isTrue(clock.sleeps.isEmpty)
+        coordinator.update(session: 1, active: true, targets: ["back": 30, "front": 21], eligible: ["back", "front"])
+        await waitFor { coordinator.applied["front"] == 21 }
+        equal(clock.sleeps, [.milliseconds(60)])
         coordinator.stop(session: 2)
     }
 

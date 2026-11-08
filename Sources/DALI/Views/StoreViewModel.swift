@@ -57,7 +57,7 @@ extension DALIStore {
     /// nominal figure for the configured buffer while idle.
     var roomDelayMs: Int {
         phase == .streaming ? max(0, safeInt((roomDelaySec * 1000).rounded()))
-                            : RoomDelayPolicy.automaticStartBufferMs + 200
+                            : currentStartBufferMs + 200
     }
 
     var roomDelayLabel: String {

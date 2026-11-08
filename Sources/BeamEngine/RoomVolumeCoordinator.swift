@@ -38,11 +38,14 @@ public final class RoomVolumeCoordinator {
     private var writes = 0
     private var urgent = false
     private var lastPositiveWriteID: String?
+    /// When the last request to each speaker went on the wire. The spacing is per
+    /// speaker, so one speaker's write never makes the other wait for it.
+    private var lastWriteStart: [String: ContinuousClock.Instant] = [:]
     public private(set) var applied: [String: Int] = [:]
     public private(set) var isWriting = false
     public private(set) var lastCompletionAt = Date.distantPast
 
-    public init(minimumSpacing: Duration = .milliseconds(100),
+    public init(minimumSpacing: Duration = .milliseconds(60),
                 now: @escaping Now = { ContinuousClock.now },
                 sleep: @escaping Sleep = { try await Task.sleep(for: $0) },
                 write: @escaping Write) {
@@ -132,6 +135,7 @@ public final class RoomVolumeCoordinator {
         desired.removeAll(); applied.removeAll(); eligible.removeAll(); temporary.removeAll()
         failures.removeAll(); retryAt.removeAll(); urgent = false; revision += 1
         lastPositiveWriteID = nil
+        lastWriteStart.removeAll()
         let old = waiters; waiters.removeAll()
         for waiter in old { waiter.continuation.resume(returning: false) }
     }
@@ -185,15 +189,25 @@ public final class RoomVolumeCoordinator {
                 do { try await pause(instant.duration(to: wake)) } catch { return }
                 continue
             }
+            // Spacing keeps one speaker from being written to in a burst; it never
+            // holds one speaker behind another's request. Mutes skip it.
+            let spaced = ready.filter { id in
+                urgent || target(id) == 0 || lastWriteStart[id].map { instant >= $0.advanced(by: minimumSpacing) } ?? true
+            }
+            guard !spaced.isEmpty else {
+                let wake = ready.compactMap { lastWriteStart[$0]?.advanced(by: minimumSpacing) }.min() ?? instant
+                do { try await pause(instant.duration(to: wake)) } catch { return }
+                continue
+            }
             // Repeated master changes leave every speaker pending. Rotate
             // positive writes so the first ID cannot monopolize the lane;
             // ready mutes always take precedence, regardless of that rotation.
-            let nextPositive = lastPositiveWriteID.flatMap { previous in ready.first { $0 > previous } }
-            let id = ready.first { target($0) == 0 } ?? nextPositive ?? ready[0]
+            let nextPositive = lastPositiveWriteID.flatMap { previous in spaced.first { $0 > previous } }
+            let id = spaced.first { target($0) == 0 } ?? nextPositive ?? spaced[0]
             guard let value = target(id) else { continue }
             let epoch = session
             if value > 0 { lastPositiveWriteID = id }
-            isWriting = true; writes += 1
+            isWriting = true; writes += 1; lastWriteStart[id] = instant
             let result = await write(id, value)
             guard active, generation == driverGeneration, epoch == session, !Task.isCancelled else { return }
             isWriting = false; lastCompletionAt = Date()
@@ -217,9 +231,6 @@ public final class RoomVolumeCoordinator {
             }
             finishSatisfiedWaiters()
             settleObsoleteWaiters()
-            if !urgent {
-                do { try await pause(minimumSpacing) } catch { return }
-            }
             urgent = false
         }
     }

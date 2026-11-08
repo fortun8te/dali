@@ -12,6 +12,8 @@ import SwiftUI
 
 struct PanelView: View {
     @Environment(DALIStore.self) private var store
+    @Environment(\.openWindow) private var openWindow
+    private var apple: AppleSender { .shared }
 
     var body: some View {
         GlassGroup {
@@ -31,9 +33,15 @@ struct PanelView: View {
             header
                 .frame(height: PanelMetrics.headerHeight)
                 .padding(.bottom, Space.m)
-            Button(store.primaryVerb) { store.bigButtonTapped() }
+            Button(apple.isSelected ? apple.primaryVerb : store.primaryVerb) {
+                if apple.isSelected {
+                    apple.primaryTapped { openWindow(id: "apple-test") }
+                } else {
+                    store.bigButtonTapped()
+                }
+            }
                 .buttonStyle(PrimaryButtonStyle())
-                .disabled(store.isError)
+                .disabled(apple.isSelected ? apple.phase == .starting : store.isError)
                 .padding(.bottom, Space.l)
             Group {
                 if let message = store.errorMessage ?? Self.previewError {
@@ -66,13 +74,14 @@ struct PanelView: View {
                 .foregroundStyle(Color.paper)
             Spacer()
             HStack(spacing: 6) {
-                StatusDot(tone: store.statusTone, pulsing: store.statusPulsing)
-                Text(store.statusText)
+                StatusDot(tone: apple.isSelected ? apple.statusTone : store.statusTone,
+                          pulsing: apple.isSelected ? apple.statusPulsing : store.statusPulsing)
+                Text(apple.isSelected ? apple.statusText : store.statusText)
                     .font(.caption)
                     .foregroundStyle(Color.paper62)
             }
             .accessibilityElement(children: .combine)
-            .accessibilityLabel("Status: \(store.statusText)")
+            .accessibilityLabel("Status: \(apple.isSelected ? apple.statusText : store.statusText)")
         }
         // The whole wordmark row moves the window.
         .contentShape(Rectangle())

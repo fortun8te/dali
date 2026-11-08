@@ -7,6 +7,8 @@ struct RoomCard: View {
     @Environment(DALIStore.self) private var store
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
     @Environment(\.colorSchemeContrast) private var contrast
+    /// Where the pointer is over the card, so the glow's lines can lean toward it.
+    @State private var pointer: CGPoint?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -32,7 +34,18 @@ struct RoomCard: View {
         }
         .background {
             // Reduce Transparency / Increase Contrast: no light effect, flat card.
-            if !reduceTransparency && contrast != .increased { RoomBloom().equatable() }
+            if !reduceTransparency && contrast != .increased {
+                ZStack {
+                    RoomBloom(lit: store.phase == .streaming).equatable()
+                    LivingBloom(pointer: pointer)
+                }
+            }
+        }
+        .onContinuousHover { phase in
+            switch phase {
+            case .active(let point): pointer = point
+            case .ended: pointer = nil
+            }
         }
         .clipShape(RoundedRectangle(cornerRadius: Radius.card, style: .continuous))
         .glass(RoundedRectangle(cornerRadius: Radius.card, style: .continuous),
@@ -59,24 +72,43 @@ struct RoomCard: View {
     }
 }
 
-/// A quiet blue bloom pooling along the bottom edge of the room card, the same
-/// light as the app icon (and Z1's card). Drawn from two static gradients: no
-/// state, no animation, no timers, so it costs nothing while the room is idle,
-/// and the view is Equatable so store updates never redraw it.
+/// The blue bloom pooling along the bottom of the room card: the app icon's light,
+/// the same ramp as Z1's card. Three static layers, no state, no animation, no
+/// timers, so it costs nothing while the room is idle, and the view is Equatable
+/// so store updates never redraw it:
+///  - a tall rim band, deep at the top of the glow to periwinkle at the edge,
+///  - a wide soft swell under it, so it reads as light pooling and not a stripe,
+///  - a bright thin core on the very edge, where the glow is strongest.
+/// A faint grain over the glow stops the long dark gradient from banding.
 struct RoomBloom: View, Equatable {
-    private static let rise: CGFloat = 0.34
+    /// The glow warms a little while the room is live. One state change, one fade:
+    /// still no timers.
+    var lit = false
+    private static let rise: CGFloat = 0.44
     private static let rim = Gradient(stops: [
         Gradient.Stop(color: Color.bloomDeep.opacity(0), location: 0),
-        Gradient.Stop(color: Color.bloomDeep.opacity(0.20), location: 0.55),
-        Gradient.Stop(color: Color.bloomMid.opacity(0.24), location: 0.88),
-        Gradient.Stop(color: Color.bloomPeriwinkle.opacity(0.30), location: 1),
+        Gradient.Stop(color: Color.bloomDeep.opacity(0.10), location: 0.30),
+        Gradient.Stop(color: Color.bloomDeep.opacity(0.26), location: 0.55),
+        Gradient.Stop(color: Color.bloomMid.opacity(0.46), location: 0.78),
+        Gradient.Stop(color: Color.bloomPeriwinkle.opacity(0.66), location: 1),
     ])
-    private static let swell = Gradient(colors: [Color.bloomSwell.opacity(0.22), Color.bloomSwell.opacity(0)])
+    private static let swell = Gradient(stops: [
+        Gradient.Stop(color: Color.bloomSwell.opacity(0.42), location: 0),
+        Gradient.Stop(color: Color.bloomSwell.opacity(0.17), location: 0.5),
+        Gradient.Stop(color: Color.bloomSwell.opacity(0), location: 1),
+    ])
+    private static let core = Gradient(stops: [
+        Gradient.Stop(color: Color.bloomHighlight.opacity(0), location: 0),
+        Gradient.Stop(color: Color.bloomHighlight.opacity(0.30), location: 0.5),
+        Gradient.Stop(color: Color.bloomHighlight.opacity(0), location: 1),
+    ])
 
     var body: some View {
         GeometryReader { proxy in
             bloom(width: proxy.size.width, height: proxy.size.height * Self.rise)
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+                .opacity(lit ? 1 : 0.88)
+                .animation(Motion.fade, value: lit)
         }
         .allowsHitTesting(false)
         .accessibilityHidden(true)
@@ -84,12 +116,55 @@ struct RoomBloom: View, Equatable {
 
     private func bloom(width: CGFloat, height: CGFloat) -> some View {
         let band = LinearGradient(gradient: Self.rim, startPoint: .top, endPoint: .bottom)
-        // A wider swell in the middle, so it reads as light pooling, not a band.
-        let pool = RadialGradient(gradient: Self.swell, center: .center, startRadius: 0, endRadius: width * 0.5)
+        // Centred on the bottom edge and finished before its frame ends, so the pool
+        // dissolves into the card instead of ending in a visible curve.
+        let pool = RadialGradient(gradient: Self.swell, center: .bottom, startRadius: 0, endRadius: width * 0.62)
+        let edge = LinearGradient(gradient: Self.core, startPoint: .leading, endPoint: .trailing)
         return ZStack(alignment: .bottom) {
             Rectangle().fill(band).frame(height: height)
-            Ellipse().fill(pool).frame(width: width, height: height * 1.5).offset(y: height * 0.55)
+            Rectangle().fill(pool).frame(width: width * 1.4, height: width * 0.7)
+            // Two off-axis tints, a violet-leaning blue low left and an azure low right,
+            // so the glow has colour depth like the icon's, not one flat blue. Soft blurred
+            // discs, not gradient rectangles, so no edge can show anywhere.
+            Circle().fill(Color.bloomViolet.opacity(0.26))
+                .frame(width: width * 0.8, height: width * 0.8)
+                .blur(radius: width * 0.16)
+                .offset(x: -width * 0.36, y: width * 0.30)
+            Circle().fill(Color.bloomAzure.opacity(0.30))
+                .frame(width: width * 0.7, height: width * 0.7)
+                .blur(radius: width * 0.15)
+                .offset(x: width * 0.40, y: width * 0.30)
+            Rectangle().fill(edge).frame(height: 1.5)
+            // Grain only inside the glow, faded in from nothing so it has no top edge.
+            GrainOverlay().frame(height: height)
+                .mask(LinearGradient(colors: [.clear, .black], startPoint: .top, endPoint: .init(x: 0.5, y: 0.7)))
         }
+    }
+}
+
+/// A fixed tile of fine monochrome noise, repeated, to dither dark gradients.
+private struct GrainOverlay: View {
+    private static let tile: Image = {
+        let side = 96
+        var bytes = [UInt8](repeating: 0, count: side * side * 4)
+        var seed: UInt64 = 0x9E3779B97F4A7C15
+        for i in 0..<(side * side) {
+            seed = seed &* 6364136223846793005 &+ 1442695040888963407
+            let v = UInt8((seed >> 33) & 0xFF)
+            bytes[i * 4] = v; bytes[i * 4 + 1] = v; bytes[i * 4 + 2] = v
+            bytes[i * 4 + 3] = UInt8(v / 22)    // alpha up to ~5%: a whisper that only breaks up banding
+        }
+        let provider = CGDataProvider(data: Data(bytes) as CFData)!
+        let image = CGImage(width: side, height: side, bitsPerComponent: 8, bitsPerPixel: 32,
+                            bytesPerRow: side * 4, space: CGColorSpaceCreateDeviceRGB(),
+                            bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue),
+                            provider: provider, decode: nil, shouldInterpolate: false,
+                            intent: .defaultIntent)!
+        return Image(decorative: image, scale: 2)
+    }()
+
+    var body: some View {
+        Self.tile.resizable(resizingMode: .tile).allowsHitTesting(false).blendMode(.plusLighter)
     }
 }
 
@@ -147,12 +222,14 @@ struct SpeakerLoudnessAdjustment: View {
     let speaker: RoomSpeaker
 
     @MainActor static func height(for speaker: RoomSpeaker?, in store: DALIStore) -> CGFloat {
-        speaker.map { $0.levelCurve != nil || $0.gain != 1 ? 20 : 0 } ?? 0
+        speaker.map { $0.levelCurve == nil && $0.gain != 1 ? 20 : 0 } ?? 0
     }
 
     var body: some View {
+        // A speaker with a leveling curve keeps its trim in Settings > Room > Fine
+        // tuning, not under every volume slider. The saved value still applies.
         if speaker.levelCurve != nil {
-            BalanceTrimControl(speaker: speaker)
+            EmptyView()
         } else if speaker.gain != 1 {
             HStack(spacing: Space.s) {
                 Text("Adjustment: \(safeInt((speaker.gain * 100).rounded()))%")
@@ -178,10 +255,12 @@ struct BalanceTrimControl: View {
 
     static func label(_ trim: Double) -> String {
         let value = Int(trim.rounded())
-        return "Balance \(value > 0 ? "+" : "")\(value)%"
+        return "Loudness match \(value > 0 ? "+" : "")\(value)%"
     }
 
     var body: some View {
+        let low = speaker.balanceTrim <= RoomVolumePolicy.trimRange.lowerBound
+        let high = speaker.balanceTrim >= RoomVolumePolicy.trimRange.upperBound
         HStack(spacing: Space.s) {
             Text(Self.label(speaker.balanceTrim))
                 .font(.caption).foregroundStyle(Color.paper62)
@@ -191,21 +270,26 @@ struct BalanceTrimControl: View {
                 Button("Reset") { store.setBalanceTrim(0, for: speaker) }
                     .buttonStyle(.plain).font(.captionMedium)
                     .foregroundStyle(Color.paper)
+                    .padding(.horizontal, 8).frame(height: 18)
+                    .background(Capsule().fill(Color.white.opacity(0.08)))
                     .accessibilityLabel("Reset \(speaker.name) balance")
-                    .padding(.trailing, Space.s)
             }
-            Button("\u{2212}") { store.setBalanceTrim(speaker.balanceTrim - Self.step, for: speaker) }
-                .buttonStyle(.plain).font(.captionMedium)
-                .foregroundStyle(speaker.balanceTrim > RoomVolumePolicy.trimRange.lowerBound ? Color.paper : Color.paper38)
-                .disabled(speaker.balanceTrim <= RoomVolumePolicy.trimRange.lowerBound)
-                .accessibilityLabel("Lower \(speaker.name) balance")
-                .frame(width: 18)
-            Button("+") { store.setBalanceTrim(speaker.balanceTrim + Self.step, for: speaker) }
-                .buttonStyle(.plain).font(.captionMedium)
-                .foregroundStyle(speaker.balanceTrim < RoomVolumePolicy.trimRange.upperBound ? Color.paper : Color.paper38)
-                .disabled(speaker.balanceTrim >= RoomVolumePolicy.trimRange.upperBound)
-                .accessibilityLabel("Raise \(speaker.name) balance")
-                .frame(width: 18)
+            HStack(spacing: 0) {
+                Button("\u{2212}") { store.setBalanceTrim(speaker.balanceTrim - Self.step, for: speaker) }
+                    .buttonStyle(.plain).font(.captionMedium)
+                    .foregroundStyle(low ? Color.paper38 : Color.paper)
+                    .disabled(low)
+                    .accessibilityLabel("Lower \(speaker.name) balance")
+                    .frame(width: 24, height: 18).contentShape(Rectangle())
+                Rectangle().fill(Color.white.opacity(0.12)).frame(width: 0.5, height: 10)
+                Button("+") { store.setBalanceTrim(speaker.balanceTrim + Self.step, for: speaker) }
+                    .buttonStyle(.plain).font(.captionMedium)
+                    .foregroundStyle(high ? Color.paper38 : Color.paper)
+                    .disabled(high)
+                    .accessibilityLabel("Raise \(speaker.name) balance")
+                    .frame(width: 24, height: 18).contentShape(Rectangle())
+            }
+            .background(Capsule().fill(Color.white.opacity(0.08)))
         }
         .frame(height: 20)
     }

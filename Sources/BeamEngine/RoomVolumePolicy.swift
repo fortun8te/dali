@@ -23,15 +23,28 @@ public struct RoomVolumePlan: Equatable, Sendable {
     public let pcmGain: Double
 }
 
-/// Preserve V1's receiver master curve. A shared low-volume fade lowers the
-/// room below Mac step two; normal levels and non-system sources stay at unity.
+/// The Mac volume drives each speaker's own volume command, in equal steps.
+///
+/// Both receivers take DALI's command as their own volume percentage (measured 2 Nov
+/// 2026: command 42 -> Powernode 43 %, command 47 -> Sonos 47 %), and the Powernode is
+/// close to even in dB across that scale (22 % = -49.8 dB, 43 % = -35.1 dB, about
+/// 0.7 dB per percent). So a command that rises evenly with the Mac volume gives every
+/// one of the 16 volume keys the same change, about 3 dB at a 70 limit.
+///
+/// The earlier V1 curve (master^0.7) and the shared quiet-end PCM fade made the first
+/// key a ~10 dB jump, the top keys about 2 dB, and the quiet end change in two
+/// pieces a room delay apart. Both are gone: the captured audio stays at unity unless
+/// the room is muted.
 public enum RoomVolumePolicy {
+    /// Exponent of the Mac master in the receiver command. 1 = even steps.
+    public static let masterExponent = 1.0
+
     public static func plan(speakers: [RoomVolumeSpeaker], ceiling: Double,
                             systemMaster: Double? = nil, muted: Bool = false) -> RoomVolumePlan {
         let ceiling = bounded(ceiling, fallback: 40, lower: 1, upper: 100)
         let master = systemMaster.map { bounded($0, fallback: 0, lower: 0, upper: 1) }
         let silent = muted || master == 0
-        let curve = master.map { pow($0, 0.7) }
+        let curve = master.map { pow($0, masterExponent) }
         var hardware: [String: Int] = [:]
         for speaker in speakers {
             let slider = bounded(speaker.slider, fallback: 0, lower: 0, upper: 100)
@@ -41,12 +54,8 @@ public enum RoomVolumePolicy {
             let limited = min(min(base * gain, 100), ceiling)
             hardware[speaker.id] = silent || !speaker.enabled ? 0 : Int(max(limited, 0).rounded())
         }
-        // Keep every speaker's receiver calibration intact while giving the
-        // whole room a quieter first step. Smoothstep is half amplitude at
-        // step one and joins unity with zero slope at step two.
-        let t = min((master ?? 1) / (2.0 / 16), 1)
-        let lowVolumeGain = t * t * (3 - 2 * t)
-        return RoomVolumePlan(hardware: hardware, pcmGain: silent ? 0 : lowVolumeGain)
+        // Loudness lives in the receiver commands alone, so a volume key is one change.
+        return RoomVolumePlan(hardware: hardware, pcmGain: silent ? 0 : 1)
     }
 
     public static let trimRange: ClosedRange<Double> = -30...30

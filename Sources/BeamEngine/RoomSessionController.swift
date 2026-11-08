@@ -322,6 +322,11 @@ public final class RoomSessionController {
         let all = Set(plan.ids)
         var missing = try await missingOutputs(all, timeout: timing.initialReadiness,
                                               failFast: true, dependencies: dependencies, context: context)
+        // Ready members are still held at setup silence until this transaction
+        // completes. Do not keep them muted, or rebuild their group, while one
+        // unavailable receiver consumes every recovery window. The streaming
+        // health loop can recover missing members after the ready ones start.
+        if missing.count < all.count { return missing }
         var recovery = RoomStartupRecovery()
         if plan.allowsCaptureReset {
             let outputs = try? await dependencies.outputs()
@@ -346,6 +351,7 @@ public final class RoomSessionController {
                 try await ensurePlaying(dependencies, context: context)
                 missing = try await missingOutputs(all, timeout: timing.resetReadiness,
                                                   dependencies: dependencies, context: context)
+                if missing.count < all.count { return missing }
             }
         }
         for (index, timeout) in [timing.firstReassertReadiness, timing.secondReassertReadiness].enumerated() {
@@ -357,9 +363,11 @@ public final class RoomSessionController {
             }
             try? await dependencies.setOutputs(plan.ids)
             try context.check()
-            // Group selection can disconnect its formerly ready partner.
+            // Stop group recovery as soon as any member is ready; another
+            // selection can disconnect that newly established session.
             missing = try await missingOutputs(all, timeout: timeout,
                                               dependencies: dependencies, context: context)
+            if missing.count < all.count { return missing }
         }
         if !missing.isEmpty {
             dependencies.event(.hardRejoin(missing))

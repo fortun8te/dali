@@ -3,9 +3,12 @@ import Foundation
 /// The bundled engine's nominal presentation delay, shared by video and the
 /// room animation. This is a scheduling estimate, not a microphone measurement.
 public enum RoomDelayPolicy {
-    /// Keep the AirPlay buffer at its supported low-latency setting. Browser
-    /// video follows the same measured room delay, so lowering this reduces
-    /// both audio and picture latency together while retaining some headroom.
+    /// The AirPlay buffer, also the window a speaker has to get a lost packet re-sent.
+    /// Four weeks of engine logs (30 Sep to 26 Oct) show 500 ms is enough on a healthy
+    /// network: the Sonos' median retransmit requests were 0. An 800 ms trial on 26 Oct
+    /// was reverted: it added latency to every volume change and the loss that day was a
+    /// Wi-Fi problem on the Mac, which a longer buffer does not fix. Browser video follows
+    /// the same room delay through the beacon, so picture and sound stay together.
     public static let automaticStartBufferMs = 500
 
     // Keep these in step with the bundled airplay.c. This fork sends audio with

@@ -40,6 +40,12 @@ struct DALIApp: App {
             }
         }
 
+        // The optional Apple-managed AirPlay sender: speakers and status. ⌥⌘A.
+        Window("Apple AirPlay", id: "apple-test") {
+            AppleSenderView()
+        }
+        .windowResizability(.contentSize)
+
         Window("DALI setup", id: "setup") {
             OnboardingGuide(session: session)
                 .background(WindowConfigurator())
@@ -164,17 +170,24 @@ private struct SetupMenuBarPanel: View {
 private struct MenuBarPanel: View {
     @Environment(DALIStore.self) private var store
     @Environment(\.openWindow) private var openWindow
+    private var apple: AppleSender { .shared }
 
     var body: some View {
         Group {
-            Text(store.roomChrome.menuLabel)
+            Text(apple.isSelected ? "Apple AirPlay · \(apple.statusText)" : store.roomChrome.menuLabel)
                 .lineLimit(2)
         }
         Divider()
-        Button(verb) { store.bigButtonTapped() }
-            .keyboardShortcut("s", modifiers: [.command, .shift])
-            .disabled(isError)
-        if isError {
+        Button(apple.isSelected ? apple.primaryVerb : verb) {
+            if apple.isSelected {
+                apple.primaryTapped { openWindow(id: "apple-test") }
+            } else {
+                store.bigButtonTapped()
+            }
+        }
+        .keyboardShortcut("s", modifiers: [.command, .shift])
+        .disabled(apple.isSelected ? apple.phase == .starting : isError)
+        if isError && !apple.isSelected {
             Button("Try again") { store.retryAfterError() }
         }
         Button("Open DALI") {

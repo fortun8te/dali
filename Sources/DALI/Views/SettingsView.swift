@@ -15,7 +15,7 @@ struct SettingsView: View {
     }
 
     enum Section: String, CaseIterable {
-        case general = "General", room = "Room", engine = "Engine"
+        case general = "General", room = "Room", engine = "Sound"
         var icon: String {
             switch self {
             case .general: return "gearshape"
@@ -147,7 +147,7 @@ struct RoomSettings: View {
     var body: some View {
         @Bindable var store = store
         VStack(alignment: .leading, spacing: Space.xl) {
-            SettingsGroup(title: "Speakers") {
+            SettingsGroup(title: "Speakers", footer: "Switch on the speakers you want to play through. Front and Back below only place them in the room picture.") {
                 if store.speakers.isEmpty {
                     Text("No speakers found yet. Check their power and Wi-Fi.")
                         .font(.body13).foregroundStyle(Color.paper62)
@@ -201,7 +201,7 @@ struct RoomSettings: View {
                                             .font(.readout).foregroundStyle(Color.paper62)
                                     }
                                     BalanceTrimControl(speaker: sp)
-                                    Text("Levels with the Mac volume. \(curve.stepSummary)")
+                                    Text("Evens out this speaker against the other one as the Mac volume changes. Use − and + only if it sounds too loud or quiet next to the other speaker.")
                                         .font(.caption).foregroundStyle(Color.paper62)
                                 }
                                 .padding(.horizontal, Space.m)
@@ -233,7 +233,6 @@ struct RoomSettings: View {
         }
         .labelsHidden()
         .frame(width: 180)
-        .disabled(store.phase.isOn)
     }
 
     /// Discovered names plus the saved ones, so a picker never shows blank
@@ -287,9 +286,36 @@ struct LipSyncTrim: View {
 
 struct EngineSettings: View {
     @Environment(DALIStore.self) private var store
+    @Environment(\.openWindow) private var openWindow
+    @State private var apple = AppleSender.shared
+
+    private var senderFooter: String {
+        apple.isSelected
+            ? "Beta. Plays through Apple's AirPlay: about 2 seconds behind and slower to connect. DALI's own engine is off while this is selected."
+            : "DALI's own engine. Short delay, so video stays in sync."
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: Space.xl) {
+            if AppleSender.betaVisible {
+            SettingsGroup(title: "Sender", footer: senderFooter) {
+                SettingLine(title: "Play with") {
+                    Picker("Play with", selection: $apple.isSelected) {
+                        Text("DALI").tag(false)
+                        Text("Apple (beta)").tag(true)
+                    }
+                    .pickerStyle(.segmented).labelsHidden()
+                    .frame(width: 196)
+                    .help("Choose how sound is sent to the room. Switching stops the current sound.")
+                }
+                if apple.isSelected {
+                    SettingLine(title: "Speakers", detail: apple.speakersSummary) {
+                        Button("Choose…") { openWindow(id: "apple-test") }
+                            .buttonStyle(SecondaryButtonStyle(accent: true))
+                    }
+                }
+            }
+            }
             SettingsGroup(title: "Video sync") {
                 SettingLine(title: "Automatic video sync") {
                     Image(systemName: "checkmark").font(.system(size: 12, weight: .semibold))
@@ -298,7 +324,7 @@ struct EngineSettings: View {
                 LipSyncTrim()
             }
             SettingsGroup(footer: "DALI \(Self.appVersion) (\(Self.appBuild)) · OwnTone 29.2") {
-                SettingLine(title: "Engine") {
+                SettingLine(title: "Sound engine", detail: "Restart it if speakers stop responding.") {
                     HStack(spacing: Space.l) {
                         Button("Open log") {
                             let log = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
@@ -308,6 +334,8 @@ struct EngineSettings: View {
                         .buttonStyle(SecondaryButtonStyle())
                         Button("Restart") { store.restartEngine() }
                             .buttonStyle(SecondaryButtonStyle(accent: true))
+                            .disabled(apple.isSelected)
+                            .help(apple.isSelected ? "The engine is off while Apple AirPlay is selected" : "Restart the sound engine")
                     }
                 }
             }

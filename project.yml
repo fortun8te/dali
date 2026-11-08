@@ -13,6 +13,7 @@ targets:
       - path: Sources/DALI
       - path: Sources/BeamCapture
       - path: Sources/BeamEngine
+      - path: Sources/BeamAppleSender
       - path: chrome-extension
         type: folder
         buildPhase: resources
