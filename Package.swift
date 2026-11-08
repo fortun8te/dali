@@ -7,9 +7,11 @@ let package = Package(
     targets: [
         .target(name: "BeamCapture"),
         .target(name: "BeamEngine"),
+        .target(name: "BeamAppleSender"),
         .executableTarget(name: "beam-capture", dependencies: ["BeamCapture"]),
         .executableTarget(name: "beam-engine", dependencies: ["BeamEngine"]),
         .testTarget(name: "BeamCaptureTests", dependencies: ["BeamCapture"]),
         .testTarget(name: "BeamEngineTests", dependencies: ["BeamEngine"]),
+        .testTarget(name: "BeamAppleSenderTests", dependencies: ["BeamAppleSender"]),
     ]
 )

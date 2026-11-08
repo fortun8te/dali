@@ -1,0 +1,70 @@
+# V2 room volume and control
+
+## Current behavior: V1 master response restored
+
+The user rejected the fixed-receiver, software-master behavior, including its later quadratic curve. System-audio master volume now uses the original V1 receiver calculation: `round(min(slider × master^0.7 × ceiling / 100 × gain, 100, ceiling))`. Bounds and invalid-input protection remain explicit. System master at or above the second Mac volume step leaves captured PCM at unity. Below that, the quiet-end taper described below lowers both speakers together; zero master or an explicit cut mutes both PCM and receiver commands. App capture, Spotify Connect and library-player modes retain their existing direct speaker control semantics.
+
+Mac volume changes again lower and raise the actual speaker commands through the V2 serialized coordinator. Full-master saved speaker settings are retained. Disabling a speaker cannot increase its partner's command. This deliberately restores V1 volume response rather than approximating native receiver behavior with an assumed dB curve.
+
+**Known limitation:** V1 multiplies each receiver reference separately, so the front/back command difference changes across master levels. Restoring V1 behavior does not solve the original balance-drift complaint. The fixed-reference architecture avoided that command drift, but its physical volume response was rejected by the user. There is no verified device-specific calibration table for this pair, and constant protocol differences alone do not prove constant acoustic balance. A later balance correction must be grounded in receiver behavior rather than another speculative curve.
+
+V2 zero emits protocol mute (-144 dB). The existing 15 ms PCM ramp remains for mute/cut transitions. Source-silence detection uses pre-gain audio, so master mute cannot trigger stale-tap recovery. Control acceptance is not proof of sound or physical response time.
+
+## Visible speaker adjustments
+
+A non-neutral saved gain is shown beside the main front/back slider and in the speaker list as an adjustment percentage, with a per-speaker Reset action. Reset sets that gain to one through the existing coordinator, preserving the slider, other speakers and Mac master. Fine tuning uses the same rounded percentage instead of a one-decimal multiplier. These percentages describe saved settings, not measured acoustic output. No general preference migration or master-curve change is performed.
+
+## Per-master-step leveling (DALI speaker, 13 Oct 2026)
+
+Michael's physical listening (first set 220, 186, 171, 149, 140, 136; revised the same evening after he heard MICHAEL S still too loud at low volume, top unchanged) shows the speaker he calls "dali" (`MICHAEL D`) needs a different boost over the other speaker (`MICHAEL S`, always 100 %) at each macOS volume step, not the single fixed percentage (saved as `dali.gain.MICHAEL D` = 134 %). These are his listening targets, and they are the evidence for this curve:
+
+| Mac volume step (of 16) | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 and up |
+|---|---|---|---|---|---|---|---|---|
+| DALI speaker vs. MICHAEL S | 250 % | 205 % | 182 % | 156 % | 143 % | 136 % | 136 % | 136 % |
+
+Steps above 7 were not measured. The trend had flattened, so they keep 136 %. `SpeakerLevelCurve` interpolates smoothly between steps (monotone cubic: no overshoot, no hard jump at a step) and holds 250 % below step 1. The multiplier replaces the speaker's fixed gain while the Mac master drives the room; the V1 master response (`slider × master^0.7 × ceiling`) is unchanged and `MICHAEL S` is exactly as before. With no Mac master (app capture, Spotify Connect, library player) the saved fixed gain applies as it always did.
+
+One mode, no switch (13 Oct 2026, evening): the leveling curve is the only loudness mode for `MICHAEL D`, plus one **Balance** trim that shifts the whole curve by -30 % to +30 % (default 0, whole numbers). Trim is multiplicative: effective gain = curve(master) x (1 + trim/100), so +10 % turns 182 % at step 3 into 200 %. With no Mac master (app capture, Spotify Connect, library player) the curve's settled top value (136 %) times the trim applies. The room card row shows "Balance +0%" with - / + (2 % steps) and a Reset that appears only when the trim is not zero and changes nothing but the trim. Settings > Fine tuning shows the same control, the effective percentage now, and the step table. Speakers without a curve keep their fixed adjustment slider as before.
+
+Nothing saved is changed or erased. `dali.gain.*` and `dali.vol.*` are kept as they are, and the old `dali.curveOn.*` switch and the saved `dali.gain.MICHAEL D` are ignored for a curve speaker (they stay on disk). The one setting this writes is `dali.balance.<name>` (percent, clamped to +/-30). An optional `dali.curve.<name>` list of percentages for steps 1...n overrides the built-in table; nothing writes it. The percentages are settings applied to receiver commands, not measured loudness.
+
+Limit: the receiver command cannot exceed 100. With the volume limit at 100 and both sliders at 100 the DALI speaker reaches 100 at step 11, so from step 11 to 16 the gap to `MICHAEL S` narrows (130 % at step 11 down to 100 % at step 16). Receiver commands by step (DALI speaker / MICHAEL S): 1: 36/14, 2: 48/23, 3: 56/31, 4: 59/38, 5: 63/44, 6: 68/50, 7: 76/56, 8: 84/62, 9: 91/67, 10: 98/72, 11 to 15: 100/77 to 96, 16: 100/100.
+
+## Ownership and asynchronous behavior
+
+`RoomVolumeCoordinator` is the sole output-volume request owner. Startup silence, readiness restore, recovery, browser cuts and ordinary UI intent all use it. Desired values and engine-accepted values are separate. Sent requests drain; new intent replaces queued work. Session epochs reject stale receipts. A successful RTSP-backed HTTP response means control acceptance, not measured physical loudness. `/api/outputs` reports requested volume, so a matching poll never upgrades a failed or unknown write to acceptance.
+
+Unknown writes retry at bounded cooldowns of 3, 6, 12, 24 and 30 seconds, with sparse 30-second retries thereafter. New intent and urgent mute wake cooldown/spacing sleeps without canceling a request on the wire. Setup waiters finish on cancellation or unknown receipt. An old write's failure cannot impose its cooldown on a newer target. Poll mismatch tolerance is one command step.
+
+`RoomSessionController` owns the production mirror-session sequence, including whole-room selection, initial silence, capture admission, playback proof, readiness retries, one proven-total-failure reset and missing-member rejoin. The store retains presentation, discovery and ongoing per-speaker health policy. Source changes replace the session with a frozen source snapshot. Stop invalidates capture immediately; a teardown barrier drains startup and verifies the old Spotify child exited before any new producer can use the pipe. That handoff can incur the existing teardown/start-buffer delay. Watchdog rebuilds replace only an existing capture token; they never start a fresh tap after Stop. Offset assertions are also fenced by session and cache epoch.
+
+`RoomTimingController` owns capture/progress observation validity and the existing bounded one-sided refill policy. Missing/slow progress, source silence, callback gaps, backpressure and discontinuities invalidate measurement instead of creating bidirectional rate corrections. A hard observation reset eases active refill toward unity; an explicit new-session reset clears its budget and ratio. The retired bidirectional controller and unused competing volume bookkeeping were removed from the store.
+
+## Automated evidence
+
+Policy tests compare against an independent extraction of V1's original arithmetic across master, ceiling, slider and calibration values, including clipping and fractional ceilings. The actual app-controller fixture verifies master changes submit the expected V1 receiver commands through the production coordinator, rather than merely changing a local calculated gain. Zero master, explicit cuts, disabled speakers, source changes and invalid inputs remain covered.
+
+The historical `docs/v2/v1-volume-baseline.swift` reproduces the original balance drift and still intentionally exits with failure. That issue is acknowledged, not relabeled as fixed. Tests and compilation establish code behavior, not physical loudness or receiver latency. Installation follows the user's request with no post-build app launch or playback test.
+
+## Quieter whole-room floor, 17 October 2026
+
+Michael confirmed that the whole room is too loud at the lowest Mac volume. Receiver commands retain the familiar V1 master^0.7 arithmetic and the existing per-speaker leveling/balance. Only shared captured PCM below the second Mac step changes: t=master/(2/16), clamped0...1, and gain=t*t*(3-2*t). At the first Mac step the PCM amplitude is0.5, approximately6.02dB below the previous behavior. At step two and above the gain is1. Quarter steps below step one become progressively quieter; explicit mute remains zero. Existing capture gain smoothing applies.
+
+No saved dali.vol.*, dali.gain.*, dali.balance.* or custom curve values are rewritten. This applies when system master drives captured room audio, not Spotify Connect or library playback. The taper is a conservative starting value based on the quieter-floor request, not a measured subjective loudness target. Installed/listening status must be read from the current dated handoff rather than inferred from this source contract.
+
+## Quiet-end smoothing and the 800 ms buffer, 26 October 2026
+
+Measured by polling both speakers' real volume while the Mac volume was stepped (BluOS `/Status`, Sonos `GetVolume`). Three changes, all verified in code and unit tests, none heard by ear:
+
+- **Buffer stays at 500 ms.** An 800 ms trial was reverted the same day. Four weeks of engine logs (30 Sep to 26 Oct) show median Sonos retransmit requests of 0 and almost no send errors at 500 ms; 26 Oct alone had about 100 times the loss and both speakers failing at once (send errors on both, the Mac's Wi-Fi on 2.4 GHz channel 6 or weak 5 GHz channel 36), so it was the Mac's network, and a longer buffer only added latency to every volume change. Volume writes are normal (median about 25 ms, p90 about 120 ms on every logged day).
+- **`MuteHold`**: when the Mac volume reaches zero from the first two steps, the speakers keep their volume for 0.5 s (the audio itself is already silent), so a brush through zero never reaches them. A mute from a louder level is applied at once, and a browser cut is never held. Replaces the earlier note that zero "urgently mutes the receivers" for the quiet end only.
+- **`FloorSync`**: below the second Mac step the digital quiet-floor gain reaches the speakers one room delay after it changes, while their own volume changes at once. The speaker write is held back by room delay (about 0.7 s) minus 0.25 s so the two land as one change. Only a change in that gain is held; forced resyncs, joins and mutes are never held. Those two quietest steps therefore react about a second late.
+
+The speaker writes remain one at a time through the engine's single request lane (the engine must not receive concurrent or abandoned requests).
+
+
+## Even volume steps, 2 November 2026
+
+Michael: "the volume curve is weird". Measured read-only while playing: both receivers take DALI's command as their own volume percentage (command 42 → Powernode 43 %, 47 → Sonos 47 %), and the Powernode's dB is close to even across its scale (22 % = −49.8 dB, 43 % = −35.1 dB, ≈ 0.7 dB per percent). Under the V1 law (command = slider × master^0.7 × limit) plus the quiet-end PCM fade, the first Mac key was a ~10 dB jump, later keys shrank to ≈ 2 dB at the top, and the quiet end changed in two pieces a room delay apart.
+
+Now `RoomVolumePolicy.masterExponent = 1`: the command rises evenly with the Mac volume (limit 70 → 4.4 command points ≈ 3 dB per key), and the captured audio stays at unity unless muted, so every change is one change at the speaker with no FloorSync hold. The per-step leveling for MICHAEL D, balance trim, sliders and volume limit are unchanged and still multiply the command. Consequence: at the same Mac key the room is quieter in the middle (step 8 ≈ 5 dB quieter than before), equal at the top, and the first two keys are quiet. Not yet heard by Michael.

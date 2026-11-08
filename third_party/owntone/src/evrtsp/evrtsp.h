@@ -166,7 +166,7 @@ void
 evrtsp_connection_get_local_address(struct evrtsp_connection *evcon,
     char **address, u_short *port, int *family);
 
-/** The connection gets ownership of the request */
+/** The connection gets ownership of the request, including on a -1 return. */
 int evrtsp_make_request(struct evrtsp_connection *evcon,
     struct evrtsp_request *req,
     enum evrtsp_cmd_type type, const char *uri);

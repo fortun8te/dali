@@ -14,7 +14,7 @@
 // signal between them — they smear audibly within about five minutes.
 //
 // So Video mode is deliberately exclusive and deliberately boring:
-//   stream stopped -> Sonos silent -> system output switched to the wired amp.
+//   system output switched successfully -> stream stopped -> Sonos silent.
 // Nothing is compromised; the room just shrinks to the front pair for the
 // length of the film.
 //
@@ -209,6 +209,27 @@ final class VideoModeState {
 
     private static let previousUIDKey = "dali.videoMode.previousOutputUID"
     private static let activeKey = "dali.videoMode.active"
+    private static let restorePendingKey = "dali.videoMode.restorePending"
+
+    struct Hardware {
+        var firstMatching: @MainActor () -> WiredOutputDevice?
+        var defaultOutput: @MainActor () -> WiredOutputDevice?
+        var device: @MainActor (String) -> WiredOutputDevice?
+        var setDefaultOutput: @MainActor (AudioObjectID) -> OSStatus
+
+        static var live: Hardware {
+            Hardware(firstMatching: { WiredOutput.firstMatching() },
+                     defaultOutput: { WiredOutput.defaultOutput() },
+                     device: { WiredOutput.device(uid: $0) },
+                     setDefaultOutput: { WiredOutput.setDefaultOutput($0) })
+        }
+    }
+    private let defaults: UserDefaults
+    private let hardware: Hardware
+    private var restorePending: Bool {
+        get { defaults.bool(forKey: Self.restorePendingKey) }
+        set { defaults.set(newValue, forKey: Self.restorePendingKey) }
+    }
 
     /// The wired amp, refreshed whenever the device list changes. nil = unplugged.
     private(set) var wiredDevice: WiredOutputDevice?
@@ -226,38 +247,94 @@ final class VideoModeState {
     /// system default output was before we took it over. Persisted so a crash
     /// mid-film does not strand the user on the amp with no way back.
     private var previousOutputUID: String? {
-        get { UserDefaults.standard.string(forKey: Self.previousUIDKey) }
-        set { UserDefaults.standard.set(newValue, forKey: Self.previousUIDKey) }
+        get { defaults.string(forKey: Self.previousUIDKey) }
+        set { defaults.set(newValue, forKey: Self.previousUIDKey) }
     }
 
-    private init() {
-        isActive = UserDefaults.standard.bool(forKey: Self.activeKey)
+    init(defaults: UserDefaults = .standard, hardware: Hardware? = nil,
+         observeDevices: Bool = true) {
+        self.defaults = defaults
+        self.hardware = hardware ?? .live
+        isActive = defaults.bool(forKey: Self.activeKey)
         refresh()
-        Self.installDeviceListListener()
+        if observeDevices { Self.installDeviceListListener() }
     }
 
     /// Re-read the device list and reconcile our flag with reality. Cheap
     /// enough to call on every appearance of the settings pane.
     func refresh() {
-        // @Observable notifies on every set, equal or not.
-        let found = WiredOutput.firstMatching()
+        let found = hardware.firstMatching()
         if found != wiredDevice { wiredDevice = found }
-
-        // We only claim to be in video mode if the wired amp is present *and*
-        // it is genuinely the system default right now. The user can change
-        // output in Sound settings or via a menu-bar click behind our back, and
-        // pretending otherwise would leave a lit toggle over silent speakers.
-        if isActive {
-            let currentUID = WiredOutput.defaultOutput()?.uid
-            if wiredDevice == nil || currentUID != wiredDevice?.uid {
-                setActive(false)
-            }
+        guard isActive else { return }
+        if found == nil || restorePending {
+            // Unplugging must restore the saved route, not discard the only
+            // state that lets Exit retry a temporarily missing output.
+            exit()
+        } else if let current = hardware.defaultOutput(), current.uid != found?.uid {
+            // A deliberate external output selection takes ownership from us.
+            // Respect it rather than switching it back on a later refresh.
+            finish()
         }
+    }
+
+    @discardableResult
+    func enter(stopRoom: () -> Void) -> Bool {
+        refresh()
+        guard let wired = wiredDevice else {
+            fail("The POWERNODE isn't connected. Plug it into the Mac with USB-C.")
+            return false
+        }
+        guard !isActive else { return true }
+        let previous = hardware.defaultOutput()
+        let status = hardware.setDefaultOutput(wired.id)
+        guard status == noErr else {
+            fail("macOS refused to switch output to \(wired.name). Error \(WiredOutput.describe(status)).")
+            return false
+        }
+        // A legacy failed exit can leave a saved UID while already on the amp.
+        // Do not replace that restoration target with the amp itself.
+        if previous?.uid != wired.uid { rememberPrevious(previous?.uid) }
+        setActive(true)
+        clearError()
+        // A failed HAL switch must leave the AirPlay room untouched.
+        stopRoom()
+        return true
+    }
+
+    @discardableResult
+    func exit() -> Bool {
+        guard isActive else { return true }
+        guard let uid = previousUID else {
+            // The amp was already selected before Enter. There is no previous
+            // route to invent or change in this case.
+            finish()
+            return true
+        }
+        guard let previous = hardware.device(uid) else {
+            restorePending = true
+            fail("The previous output device is gone. Reconnect it and retry, or choose an output in Sound settings.")
+            return false
+        }
+        let status = hardware.setDefaultOutput(previous.id)
+        guard status == noErr else {
+            restorePending = true
+            fail("Couldn't switch back to \(previous.name). Error \(WiredOutput.describe(status)).")
+            return false
+        }
+        finish()
+        return true
+    }
+
+    private func finish() {
+        restorePending = false
+        setActive(false)
+        forgetPrevious()
+        clearError()
     }
 
     fileprivate func setActive(_ on: Bool) {
         if isActive != on { isActive = on }
-        UserDefaults.standard.set(on, forKey: Self.activeKey)
+        defaults.set(on, forKey: Self.activeKey)
     }
 
     /// Plugging in one USB device fires the device-list listener several times
@@ -320,83 +397,20 @@ extension DALIStore {
     /// Returns false (and sets `videoMode.lastError`) if anything stopped it.
     @discardableResult
     func enterVideoMode() -> Bool {
-        let state = videoMode
-        state.refresh()
-
-        guard let wired = state.wiredDevice else {
-            state.fail("The POWERNODE isn't connected. Plug it into the Mac with USB-C.")
-            dlog("video mode refused: no wired device matching \(WiredOutput.deviceNameNeedles)")
-            return false
+        let result = videoMode.enter {
+            if phase.isOn { playerMode ? stopPlayback() : stopStream() }
         }
-        guard !state.isActive else { return true }
-
-        // Remember where audio was going *before* anything moves, so exit has
-        // somewhere to put it back. Read it first: stopping the stream can make
-        // OwnTone's virtual outputs disappear.
-        let previous = WiredOutput.defaultOutput()
-
-        // Video mode is exclusive by design (see file header): the AirPlay group
-        // and the wired amp are two clock domains that would drift apart.
-        if phase.isOn { playerMode ? stopPlayback() : stopStream() }
-
-        let status = WiredOutput.setDefaultOutput(wired.id)
-        guard status == noErr else {
-            state.fail("macOS refused to switch output to \(wired.name) — error \(WiredOutput.describe(status)).")
-            dlog("video mode FAILED: setDefaultOutput(\(wired.name)) -> \(status)")
-            return false
-        }
-
-        // Don't record the amp as its own "previous": if the user was already
-        // listening through USB-C, exiting should be a no-op, not a loop.
-        state.rememberPrevious(previous?.uid == wired.uid ? nil : previous?.uid)
-        state.setActive(true)
-        state.clearError()
-        dlog("video mode ON -> \(wired.name) (was: \(previous?.name ?? "unknown"))")
-        return true
+        if let error = videoMode.lastError { dlog("video mode: \(error)") }
+        return result
     }
 
-    /// Give the Mac's output back to whatever had it before.
-    ///
-    /// Deliberately does NOT restart the AirPlay stream. Leaving video mode
-    /// usually means the film ended, not that the room should suddenly start
-    /// playing again — and an automatic restart would push audio at the whole
-    /// house without anyone asking. The user presses play when they want the
-    /// room back.
+    /// Exit never restarts AirPlay. Failed restoration keeps the saved route
+    /// and active state intact so the user can retry.
     func exitVideoMode() {
-        let state = videoMode
-        guard state.isActive else { return }
-
-        // The flag drops either way: once we stop claiming the output, the
-        // toggle must not stay lit. The remembered UID is only *forgotten* on a
-        // successful restore, so a transient failure can still be retried by
-        // hand from System Settings without us having thrown the answer away.
-        defer { state.setActive(false) }
-
-        guard let uid = state.previousUID else {
-            // Nothing to restore (we were already on the amp when we entered,
-            // or the app was relaunched with the key cleared). Leaving output
-            // where it is beats guessing at a device.
-            state.clearError()
-            dlog("video mode OFF (no previous device recorded; output left as-is)")
-            return
-        }
-        guard let previous = WiredOutput.device(uid: uid) else {
-            state.fail("The previous output device is gone. Pick one in System Settings › Sound.")
-            dlog("video mode OFF but previous device \(uid) is no longer present")
-            state.forgetPrevious()
-            return
-        }
-
-        let status = WiredOutput.setDefaultOutput(previous.id)
-        guard status == noErr else {
-            state.fail("Couldn't switch back to \(previous.name) — error \(WiredOutput.describe(status)).")
-            dlog("video mode OFF FAILED: setDefaultOutput(\(previous.name)) -> \(status)")
-            return
-        }
-        state.forgetPrevious()
-        state.clearError()
-        dlog("video mode OFF -> \(previous.name)")
+        videoMode.exit()
+        if let error = videoMode.lastError { dlog("video mode: \(error)") }
     }
+
 }
 
 // MARK: - Control
@@ -423,7 +437,7 @@ struct VideoModeControl: View {
                 .font(.bodyBase)
                 .foregroundStyle(store.videoMode.isAvailable ? Color.paper : Color.paper35)
                 .toggleStyle(.switch).controlSize(.small).tint(.accentBlue)
-                .disabled(!store.videoMode.isAvailable)
+                .disabled(!store.videoMode.isAvailable && !store.videoMode.isActive)
 
             Text(blurb)
                 .font(.badge)

@@ -79,7 +79,7 @@ final class SpeakerPreferencesTests: XCTestCase {
         membership.reset()
         XCTAssertFalse(membership.contains(name: "Kitchen", enabled: false, primary: false),
                        "A new session must release previously muted extra speakers")
-        XCTAssertTrue(membership.contains(name: "Desk", enabled: false, primary: true),
-                      "The established front/back mute behavior is preserved")
+        XCTAssertFalse(membership.contains(name: "Desk", enabled: false, primary: true),
+                       "Placement must not reselect a disabled speaker in a new session")
     }
 }

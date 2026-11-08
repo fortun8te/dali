@@ -54,8 +54,8 @@
   // Bump BUILD on every edit. The service worker prints version + build on
   // startup (chrome://extensions -> "service worker"); that line is the only
   // way to confirm which code Chrome actually has loaded.
-  const VERSION = '1.2.4';
-  const BUILD = '2026-09-30.a';
+  const VERSION = '1.2.5';
+  const BUILD = '2026-10-17.d';
 
   if (typeof chrome === 'undefined' || !chrome.runtime) return;
 
@@ -149,6 +149,7 @@
 
   const CANVAS_CLASS = 'dali-sync-overlay';
   const HIDDEN_ATTR = 'data-dali-sync-hidden';
+  const ORIGINAL_VISIBILITY_ATTR = 'data-dali-sync-original-visibility';
   const TRIM_KEY = 'trims';
 
   const S = {
@@ -239,8 +240,9 @@
     try {
       document.querySelectorAll('canvas.' + CANVAS_CLASS).forEach((c) => c.remove());
       document.querySelectorAll('video[' + HIDDEN_ATTR + ']').forEach((v) => {
-        v.style.visibility = '';
+        v.style.visibility = v.getAttribute(ORIGINAL_VISIBILITY_ATTR) || '';
         v.removeAttribute(HIDDEN_ATTR);
+        v.removeAttribute(ORIGINAL_VISIBILITY_ATTR);
       });
     } catch (e) { /* ignore */ }
   }
@@ -328,7 +330,19 @@
     out = out || [];
     root = root || document;
     try {
-      for (const v of root.querySelectorAll('video')) out.push(v);
+      for (const v of root.querySelectorAll('video')) {
+        // Frameworks may clone our hidden video without ever playing the
+        // replacement. Restore orphaned markers before selection, including
+        // paused/offscreen/PiP clones that will never acquire a pipeline.
+        const owner = S.pipeline;
+        if (v.hasAttribute(HIDDEN_ATTR) &&
+            !(owner && !owner.detached && owner.armed && owner.video === v)) {
+          v.style.visibility = v.getAttribute(ORIGINAL_VISIBILITY_ATTR) || '';
+          v.removeAttribute(HIDDEN_ATTR);
+          v.removeAttribute(ORIGINAL_VISIBILITY_ATTR);
+        }
+        out.push(v);
+      }
       for (const el of root.querySelectorAll('*')) {
         if (el.shadowRoot) {
           watchShadowRoot(el.shadowRoot);
@@ -665,6 +679,20 @@
     onSeek() {
       const v = this.video;
       markFresh(v);
+      // Chrome implements a native loop with seeking/seeked even though its
+      // audio continues into the next cycle. Our frame timestamps are on the
+      // monotonic display clock, so the previous cycle remains the correct
+      // picture until that audio reaches the room. Preserve only a narrow
+      // end-to-start wrap; ordinary rewinds and source changes still cut out.
+      const rate = v.playbackRate;
+      const edge = Math.min(0.25, v.duration / 4,
+        Math.max(0.1, this.sourceFrameInterval * 3 / 1000) * rate);
+      const loopWrap = v.loop && !v.paused && rate > 0 && isFinite(rate) &&
+        isFinite(v.duration) && v.duration > 0 && this.lastTimeSeen >= 0 &&
+        this.lastTimeSeen <= v.duration && v.duration - this.lastTimeSeen <= edge &&
+        v.currentTime >= 0 && v.currentTime <= Math.min(0.05, v.duration / 4) &&
+        v.currentTime < this.lastTimeSeen;
+      if (loopWrap) return;
       const jump = Math.abs(v.currentTime - this.lastTimeSeen) * 1000;
       if (this.lastTimeSeen >= 0 && jump < LIVE_SEEK_EPSILON_MS) {
         log('sub-threshold time jump', Math.round(jump) + 'ms — holding (not a seek)');
@@ -701,7 +729,12 @@
       if (this.canvas) this.canvas.style.display = '';
       this.syncGeometry(true);
       this.drawSource(bmp);
-      this.savedVisibility = v.style.visibility;
+      // Sites can clone an active video, including our hidden style. Carry
+      // the original inline value in the DOM so its replacement can restore
+      // the page too, rather than treating our inherited hidden as its own.
+      this.savedVisibility = v.hasAttribute(HIDDEN_ATTR)
+        ? (v.getAttribute(ORIGINAL_VISIBILITY_ATTR) || '') : v.style.visibility;
+      v.setAttribute(ORIGINAL_VISIBILITY_ATTR, this.savedVisibility || '');
       v.style.visibility = 'hidden';
       v.setAttribute(HIDDEN_ATTR, '1');
       S.reason = 'ok';
@@ -777,6 +810,7 @@
       try {
         this.video.style.visibility = this.savedVisibility || '';
         this.video.removeAttribute(HIDDEN_ATTR);
+        this.video.removeAttribute(ORIGINAL_VISIBILITY_ATTR);
       } catch (e) { /* ignore */ }
       this.savedVisibility = null;
       if (this.ctx && this.canvas) {
@@ -910,17 +944,29 @@
       let w = Math.min(vw, MAX_CAPTURE_WIDTH, Math.max(160, wantW));
       w = Math.max(2, Math.round(w / 2) * 2);
       let h = Math.max(2, Math.round((w * vh) / vw / 2) * 2);
-      const bytes = w * h * 4;
       // Size for the TARGET delay, not the ramped one: the ring has to be able
       // to hold the full delay by the time the ramp reaches it.
       const delaySec = Math.max(0.05, activeDelayMs() / 1000);
 
+      // Portrait frames can cost much more than landscape at the same width.
+      // If even MIN_FPS cannot fit the requested history, reduce resolution
+      // rather than silently trimming away the very frames we need to delay.
+      const headroom = 6;
+      const minimumFrames = Math.ceil(delaySec * MIN_FPS) + headroom;
+      const maxFrameBytes = MAX_BUFFER_BYTES / minimumFrames;
+      if (w * h * 4 > maxFrameBytes) {
+        const scale = Math.sqrt(maxFrameBytes / (w * h * 4));
+        w = Math.max(2, Math.floor(w * scale / 2) * 2);
+        h = Math.max(2, Math.floor((w * vh / vw) / 2) * 2);
+      }
+      const bytes = w * h * 4;
+
       let fps = TARGET_FPS;
       const affordable = Math.floor(MAX_BUFFER_BYTES / bytes);
-      if (affordable < delaySec * fps + 4) {
-        fps = Math.max(MIN_FPS, Math.floor((affordable - 4) / delaySec));
+      if (affordable < delaySec * fps + headroom) {
+        fps = Math.max(MIN_FPS, Math.floor((affordable - headroom) / delaySec));
       }
-      const capacity = Math.max(4, Math.min(affordable, Math.ceil(delaySec * fps) + 6));
+      const capacity = Math.max(4, Math.min(affordable, Math.ceil(delaySec * fps) + headroom));
 
       if (w !== this.capW || h !== this.capH || fps !== this.capFps || capacity !== this.capacity) {
         log('plan', w + 'x' + h, fps + 'fps', capacity + ' frames',
@@ -1036,6 +1082,13 @@
     // createImageBitmap resolves asynchronously and can complete out of order;
     // keep the buffer sorted by capture time.
     insertFrame(frame) {
+      // Bitmap promises may resolve after a newer frame was already drawn.
+      // Sorting only the pending queue would let that late frame rewind the
+      // picture on the next draw, despite timestamps being otherwise ordered.
+      if (this.current && frame.t <= this.current.t) {
+        try { frame.bmp.close(); } catch (e) { /* ignore */ }
+        return;
+      }
       const arr = this.buffer;
       let i = arr.length - 1;
       while (i >= 0 && arr[i].t > frame.t) i--;

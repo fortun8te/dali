@@ -51,6 +51,8 @@ function worker() {
   const urls = [];
   const pendingCuts = [];
   let holdCuts = false;
+  let holdStatus = false;
+  const pendingStatus = [];
   let beaconFailure = false;
   let appReply = { app: 'DALI', streaming: true, delayMs: 900 };
   const localStorage = {};
@@ -67,6 +69,7 @@ function worker() {
       const path = new URL(url).pathname;
       urls.push(url);
       if (path !== '/') calls.push({ path, at: clock.now });
+      if (path === '/' && holdStatus) await new Promise(resolve => pendingStatus.push(resolve));
       if (path === '/' && beaconFailure) throw new Error('beacon timeout');
       if (path === '/cut' && holdCuts) await new Promise((resolve) => pendingCuts.push(resolve));
       return { ok: true, json: async () => appReply };
@@ -76,7 +79,7 @@ function worker() {
   context.importScripts = (file) => vm.runInContext(source(file), context);
   vm.runInContext(source('background.js'), context);
   return {
-    clock, calls, urls, pendingCuts, runtime, injections, holdCuts: () => { holdCuts = true; },
+    clock, calls, urls, pendingCuts, pendingStatus, context, runtime, injections, holdStatus: () => { holdStatus = true; }, holdCuts: () => { holdCuts = true; },
     appReply: patch => { appReply = { ...appReply, ...patch }; },
     failBeacon: value => { beaconFailure = value; },
     get reloads() { return reloads; }, localStorage,
@@ -1049,4 +1052,164 @@ test('1.05x live catch-up does not change the wall-clock delay', async () => {
   const errs = await runFrames(c, 3000);
   assert.ok(Math.max(...errs.map(Math.abs)) <= 40);
   assert.equal(p.armed, true);
+});
+
+test('portrait capture retains the full four-second delay within its memory budget', async () => {
+  const c = content();
+  await settle();
+  c.video.videoWidth = 1280;
+  c.video.videoHeight = 2276;
+  c.video.rect = { width: 1280, height: 720, left: 0, top: 0 };
+  c.api.applyStatus({ running: true, streaming: true, delayMs: 4000 });
+  const p = c.api.S.pipeline;
+  p.syncGeometry(true);
+  assert.ok(p.capFps >= 10);
+  assert.ok(p.capacity >= Math.ceil(4 * p.capFps) + 6,
+    `${p.capacity} frames at ${p.capFps}fps cannot retain four seconds plus capture headroom`);
+  assert.ok(p.frameBytes * p.capacity <= 256 * 1024 * 1024);
+  assert.ok(Math.abs(p.capW / p.capH - 1280 / 2276) < 0.002);
+});
+
+test('an older asynchronous capture never replaces a newer presented frame', async () => {
+  const c = content();
+  await settle();
+  const p = c.api.S.pipeline;
+  c.media('play');
+  await runFrames(c, 2000);
+  c.holdCapture();
+  c.clock.now += 33;
+  p.capture();
+  c.clock.now += 33;
+  p.capture();
+  assert.equal(c.pendingCaptures.length, 2);
+  c.pendingCaptures.pop()(); // The newer bitmap resolves first.
+  await settle();
+  c.clock.now += 900;
+  c.video.currentTime += 0.966;
+  p.drawTick();
+  const presented = p.current;
+  assert.ok(presented);
+  c.pendingCaptures.shift()(); // The older bitmap finally arrives after presentation.
+  await settle();
+  const older = c.bitmaps.at(-1);
+  p.drawTick();
+  assert.equal(p.current, presented);
+  assert.equal(older.closed, true);
+});
+
+// A cut invalidates cached values, never ownership of an in-flight status read.
+test('cut and resume coalesce pending status instead of admitting stale replies', async () => {
+  const w = worker();
+  w.holdStatus();
+  const first = vm.runInContext('readBeacon()', w.context);
+  await settle();
+  vm.runInContext('setCutState(true)', w.context);
+  const duringCut = vm.runInContext('readBeacon()', w.context);
+  vm.runInContext('setCutState(false)', w.context);
+  const afterResume = vm.runInContext('readBeacon()', w.context);
+  await settle();
+  assert.equal(w.urls.filter(u => new URL(u).pathname === '/').length, 1);
+  assert.equal(duringCut, first);
+  assert.equal(afterResume, first);
+  w.appReply({ streaming: false, delayMs: 0 });
+  w.pendingStatus.shift()();
+  const result = await first;
+  assert.equal(result.streaming, false);
+  assert.equal((await duringCut).streaming, false);
+  assert.equal((await afterResume).delayMs, 0);
+});
+
+test('a cloned playing video restores its inherited original visibility on teardown', async () => {
+  const c = content();
+  c.video.style.visibility = 'visible';
+  await c.capture();
+  const clone = c.makeVideo({ style: { ...c.video.style }, attrs: new Map(c.video.attrs) });
+  c.video.isConnected = false;
+  c.videos[0] = clone;
+  c.api.evaluate();
+  await c.capture();
+  assert.equal(clone.style.visibility, 'hidden');
+  c.api.teardownAll('cloned replacement');
+  assert.equal(clone.style.visibility, 'visible');
+  assert.equal(clone.hasAttribute('data-dali-sync-hidden'), false);
+});
+
+test('a cloned video is restored even when sync stops before its first frame', async () => {
+  const c = content();
+  await c.capture();
+  const clone = c.makeVideo({ style: { ...c.video.style }, attrs: new Map(c.video.attrs) });
+  c.video.isConnected = false;
+  c.videos[0] = clone;
+  c.api.evaluate();
+  c.api.applyStatus({ running: true, streaming: false, delayMs: 0 });
+  c.api.evaluate();
+  assert.equal(clone.style.visibility, '');
+  assert.equal(clone.hasAttribute('data-dali-sync-hidden'), false);
+});
+
+test('paused clones restore inherited styles without hiding the active owner', async () => {
+  const c = content();
+  c.video.style.visibility = 'visible';
+  await c.capture();
+  const clone = c.makeVideo({ paused: true, style: { ...c.video.style }, attrs: new Map(c.video.attrs) });
+  c.videos.push(clone);
+  c.api.evaluate();
+  assert.equal(clone.style.visibility, 'visible');
+  assert.equal(clone.hasAttribute('data-dali-sync-hidden'), false);
+  assert.equal(c.video.style.visibility, 'hidden');
+  assert.equal(c.api.S.pipeline.video, c.video);
+});
+
+test('a natural looping boundary preserves delayed frames and timing', async () => {
+  const c = content();
+  c.video.loop = true;
+  c.video.duration = 3;
+  await c.capture();
+  const p = c.api.S.pipeline;
+  p.lastTimeSeen = 2.98;
+  const generation = p.gen;
+  const buffered = p.buffer.length;
+  c.video.currentTime = 0;
+  c.video.seeking = true;
+  c.media('seeking');
+  assert.equal(p.armed, true);
+  assert.equal(p.gen, generation);
+  assert.equal(p.buffer.length, buffered);
+  c.video.seeking = false;
+  c.media('seeked');
+  assert.equal(c.api.S.pipeline, p);
+  assert.equal(p.gen, generation);
+});
+
+for (const scenario of [
+  { label: 'rewinding in the middle of a loop', loop: true, before: 2, after: 0 },
+  { label: 'seeking elsewhere from near the end', loop: true, before: 2.98, after: 1 },
+  { label: 'rewinding a video that is not looping', loop: false, before: 2.98, after: 0 },
+]) {
+  test(scenario.label + ' still releases stale delayed frames', async () => {
+    const c = content();
+    c.video.loop = scenario.loop;
+    c.video.duration = 3;
+    await c.capture();
+    const p = c.api.S.pipeline;
+    p.lastTimeSeen = scenario.before;
+    c.video.currentTime = scenario.after;
+    c.media('seeking');
+    assert.equal(p.armed, false);
+    assert.equal(p.buffer.length, 0);
+  });
+}
+
+test('high playback speed does not turn a manual rewind into a natural loop', async () => {
+  const c = content();
+  c.video.loop = true;
+  c.video.duration = 3;
+  c.video.playbackRate = 16;
+  await c.capture();
+  const p = c.api.S.pipeline;
+  p.lastTimeSeen = 2;
+  c.video.currentTime = 0.5;
+  c.media('seeking');
+  assert.equal(p.armed, false);
+  assert.equal(p.buffer.length, 0);
 });

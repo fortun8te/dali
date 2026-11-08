@@ -69,7 +69,8 @@ A short setup flow in the same style as the app. Click any screen to see it at f
 | Video source | Implementation | Verification |
 | --- | --- | --- |
 | YouTube and Shorts | HTML video timing, seek/pause handling, visible clip selection | Automated player and feed regressions; live-site testing still needed |
-| TikTok and Instagram Reels | Visible active video selection, recycled element and source handling | Automated feed fixtures; login-dependent live-site testing still needed |
+| TikTok | Visible active video selection, recycled element and source handling | Automated feed fixtures; login-dependent live-site testing still needed |
+| Instagram Reels | Picture delay bypassed; audio activity still reported to DALI | Automated bypass regressions; live-site audio reporting still needs testing |
 | Other HTML video players | Generic HTML video support | Depends on the player and browser restrictions |
 | DRM, protected video, picture-in-picture and fullscreen | Browser restrictions can prevent delayed rendering | Not guaranteed; use normal playback when unavailable |
 | Live streams | Player-dependent | Not guaranteed |
@@ -81,6 +82,12 @@ The extension matches the delay reported by DALI. It cannot measure the sound at
 You need macOS 15 or later, Apple Silicon for the current engine build, Chrome, and AirPlay speakers reachable on the same local network. See the [setup guide](docs/getting-started.md). Existing DALI users keep their saved room settings and skip first-run onboarding.
 
 For contributors, start with [building](docs/building.md), [compatibility tests](docs/compatibility.md), and [release requirements](docs/releasing.md).
+
+## V2 backend work
+
+V2 keeps the current interface and replaces the backend paths that control room startup, volume, engine requests, and captured audio. The work is tracked in the [V2 plan](docs/v2/PLAN.md), with test coverage and remaining release checks in [V2 validation](docs/v2/VALIDATION.md).
+
+Run `bash scripts/check.sh` for the complete automated gate. It runs backend, capture lifecycle, engine, setup, and browser tests, then compiles the full app unsigned before validating the extension package. It never launches or installs DALI. Passing this gate does not prove physical speaker balance, audible delivery, live-site video support, or clean-machine distribution.
 
 ## Help test multi-speaker AirPlay
 

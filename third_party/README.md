@@ -1,8 +1,10 @@
 # Engine source provenance
 
-`owntone/` contains OwnTone 29.2 from upstream commit `84e3755198c44c36ddf91e9919634807d68f69f9`, with DALI's existing local source changes applied. Upstream: https://github.com/owntone/owntone-server. The original license is `owntone/COPYING`. The patch against that upstream commit is `../engine/patches/dali-owntone.patch`.
+`owntone/` contains OwnTone 29.2 from upstream commit `84e3755198c44c36ddf91e9919634807d68f69f9`, with DALI's reviewed local source changes and V2 engine fixes applied. Upstream: https://github.com/owntone/owntone-server. The original license is `owntone/COPYING`. The patch against that upstream commit is `../engine/patches/dali-owntone.patch`.
 
-The changes concern pipe playback timing, fractional progress accounting, AirPlay/RAOP delivery recovery, diagnostics, per-speaker delay controls, and PTP. This source snapshot preserves the implementation used for DALI development. It is not proof that any previously installed binary exactly matches this tree.
+The exact file hashes and patch hash are recorded in `../engine/patches/owntone-source.json`. Verify them offline with `python3 scripts/engine-source-provenance.py` from the repository root. To verify exact reconstruction, add `--upstream /path/to/owntone-server`. The upstream checkout is read only. V2 behavior and test limits are documented in `../docs/v2/ENGINE.md`.
+
+The changes concern pipe playback timing, fractional progress accounting, AirPlay/RAOP delivery recovery, diagnostics, per-speaker delay controls, and PTP. The V2 snapshot also retains authored HTTP shutdown/admission fixes from local commits `8c426e2` and `8e8b5d8`; generated local build files are excluded. It is not proof that any previously installed binary exactly matches this tree.
 
 `libinotify-kqueue/` is the unmodified upstream commit `fe1dd41dae510034e6366f98bb5e8a916ad209f2`, version 20240724, from https://github.com/libinotify-kqueue/libinotify-kqueue. Its license is included in that directory.
 

@@ -1,12 +1,14 @@
-// DALI — single source of truth.
+// DALI — UI facade over room session, volume and timing owners.
 // State machine: idle -> starting -> streaming -> idle, or error.
 // Note: phase `.streaming` means the session/pipe is up — not that every
 // speaker is audibly healthy. UI chrome must read speaker `health` for that.
 
 import Foundation
 import SwiftUI
+import CoreWLAN
 import Observation
 import Network
+import SystemConfiguration
 
 enum StreamPhase: Equatable {
     case idle
@@ -29,6 +31,8 @@ struct RoomSpeaker: Identifiable, Equatable {
     var relVolume: Double   // 0...100, the speaker's own slider
     var gain: Double = 1.0  // calibration multiplier (0.25...4): balances an
                             // amp+passive front against a self-amped Sonos
+    var levelCurve: SpeakerLevelCurve? = nil  // measured gain by Mac volume step; when set it replaces `gain`
+    var balanceTrim: Double = 0               // -30...30 %, shifts the whole curve
     var offsetMs: Int = 0   // sync trim (±ms, positive = plays later); engine-persisted
     var health: Health
     var available: Bool = true
@@ -37,6 +41,9 @@ struct RoomSpeaker: Identifiable, Equatable {
 @MainActor
 @Observable
 final class DALIStore {
+    private let preferences: UserDefaults
+    private let backendEnabled: Bool
+    private let injectedVolumeWrite: RoomVolumeCoordinator.Write?
     // MARK: published state
     var phase: StreamPhase = .idle {
         didSet {
@@ -48,12 +55,30 @@ final class DALIStore {
             // holding video back by a delay that no longer existed. Any phase
             // that is not live must say so immediately.
             if phase != .streaming {
-                syncBeacon.publish(streaming: false, delaySeconds: nil)
+                if backendEnabled { syncBeacon.publish(streaming: false, delaySeconds: nil) }
                 cancelVolumePush()
             }
-            if !phase.isOn { sessionMembership.reset() }
+            if !phase.isOn {
+                sessionMembership.reset()
+                resetOffsetCache()
+                if backendEnabled { enqueueSessionTeardown() }
+            }
             // What-is-playing only matters while the room can hear it.
-            NowPlayingMonitor.shared.setActive(phase == .streaming)
+            if backendEnabled { NowPlayingMonitor.shared.setActive(phase == .streaming) }
+            // While the room is live or connecting, ask macOS for precise timers and no App Nap
+            // so a busy Mac does not coalesce or stretch the capture, level and recovery timing.
+            if backendEnabled { setLatencyCritical(phase.isOn) }
+        }
+    }
+    private var latencyActivity: NSObjectProtocol?
+    private func setLatencyCritical(_ on: Bool) {
+        if on, latencyActivity == nil {
+            latencyActivity = ProcessInfo.processInfo.beginActivity(
+                options: [.userInitiated, .latencyCritical, .idleSystemSleepDisabled],
+                reason: "Streaming audio to the speakers")
+        } else if !on, let token = latencyActivity {
+            ProcessInfo.processInfo.endActivity(token)
+            latencyActivity = nil
         }
     }
     var speakers: [RoomSpeaker] = []
@@ -98,21 +123,26 @@ final class DALIStore {
             // a capture gap into live audio — nor churn the Spotify helper.
             guard oldValue != source else { return }
             switch source {
-            case .system: UserDefaults.standard.set("", forKey: "dali.sourceApp")
-            case .app(_, let name): UserDefaults.standard.set(name, forKey: "dali.sourceApp")
-            case .spotify: UserDefaults.standard.set("Spotify", forKey: "dali.sourceApp")
+            case .system: preferences.set("", forKey: "dali.sourceApp")
+            case .app(_, let name): preferences.set(name, forKey: "dali.sourceApp")
+            case .spotify: preferences.set("Spotify", forKey: "dali.sourceApp")
             }
-            rebuildCaptureIfStreaming()
-            // Switching to/from Spotify toggles the Connect helper.
-            if source == .spotify { Task { await startSpotifyIfNeeded() } }
-            else { Task { await stopSpotify() } }
+            scheduleVolumePush()
+            guard backendEnabled else { return }
+            // A source owns the pipe for its whole session. Invalidate the
+            // old writer immediately; replacement startup drains its teardown
+            // before admitting either a tap or a Spotify child.
+            if phase.isOn, !playerMode {
+                stopStream()
+                startStream(reason: "source changed")
+            }
         }
     }
 
     /// Re-resolve a remembered app source by name (pids do not survive relaunch).
     func resolveSavedSource() {
         guard case .system = source,
-              let saved = UserDefaults.standard.string(forKey: "dali.sourceApp"),
+              let saved = preferences.string(forKey: "dali.sourceApp"),
               !saved.isEmpty,
               let app = NSWorkspace.shared.runningApplications.first(where: {
                   $0.activationPolicy == .regular && $0.localizedName == saved
@@ -121,15 +151,24 @@ final class DALIStore {
         source = .app(pid: app.processIdentifier, name: saved)
     }
 
-    /// The Mac's output volume 0...1. In All-audio mode this IS the room's
-    /// group volume: speaker output = slider x this. The keys/menu/HUD are
-    /// the master control; the app adds no second master.
-    var systemVolume: Double = 0.5
+    /// V1 receiver response plus the shared quiet-end taper below Mac step two.
+    var systemVolume: Double = 0.5 {
+        didSet {
+            if backendEnabled, oldValue != systemVolume {
+                aiEvent("volume_intent", fields: ["master": systemVolume,
+                    "pcm_gain": roomVolumePlan.pcmGain, "targets": roomVolumePlan.hardware])
+            }
+            scheduleVolumePush()
+        }
+    }
 
     /// Music level 0...1 for the room visualization.
     var audioLevel: Double = 0
     var bassLevel: Double = 0
     var trebleLevel: Double = 0
+    var midLevel: Double = 0
+    /// The real spectrum, 32 log-spaced bands 0...1 (empty when there is no capture).
+    var spectrum: [Float] = []
     /// The capture and health loops continue when the window is covered; only
     /// visual state publication pauses with the canvas.
     var roomCanvasVisible = true
@@ -156,24 +195,24 @@ final class DALIStore {
     ///
     /// Negative shows the picture sooner. It moves the room canvas by exactly
     /// the same amount, because both are answers to the same question.
-    var delayTrimMs: Double = UserDefaults.standard.double(forKey: "dali.delayTrimMs") {
+    var delayTrimMs: Double = 0 {
         didSet {
             let clamped = min(max(delayTrimMs, -400), 400)
             // Assigning inside our own didSet does not re-fire it, so do not
             // return here: the save and the beacon push below must still run.
             if clamped != delayTrimMs { delayTrimMs = clamped }
             guard clamped != oldValue else { return }
-            UserDefaults.standard.set(clamped, forKey: "dali.delayTrimMs")
+            preferences.set(clamped, forKey: "dali.delayTrimMs")
             // Straight out to the browser, so dragging moves the picture live
             // instead of waiting for the next flight tick.
             applyRoomDelay()
-            syncBeacon.publish(streaming: phase == .streaming, delaySeconds: roomDelaySec)
+            if backendEnabled { syncBeacon.publish(streaming: phase == .streaming, delaySeconds: roomDelaySec) }
         }
     }
 
     /// THE ROOM IS BEHIND THE MAC, AND SO IS ITS PICTURE.
     ///
-    /// Every speaker deliberately waits `startBuffer + 200 ms` (≈0.9 s) before
+    /// Every speaker deliberately waits `startBuffer + 200 ms` (≈0.7 s with the 500 ms buffer) before
     /// playing what the tap just captured — that lead is the whole reason the
     /// browser extension holds video back. The room canvas was reading the tap
     /// DIRECTLY, so it drew each beat a second before the speakers played it:
@@ -225,6 +264,11 @@ final class DALIStore {
             "speakers": spk,
             "chrome": roomChrome.pillLabel.isEmpty ? phaseLabel : roomChrome.pillLabel.lowercased(),
             "mac_volume": systemVolume.isFinite ? Int(systemVolume * 100) : 0,
+            "software_gain": captureMasterGain,
+            "room_muted": roomVolumePlan.pcmGain == 0 || roomVolumePlan.hardware.values.allSatisfy { $0 == 0 },
+            "signal_samples": lastFlight?.signalSamples ?? 0,
+            "source_dbfs": (lastFlight.flatMap { $0.signalSamples > 0 ? $0.sourceRMSDBFS : nil } as Any?) ?? NSNull(),
+            "output_dbfs": (lastFlight.flatMap { $0.signalSamples > 0 ? $0.outputRMSDBFS : nil } as Any?) ?? NSNull(),
             "backlog_ms": Int(Double(st.pending ?? 0) / 176.4),
             "rate_ppm": Int(-refill.eps * 1_000_000),
             "rate_hold": driftFreeze.isEmpty ? "none" : driftFreeze,
@@ -251,12 +295,14 @@ final class DALIStore {
         case starting
         case live
         case catchingUp
+        case muted
         case speakerOut
         case error(String)
 
         var pillLabel: String {
             switch self {
             case .live: return "LIVE"
+            case .muted: return "MUTED"
             case .catchingUp: return "CATCHING UP"
             case .speakerOut: return "SPEAKER OUT"
             case .error: return "NEEDS YOU"
@@ -267,6 +313,7 @@ final class DALIStore {
         var menuLabel: String {
             switch self {
             case .live: return "Playing in the room"
+            case .muted: return "Room muted"
             case .catchingUp: return "Getting a speaker back…"
             case .speakerOut: return "A speaker dropped out"
             case .starting: return "Connecting…"
@@ -301,6 +348,8 @@ final class DALIStore {
             }
             let enabled = speakers.filter(\.enabled)
             if enabled.isEmpty { return .error("Choose a speaker in Room settings") }
+            let volume = roomVolumePlan
+            if volume.pcmGain == 0 || volume.hardware.values.allSatisfy({ $0 == 0 }) { return .muted }
             if enabled.contains(where: { !$0.available }) { return .speakerOut }
             if enabled.contains(where: { $0.health == .trouble }) { return .speakerOut }
             if enabled.contains(where: { $0.health != .live }) { return .catchingUp }
@@ -316,154 +365,15 @@ final class DALIStore {
     private var lastFlight: CaptureController.Flight?
     private var lastFlightFlags = ""
     private var aiSessionID = String(UUID().uuidString.prefix(8)).lowercased()
-    private var progressAnchorMs: Int?     // OwnTone item_progress_ms at lock start
-    private var writtenAnchor: Int?        // bytes written at the same instant
-    private var trueFillEMA = 0.0          // lightly smoothed true backlog, seconds (display)
-    private var nonPlayAnchorStrikes = 0   // consecutive non-play polls (grace before re-anchor)
-    private var flightTick = 0             // completed flight ticks this session (paces the /api/outputs poll)
-    private var lastFlightSpkInfo = ""     // speaker link summary from the last /api/outputs poll
-    /// After a flight poll fails, leave the engine alone until this time. A
-    /// wedged OwnTone answers nothing, and every extra request queued behind the
-    /// stall is a connection our own timeout later slams shut mid-service.
+    private var timingController = RoomTimingController()
+    /// Notices a room stuck seconds behind the Mac after a stall (see
+    /// LatencyBacklogMonitor). Browser video follows the nominal delay, so an
+    /// uncleared backlog is exactly what puts the picture ahead of the sound.
+    private var backlogMonitor = LatencyBacklogMonitor()
+    private var refill: RefillController { timingController.refill }
+    private var driftFreeze: String { timingController.hold }
     private var flightApiBackoffUntil = Date.distantPast
 
-    // MARK: rate matcher
-    //
-    // ---- WHAT IS ACTUALLY WRONG -----------------------------------------
-    // The pipeline is
-    //     us --write--> [kernel FIFO, 46 ms] --pipe.c--> [input_buffer, cap
-    //     2.18 s] --player.c, 10 ms setitimer tick--> AirPlay
-    // and the player's tick runs slightly LONG, so it drains the pipe about
-    // 0.4% slower than we fill it. The surplus accumulates invisibly inside
-    // OwnTone's input_buffer — which is exactly why `appBuf` reads 0.00 s the
-    // whole time the latency is ratcheting: the buffer that is filling is not
-    // ours. Measured across 553 s with the varispeed pinned at exactly 1.0,
-    // three independent ways: -4011 ppm (item_progress vs wall clock),
-    // +4069 ppm (d(fill)/dt), +2979 ppm (engine's own `clock - pts` slope).
-    // Unchecked that is 14 s of latency per hour; it collides with the 2.18 s
-    // input threshold and with OwnTone's PLAYER_READ_BEHIND_MAX suspend, which
-    // flushes every AirPlay output at once = the audible dropout.
-    //
-    // ---- WHY THIS LOOP CANNOT BECOME THE OLD ONE -------------------------
-    // The deleted controller was P+I on the fill ERROR. Its fatal property was
-    // that a starved pipe makes item_progress_ms under-advance, which
-    // OVER-estimates fill, which commanded a harder drain, which starved it
-    // further — and the integral then welded it to the rail (RATECLAMP on 454
-    // log lines). Three structural changes make that impossible here:
-    //
-    //   1. THE LOOP INTEGRATES THE SLOPE OF FILL, NOT THE FILL ITSELF.
-    //      `corr += KR * d(fill)/dt` converges to the plant's true rate skew
-    //      (proof in the update site below) and is INDIFFERENT to fill's
-    //      absolute value. The starvation ratchet corrupts fill's absolute
-    //      value permanently but its slope only while starvation is ongoing —
-    //      and ongoing starvation is directly detectable on our own side.
-    //   2. EVERY DETECTABLE STARVATION CAUSE FREEZES THE LOOP. Drops, capture
-    //      gaps, tap rebuilds, converter rebuilds, backpressure, silence-fed
-    //      intervals, engine restarts, API hangs, implausible fill jumps.
-    //   3. A NO-FEEDBACK WATCHDOG. If a correction has been applied for 90 s
-    //      and fill moved AGAINST it, the plant is not behaving like the model,
-    //      so the loop hard-resets and locks out for 180 s. In the old runaway
-    //      this condition was true continuously; it would have fired within 90 s
-    //      and could never have been sustained for more than a third of the time.
-    private var rateInt = 0.0              // slow estimate of plant skew, fraction. The ONLY integrator.
-    private var fillSlow: Double?          // heavily smoothed fill (seconds) — the control input
-    private var errInt = 0.0               // ∫ fill-error, folded into rateInt; recentering only
-    private var slopeAnchorFill = 0.0      // fillSlow when the current rate window opened
-    private var slopeAnchorAge = 0.0       // seconds accumulated in that window
-    private var slopeAnchorCorr = 0.0      // ∫ applied correction over that window
-    private var lastSlopePpm = 0.0         // last measured plant skew, for the log
-    private var driftCorr = 0.0            // last commanded correction, fraction
-    private var fillJumpStrikes = 0        // consecutive implausible fill readings
-    private var driftLockoutSec = 0.0      // >0 => hard-frozen at ratio 1.0
-    private var authRunSec = 0.0           // seconds corr has held one direction outside the deadzone
-    private var authRunSign = 0            // +1 draining, -1 filling, 0 idle
-    private var authRunStartFill = 0.0     // fillSlow when that run opened
-    private var driftFreeze = "startup"    // why the loop is not steering right now ("" = steering)
-    /// Running integral of APPLIED correction, in seconds — our own copy of what
-    /// OwnTone calls `read_deficit`. Positive = we have cumulatively delivered
-    /// this much LESS audio than real time. See ASYMMETRY 3.
-    private var netDrainSec = 0.0
-    /// The debt cap can cross its boundary every second. Track the state but
-    /// rate-limit prose so a harmless control oscillation cannot flood the log.
-    private var debtCapActive = false
-    private var debtCapLastLogAt = Date.distantPast
-
-    // ---- REFILL CONTROLLER (the only thing that touches the ratio now) ------
-    // One-sided, slew-limited, budgeted stretch that gives back read-ahead the
-    // engine has lost (slow wear + step drops). Everything above (the retired
-    // closed loop) is kept only for its validity gates and fill bookkeeping; its
-    // commanded correction is discarded every tick. Design and limits: see
-    // `RefillController` in BeamCapture/Varispeed.swift.
-    private var refill = RefillController()
-    /// Seconds left in the post-volume-change settle window (the engine's player
-    /// thread stalls on RTSP volume writes and its progress clock lies afterwards).
-    private var refillVolHoldSec = 0.0
-    private var refillVolSig = ""
-    /// Fill (seconds) to assume at the NEXT anchor instead of the start buffer.
-    /// Set only when the anchor is dropped for a bad progress reading with the
-    /// stream itself untouched, so a real deficit is not forgiven by re-anchoring.
-    private var anchorCarryFill: Double?
-    /// The fill the current anchor was opened at (start buffer, or the carry).
-    private var fillBaseSec = 0.0
-
-    /// ±0.5% authority. Enforced again inside CaptureController.setTargetRatio.
-    private static let driftRail = CaptureController.driftRail
-    private static let driftDeadzone = CaptureController.driftDeadzone
-    /// Rate-loop cadence. Long enough that d(fill)/dt is dominated by real skew
-    /// rather than by the 1 s quantisation of item_progress_ms (±1 s over a 15 s
-    /// window is ±67000 ppm of instantaneous noise, which the KR gain and the
-    /// fill EMA together attenuate by ~100x).
-    private static let driftAdjustSec = 15.0
-    /// Rate-matching gain, per adjust step. 0.15 per 15 s => the estimate of the
-    /// plant skew converges with a time constant of 15/0.15 = 100 s. That is the
-    /// loop's ONLY fast path and it is still two orders of magnitude slower than
-    /// the old controller, which could swing the full rail in ~6 s.
-    private static let driftKR = 0.15
-    /// Fill-error proportional gain, per second. 1.0 s of error commands 1200
-    /// ppm, so the P path alone has a time constant of 1/0.0012 = 833 s. It only
-    /// exists to stop the absolute latency wandering; it is deliberately far too
-    /// weak to chase a transient.
-    private static let driftKP = 0.0012
-    /// Fill-error integral, per second squared. 1.0 s of standing error takes
-    /// ~15 min to contribute 2000 ppm. This is the recentering term and the only
-    /// place windup is even conceivable, so it is clamped hard (see below).
-    private static let driftKI = 2.2e-6
-    /// EMA time constant on fill. item_progress_ms is 1 s quantised, so the raw
-    /// fill has ~±0.05 s of quantisation noise; 20 s of smoothing puts the
-    /// measurement noise well under the 0.10 s watchdog threshold.
-    private static let driftFillTau = 20.0
-    /// A fill reading this far from the smoothed value is not physically
-    /// reachable in one poll (the rail permits 5 ms/s) — it is an engine restart,
-    /// a seek, or a counter reset. Reject the sample.
-    private static let driftJumpSec = 0.5
-    private static let driftWatchdogSec = 90.0
-    /// How much cumulative under-delivery we allow. OwnTone suspends playback at
-    /// 1.5 s (`read_deficit_max`, player.c), so this is a fifth of the distance
-    /// to a flush — enough headroom that a burst of jitter on top of a full
-    /// budget still cannot reach it.
-    private static let drainBudgetSec = 0.30
-    /// Repayment rate once over budget: 1000 ppm of over-delivery. Slow enough to
-    /// be inaudible (under 2 cents), fast enough to clear a full budget in ~5
-    /// minutes.
-    private static let drainRepayRate = 0.001
-    /// Same watchdog, but for a correction pinned at the rail. At the rail the
-    /// loop has spent its entire authority, so "still moving the wrong way" is
-    /// already proof it has none — there is nothing left to wait for and no
-    /// stronger correction to escalate to. 30 s is long enough that a burst of
-    /// volume-push jitter can't trip it and short enough that a phantom fill
-    /// ramp (see the flat clock-divergence note below) can't run for minutes.
-    private static let driftRailWatchdogSec = 30.0
-    // LOCKOUT LENGTH — observed failing in the field, do not raise again.
-    //
-    // 180 s was chosen to bound worst-case authority if the loop's measurement
-    // were inverted. But a lockout is a window in which NOTHING corrects, and
-    // the plant refills at several thousand ppm — so a 3-minute lockout let
-    // fill ratchet 0.89 -> 1.64 s unopposed (dali-flight 2026-08-01 16:54,
-    // `hold=lockout` on every line). That is the glitch interval, caused by the
-    // guard rather than by drift. 30 s still breaks any runaway feedback (the
-    // loop cannot re-establish a wrong correction faster than its 100 s time
-    // constant) while leaving the buffer defended the rest of the time.
-    private static let driftLockoutSec_ = 30.0
     private nonisolated static let flightLogURL = FileManager.default
         .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         .appendingPathComponent("DALI/dali-flight.log")
@@ -519,37 +429,21 @@ final class DALIStore {
     }
 
     private func startFlightRecorder() {
+        guard backendEnabled else { return }
         flightTask?.cancel()
-        lastFlight = nil
-        lastFlightFlags = ""
+        lastFlight = nil; lastFlightFlags = ""
         aiSessionID = String(UUID().uuidString.prefix(8)).lowercased()
-        lastStatsLogAt = Date()
-        flightTick = 0
-        lastFlightSpkInfo = ""
+        lastStatsLogAt = Date(); lastDropped = capture.stats.dropped
         flightApiBackoffUntil = .distantPast
-        lastDropped = capture.stats.dropped
         resetDriftAnchors()
-        driftFreeze = "startup"
-        Self.flog("=== stream start: \(sessionSpeakerSummary()) | startBuffer=\(Self.savedStartBufferMs())ms | rateMatcher rail=±\(String(format: "%.2f", Self.driftRail*100))% tau=\(Int(Self.driftAdjustSec / Self.driftKR))s ===")
-        aiEvent("stream_start", fields: [
-            "speakers": sessionSpeakerSummary(),
-            "start_buffer_ms": Self.savedStartBufferMs(),
-            "source": source.label,
-        ])
-        aiHealth([
-            "phase": "streaming", "speakers": sessionSpeakerSummary(),
-            "source": source.label, "status": "warming_up",
-        ])
+        backlogMonitor = LatencyBacklogMonitor()
+        let generation = streamGeneration
+        aiEvent("stream_start", fields: ["speakers": sessionSpeakerSummary(),
+                                        "start_buffer_ms": config.startBufferMs, "source": source.label])
         flightTask = Task { [weak self] in
             while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: 1_000_000_000)
-                // `guard let self ... else { continue }` spun this task forever
-                // once the store was gone: nothing inside the loop could ever
-                // cancel it again. A missing self means the app is tearing down.
-                guard let self else { return }
-                // Every path back into `.streaming` starts a fresh recorder, so a
-                // task that outlives its session has nothing left to do.
-                guard self.phase == .streaming else { return }
+                do { try await Task.sleep(for: .seconds(1)) } catch { return }
+                guard let self, self.streamIsCurrent(generation) else { return }
                 await self.recordFlight()
             }
         }
@@ -560,680 +454,60 @@ final class DALIStore {
     }
 
     private func recordFlight() async {
-        let f = capture.readMetrics()
-        let prev = lastFlight
-        lastFlight = f
-        guard let p = prev else { return }   // need a delta
-        // Real elapsed time, not the nominal 1 s. The loop sleeps 1 s and then
-        // makes two HTTP calls, so its period is 1 s + API latency. Dividing by
-        // 1.0 is what made the old log report `produce=103.5%` on a perfectly
-        // healthy stream — it was measuring its own jitter.
-        let dt = min(max(f.intervalSec, 0.2), 10.0)
-        // THE DEBT LEDGER (see ASYMMETRY 3). Charge only drain BEYOND the matched
-        // plant skew (`rateInt`). Sustained rate matching must run forever; the
-        // old ledger billed that too, so a healthy ~+4000 ppm plant hit the 0.30s
-        // ceiling in ~75s and entered drain/repay cycling (wild skew, FILLHIGH).
-        // A freeze still counts: appliedCorr stays in force even when we stop
-        // steering, and excess over rateInt is what actually spends the budget.
-        netDrainSec += (f.appliedCorr - rateInt) * dt
-        let writtenDelta = f.written - p.written          // bytes the kernel pipe accepted
-        let produced = f.outBytes + f.silenceBytes        // bytes we made (post-varispeed + keepalive)
-        let dropDelta = f.dropped - p.dropped
-        let appBufSec = String(format: "%.2f", Double(f.pending) / 176_400)
-        let writtenPct = String(format: "%.1f", Double(writtenDelta) / (176_400 * dt) * 100)
-        let producedPct = String(format: "%.1f", Double(produced) / (176_400 * dt) * 100)
-        let writtenPctVal = Double(writtenDelta) / (176_400 * dt) * 100
-
-        // Live engine/AirPlay state + OwnTone's REAL playback clock. Time the call
-        // so a WEDGE (API going slow/unresponsive — the onset of the "weird noises
-        // then dies" failure) shows up in the log as apiMs/APIHANG instead of the
-        // recorder silently going blind right when we need the data.
-        var playerState = "?"
-        var progressMs: Int?
-        var spkInfo = lastFlightSpkInfo
         let generation = streamGeneration
-        flightTick += 1
-        // OwnTone's HTTP thread is single, and when a speaker handshake stalls it
-        // every queued request just waits — until OUR timeout closes the socket
-        // and OwnTone later serves a request whose connection is gone (the known
-        // SIGSEGV in evhttp_add_header_internal). So this poll (a) never runs two
-        // requests at once (it used to fire both in parallel, 2x/s, on top of the
-        // health loop), (b) is skipped while DALI itself is rejoining a speaker
-        // or resuming — the very window the engine is known to stall in — and
-        // (c) backs off after any failure instead of re-poking a wedged engine.
-        // /api/outputs is polled every third tick; the health loop reads it
-        // every 3 s anyway and the log line only needs the link summary.
-        let engineBusy = resumeInFlight || !speakerRecoveryInFlight.isEmpty
-            || Date() < flightApiBackoffUntil
-        let apiT0 = Date()
-        var ps: PlayerState?
-        var outs: [Output]?
-        if !engineBusy {
-            let client = api
-            // `uncancelled`: the recorder is cancelled on stop/restart, and a
-            // cancelled URLSession task closes its connection mid-request.
-            ps = await Self.uncancelled { try await client.playerState() }
-            var polledOutputs = false
-            if ps != nil, flightTick % 3 == 1 {
-                polledOutputs = true
-                outs = await Self.uncancelled { try await client.outputs() }
-            }
-            if ps == nil || (polledOutputs && outs == nil) {
-                flightApiBackoffUntil = Date().addingTimeInterval(6)
-            }
+        let f = capture.readMetrics()
+        let previous = lastFlight
+        lastFlight = f
+        let busy = resumeInFlight || !speakerRecoveryInFlight.isEmpty
+            || pushInFlight || Date() < flightApiBackoffUntil
+        let began = ContinuousClock.now
+        let ps = busy ? nil : try? await api.playerState()
+        let elapsed = began.duration(to: .now).components
+        let queryMs = Int(elapsed.seconds * 1_000 + elapsed.attoseconds / 1_000_000_000_000_000)
+        guard streamIsCurrent(generation) else { return }
+        if !busy, ps == nil { flightApiBackoffUntil = Date().addingTimeInterval(6) }
+        let written = f.written + max(0, capture.totalWritten - f.written) / 2
+        let sample = RoomTimingController.Sample(
+            dt: f.intervalSec, written: written, pending: f.pending,
+            produced: f.outBytes + f.silenceBytes, silence: f.silenceBytes,
+            dropped: max(0, f.dropped - (previous?.dropped ?? f.dropped)),
+            discontinuity: f.tapRebuilds > 0 || f.recoveries > 0 || f.tapOverruns > 0,
+            converterChanged: f.convRebuilds > 0, maximumGapMs: f.maxGapMs,
+            player: ps?.state, progressMs: ps?.item_progress_ms, queryMs: queryMs,
+            controlBusy: busy || Date().timeIntervalSince(lastVolumeWriteAt) < 15)
+        let result = timingController.update(sample, target: Double(config.startBufferMs) / 1_000)
+        capture.setTargetRatio(result.ratio)
+        if !playerMode, !resumeInFlight,
+           backlogMonitor.update(dt: f.intervalSec, pendingBytes: f.pending,
+                                 playing: busy ? nil : ps.map { $0.state == "play" }) {
+            let queued = String(format: "%.2f", Double(f.pending) / LatencyBacklogMonitor.bytesPerSecond)
+            dlog("room stuck behind the Mac: \(queued)s queued behind a full engine buffer -> replaying the pipe")
+            aiEvent("latency_backlog_replay", level: "warn", fields: ["queued_sec": queued])
+            Task { [weak self] in await self?.resumePlaybackOnce(reason: "latency backlog") }
         }
-        let apiMs = Int(Date().timeIntervalSince(apiT0) * 1000)
-        // The session may have stopped, restarted or been re-anchored while the
-        // requests were in flight; a stale sample must not touch the new one's
-        // anchors, ledger or beacon.
-        guard phase == .streaming, generation == streamGeneration else { return }
-        if let ps { playerState = ps.state; progressMs = ps.item_progress_ms }
-        let apiHang = ps == nil && !engineBusy
-        if engineBusy { playerState = "busy" }
-        if let outs {
-            spkInfo = speakers.filter { $0.enabled }.map { sp -> String in
-                let o = outs.first { $0.id == sp.id }
-                let sel = (o?.selected ?? false) ? "on" : "OFF"
-                let link = (o?.streaming ?? false) ? "stream" :
-                    ((o?.connected ?? false) ? "connected" : "DEAD")
-                return "\(sp.name)[\(sel) \(link) v\(o?.volume ?? -1)/want\(effectiveVolume(sp))]"
-            }.joined(separator: " ")
-            lastFlightSpkInfo = spkInfo
+        if let event = result.event {
+            aiEvent("refill_transition", fields: ["event": String(describing: event),
+                                                  "state": refill.label, "hold": result.hold])
         }
-
-        // ---- TRUE backlog from OwnTone's playback clock ---------------------
-        // fill = bytes we've handed the pipe MINUS bytes OwnTone has rendered.
-        // This is the real, otherwise-invisible end-to-end buffer depth. We anchor
-        // both counters at the first sane reading so only the DELTA matters —
-        // then add the start buffer back in: OwnTone begins playback with a full
-        // start_buffer already accumulated, so at the anchor poll the real backlog
-        // is startBufferSec while the raw delta reads 0. (The old code targeted
-        // an absolute 1.2s against that zero-based delta: err=-1.2 railed the
-        // varispeed to +0.6% overproduction, and ~228s in the growing backlog hit
-        // the FIFOWriter drop cap — the always-at-~4-minutes glitch.)
-        let startBufferSec = Double(config.startBufferMs) / 1000.0
-        // TIMING FIX. `f.written` was sampled BEFORE the player-state request, but
-        // item_progress_ms is read somewhere INSIDE it, so every fill sample was
-        // short by the request latency (a 1.3 s API stall read as ~1 s of missing
-        // buffer). Sample the byte counter again after the reply and use the
-        // midpoint of the round trip. (Slow replies are rejected outright below.)
-        let writtenAfterAPI = capture.totalWritten
-        let written = f.written + max(0, writtenAfterAPI - f.written) / 2
-        var trueFillSec: Double? = nil
-        var fillRaw: Double? = nil
-        // Set when the anchor was actually dropped below, so the drift gate can
-        // tell a real re-anchor from a transient non-play poll. (Reading
-        // nonPlayAnchorStrikes there would never work: it is reset to 0 by the
-        // very branch that performs the re-anchor.)
-        var reAnchored = false
-        if playerState == "play", let pm = progressMs {
-            nonPlayAnchorStrikes = 0
-            if let pa = progressAnchorMs, let wa = writtenAnchor {
-                let renderedBytes = Double(pm - pa) / 1000.0 * 176_400.0
-                let writtenBytes = Double(written - wa)
-                let fill = fillBaseSec + (writtenBytes - renderedBytes) / 176_400.0   // seconds, absolute
-                fillRaw = fill
-                // EMA smooth (progress clock is coarse, 1s granularity).
-                trueFillEMA = trueFillEMA == 0 ? fill : trueFillEMA * 0.6 + fill * 0.4
-                trueFillSec = trueFillEMA
-            } else {
-                progressAnchorMs = pm; writtenAnchor = written      // first lock
-                // Fresh engine stream: the backlog at the anchor IS the start
-                // buffer. After a bad-progress re-anchor on a live stream it is
-                // whatever we last measured (see anchorCarryFill).
-                fillBaseSec = anchorCarryFill ?? startBufferSec
-                anchorCarryFill = nil
-            }
-        } else if ps == nil {
-            // The engine simply did not ANSWER (API hang, backoff, resume or
-            // speaker recovery in flight — "busy"). That says nothing about the
-            // playback clock, and the anchor is delta-based so a gap in polling
-            // cannot invalidate it. It used to count as a non-play strike, so any
-            // 3 s API stall (every RTSP volume write) dropped the anchor and
-            // re-assumed a full start buffer: a real deficit was forgiven and the
-            // fill read 0.50 again. Do nothing; the gates below hold the loop.
-        } else {
-            // A transient non-"play" poll (rebuffer blip) must NOT re-anchor:
-            // re-anchoring re-hides the accumulated backlog, the controller
-            // re-rails to overproduction, and the ~4-min grow-then-drop cycle
-            // restarts — that is what made the glitch RECUR. Only a sustained
-            // stop (3 consecutive polls) re-anchors; a real engine respawn goes
-            // through resetDriftAnchors().
-            nonPlayAnchorStrikes += 1
-            if nonPlayAnchorStrikes >= 3 {
-                progressAnchorMs = nil; writtenAnchor = nil; trueFillEMA = 0
-                nonPlayAnchorStrikes = 0
-                reAnchored = true
-            }
-        }
-
-        // ---- Rate matcher ---------------------------------------------------
-        // Setpoint is the buffer OwnTone establishes for itself at start: at the
-        // anchor poll the raw delta is 0 and the real backlog is start_buffer_ms,
-        // so `fill` is already expressed on that scale.
-        let targetFill = startBufferSec
-
-        // 1. VALIDITY GATE. Anything that makes this interval's byte accounting
-        //    or the progress clock untrustworthy freezes the loop. `hard` means
-        //    the pipeline itself was discontinuous, so the learned skew estimate
-        //    is meaningless and must go too.
-        var freeze = ""
-        var hard = false
-        if driftLockoutSec > 0 {
-            driftLockoutSec = max(0, driftLockoutSec - dt); freeze = "lockout"; hard = true
-        } else if f.tapRebuilds > 0 || f.recoveries > 0 || f.tapOverruns > 0 {
-            freeze = "taprebuild"; hard = true            // varispeed was reset under us
-        } else if dropDelta > 0 {
-            // FIFOWriter discarded audio: `written` no longer equals what we
-            // produced, so every byte-difference downstream of here is wrong.
-            freeze = "drop"; hard = true
-        } else if writtenDelta < 0 {
-            // The byte counter went BACKWARDS: capture swapped in a fresh
-            // FIFOWriter, so the anchor is in the old counter's coordinates and
-            // every fill number derived from it (hugely negative, typically) is
-            // fiction. Drop the anchor and start again from a clean one.
-            freeze = "writereset"; hard = true
-            progressAnchorMs = nil; writtenAnchor = nil; trueFillEMA = 0; fillSlow = nil
-            trueFillSec = nil; fillRaw = nil
-        } else if playerState != "play" {
-            freeze = "notplaying"; hard = reAnchored
-        } else if apiHang || progressMs == nil {
-            freeze = "apihang"
-        } else if apiMs > 250 {
-            // The progress clock was read at an unknown moment inside a slow round
-            // trip, so this sample is uncertain by up to half the latency. Reject it.
-            freeze = "apislow"
-        } else if trueFillSec == nil || fillRaw == nil {
-            // No anchor yet (or it was just dropped): there is no fill to steer
-            // on, and the stale smoothed value must not survive into the next
-            // anchor's coordinate system.
-            freeze = "noanchor"; hard = true; fillSlow = nil
-        } else if f.convRebuilds > 0 {
-            freeze = "convrebuild"                        // resampler discontinuity
-        } else if f.maxGapMs > 120 {
-            freeze = "capturegap"                         // we under-produced for a non-skew reason
-        } else if Double(f.pending) / 176_400 > 0.25 {
-            // Real backpressure: OwnTone stopped accepting, so `written` is no
-            // longer a proxy for what it consumed and fill is garbage.
-            freeze = "backpressure"
-        } else if Double(f.silenceBytes) > 0.25 * Double(max(produced, 1)) {
-            // Keepalive silence is wall-clock paced and bypasses the varispeed,
-            // so this interval cannot tell us what our correction did.
-            freeze = "silencefed"
-        } else if abs(f.appliedCorr - driftCorr) > Self.driftRail * 0.5 && driftCorr != 0 {
-            // Commanded and applied disagree by more than half the rail: the
-            // ratio moved mid-interval or something diluted it. Skip.
-            freeze = "corrmismatch"
-        }
-
-        // 2. Implausible fill reading. The rail permits 5 ms of change per
-        //    second; anything near 0.5 s in one poll is a restart, a seek, or a
-        //    counter reset, never drift. Reject the sample; three in a row means
-        //    the anchor itself is stale, so re-anchor.
-        if freeze.isEmpty, let raw = fillRaw, let s = fillSlow, abs(raw - s) > Self.driftJumpSec {
-            fillJumpStrikes += 1
-            freeze = "filljump"
-            if fillJumpStrikes >= 3 {
-                hard = true
-                // The progress clock jumped (stall catch-up, counter reset); the
-                // stream itself was not restarted, so the buffer we measured
-                // before the jump is still our best belief. Re-anchor ON it, not
-                // on a fresh start buffer, or a real deficit is forgiven here.
-                anchorCarryFill = min(max(s, -1.0), 3.0)
-                progressAnchorMs = nil; writtenAnchor = nil; trueFillEMA = 0; fillSlow = nil
-                fillJumpStrikes = 0
-            }
-        } else if freeze.isEmpty {
-            fillJumpStrikes = 0
-        }
-
-        // 3. Track the smoothed control input. Only advanced on valid samples,
-        //    so a frozen interval never injects a step into the slope window.
-        if freeze.isEmpty, let raw = fillRaw {
-            if fillSlow == nil {
-                // First value in a fresh anchor's coordinate system. Open the
-                // slope window ON it, so the first 15 s measurement cannot see a
-                // step between the placeholder anchor and reality and mistake it
-                // for tens of thousands of ppm of drift.
-                fillSlow = raw
-                slopeAnchorFill = raw; slopeAnchorAge = 0; slopeAnchorCorr = 0
-            } else {
-                let a = 1 - exp(-dt / Self.driftFillTau)
-                fillSlow = fillSlow! + a * (raw - fillSlow!)
-            }
-        }
-
-        // 4. CONTROL UPDATE.
-        if hard {
-            // Wipe everything learned: the plant we measured is not the plant we
-            // now have. Ratio goes to exactly 1.0, which is the bit-transparent
-            // passthrough — the safest possible state.
-            rateInt = 0; errInt = 0; driftCorr = 0
-            lastSlopePpm = 0  // don't keep printing a stale tens-of-thousands ppm
-            slopeAnchorAge = 0; slopeAnchorCorr = 0; slopeAnchorFill = fillSlow ?? targetFill
-            authRunSec = 0; authRunSign = 0
-        } else if freeze.isEmpty, let fs = fillSlow {
-            let err = fs - targetFill
-            slopeAnchorAge += dt
-            slopeAnchorCorr += f.appliedCorr * dt        // ∫ applied correction over the window
-            if slopeAnchorAge >= Self.driftAdjustSec {
-                // THE RATE MATCHER. Let `skew` be the plant's true rate mismatch
-                // and `corr` our correction. By construction
-                //     d(fill)/dt = skew - corr
-                // so this update is
-                //     corr += KR * (skew - corr)
-                // i.e. a first-order convergence of corr onto skew with time
-                // constant driftAdjustSec/KR = 100 s. It has ONE real, strictly
-                // negative eigenvalue: it cannot oscillate, cannot overshoot,
-                // and — crucially — has no dependence whatsoever on fill's
-                // absolute value, which is the quantity the starvation ratchet
-                // corrupts. When it has converged, d(fill)/dt is zero and the
-                // update stops: it is self-terminating, not self-reinforcing.
-                let slope = (fs - slopeAnchorFill) / slopeAnchorAge      // s/s
-                // Reported skew is the PLANT's, so add back the mean correction
-                // we were applying across the whole window (not just this poll's).
-                lastSlopePpm = (slope + slopeAnchorCorr / slopeAnchorAge) * 1e6
-                rateInt += Self.driftKR * slope
-                // Recentering only. `rateInt` holds the drift at zero but at
-                // whatever latency it happened to inherit (the fill error has a
-                // free integrator and no restoring force of its own). This is a
-                // SEPARATE term, clamped to a third of the rail, so the only
-                // windup-capable quantity in the loop is bounded to 1667 ppm.
-                errInt = min(max(errInt + Self.driftKI * err * slopeAnchorAge,
-                                 -Self.driftRail / 3), Self.driftRail / 3)
-                rateInt = min(max(rateInt, -Self.driftRail), Self.driftRail)
-                slopeAnchorFill = fs; slopeAnchorAge = 0; slopeAnchorCorr = 0
-            }
-            // ASYMMETRY 1: the two failures are not symmetric in consequence.
-            // Running dry underruns and is audible within seconds; running full
-            // takes minutes to reach OwnTone's 2.18 s cap and is silent until it
-            // does. So the P term is 3x stronger below the setpoint than above.
-            // This only ever strengthens the FILL direction, which by
-            // construction cannot starve anything — it is the one direction in
-            // which being wrong is harmless. (Simulated: a -3000 ppm plant
-            // otherwise costs 0.6 s of buffer before the loop catches it, which
-            // does not fit under a 0.7 s start buffer.)
-            let kp = err < 0 ? Self.driftKP * 3 : Self.driftKP
-            var c = rateInt + errInt + kp * err
-            // ASYMMETRY 2: two states where one direction is unambiguously wrong
-            // no matter what fill claims.
-            if fs < 0.25 { c = min(c, 0) }                  // nearly empty: never drain
-            if fs > targetFill + 2.0 { c = max(c, 0) }      // over the engine's own cap: never fill
-            c = min(max(c, -Self.driftRail), Self.driftRail)
-            // ASYMMETRY 3 — THE DEBT CEILING. This is the fix for the glitch.
-            //
-            // A positive correction does not just "drain the backlog": it makes
-            // the varispeed emit FEWER frames than real time, which is literally
-            // under-delivery to the engine. OwnTone counts every byte we fail to
-            // provide in `pb_session.read_deficit` and, at
-            // `read_deficit_max` = 264600 bytes = EXACTLY 1.5 s cumulative, does
-            // this (player.c:1491):
-            //
-            //     "Source is not providing sufficient data, temporarily
-            //      suspending playback" -> pb_suspend()
-            //
-            // Suspend flushes and restarts the stream. Observed 2026-08-01
-            // 19:44:29, and the engine's own clock stepped 515 ms across it
-            // (clock-pts -528 ms -> -13 ms). That step IS the audible glitch, and
-            // the flight log shows the whole cycle repeating four times in six
-            // minutes. Held at the +0.50% rail, 1.5 s of debt accrues in five
-            // minutes — which is the "it glitches after a few minutes" report,
-            // exactly.
-            //
-            // Nothing upstream bounded this: the rail bounds the RATE, and the
-            // no-feedback watchdog bounds how long one DIRECTION runs, but the
-            // quantity that actually kills us is the running INTEGRAL, and
-            // nothing was tracking it. So track it — in the engine's own units,
-            // against a budget well under its limit.
-            //
-            // Deliberately asymmetric, because the two directions are not: too
-            // full costs latency and OwnTone back-pressures us long before it
-            // matters; too empty costs a flush and a restart. So filling is
-            // unbudgeted and draining is on a short leash.
-            // (Enforced below, unconditionally — see `debt ceiling` before
-            //  setTargetRatio. Doing it only here would miss the case that
-            //  actually runs longest: a soft freeze HOLDS driftCorr in force
-            //  while never re-entering this branch, so a ratio frozen at the
-            //  rail would keep accruing debt with nothing to stop it.)
-            if abs(c) < Self.driftDeadzone { c = 0 }
-            driftCorr = c
-        }
-        // (soft freeze: driftCorr, rateInt and errInt are all held unchanged —
-        //  a one-second hiccup must not throw away 100 s of learning — but the
-        //  slope window is discarded, because it now spans an invalid interval.)
-        if !freeze.isEmpty {
-            slopeAnchorAge = 0; slopeAnchorCorr = 0; slopeAnchorFill = fillSlow ?? targetFill
-        }
-        // The retired loop's command is never applied (see the refill controller
-        // below). Zero it HERE so the watchdog that follows cannot see a phantom
-        // "filling" run, trip on a fill drop it did not cause, and hard-freeze the
-        // real controller (NOFEEDBACK -> 30 s lockout) exactly when fill is low.
-        driftCorr = 0
-
-        // 5. NO-FEEDBACK WATCHDOG — the structural guarantee against the old
-        //    failure mode. If we have been correcting in one direction for 90 s
-        //    and fill has moved AGAINST that correction by more than the
-        //    measurement noise, then either the measurement is inverted (exactly
-        //    what starvation does to item_progress_ms) or the plant's skew
-        //    exceeds our whole authority — and in both cases pushing harder is
-        //    useless or harmful. Hard reset and lock out for 180 s.
-        //
-        //    In the deleted controller's runaway this condition held
-        //    CONTINUOUSLY: drift welded to +0.60% while fill climbed.
-        //
-        //    THE BOUND. 90 s of run followed by a 180 s lockout caps the duty
-        //    cycle at 1/3, so the WORST-CASE sustained authority in any direction
-        //    is rail/3 = 1667 ppm even if the fill measurement is completely
-        //    inverted and every single decision is wrong. Per cycle the exposure
-        //    is 90 s x 0.005 = 0.45 s of buffer, against a 0.7 s start buffer
-        //    and OwnTone's 2.18 s input reserve.
-        //
-        //    Simulated against a faithful model of the old failure mode (fill
-        //    reported with the wrong sign wrt the correction, 6 h): the loop
-        //    trips 79 times, authority pins at +1650 ppm, and the TRUE buffer
-        //    never falls below its starting value — because this pipeline
-        //    refills itself at +4000 ppm, which out-runs the bound. Against the
-        //    real plant it holds fill inside 0.65-0.76 s for six hours with
-        //    zero trips.
-        //
-        //    HONEST LIMIT: if the measurement were inverted AND the plant had no
-        //    natural refill at all, 1667 ppm would still empty a 0.7 s buffer in
-        //    ~7 minutes (vs ~2 for the old controller). That case cannot be
-        //    distinguished from healthy operation by fill alone — any loop able
-        //    to cancel a real +4000 ppm inflow can, by definition, drain at
-        //    +4000 ppm when told to. It is bounded and loudly logged, not
-        //    eliminated. The freeze gates above exist to make it unreachable in
-        //    practice, since every mechanism that inverts the measurement
-        //    (drops, gaps, backpressure, restarts) is caught before this point.
-        //
-        //    If the trip repeats, the log says so on every line and the meaning
-        //    is unambiguous: this machine's skew exceeds ±0.5% and the rail needs
-        //    raising — not that the loop is misbehaving.
-        //    MEASURED 2026-08-01, and the reason the reset rule below changed.
-        //    A 70 s session ramped fill 0.74 s -> 2.16 s (~+25000 ppm) with the
-        //    correction pinned at the +0.50% rail the whole way. The engine's own
-        //    `Clock divergence ... clock - pts` over the SAME window stayed inside
-        //    -35..+6 ms with no trend — a real 25000 ppm consumption deficit would
-        //    have walked it to -1.8 s. So the engine was rendering in real time and
-        //    the ramp was a phantom: item_progress_ms under-reporting, exactly the
-        //    inverted-measurement case this watchdog was written for. It did not
-        //    fire, because `!freeze.isEmpty` RESET the run on every soft freeze and
-        //    backpressure/filljump blips came more often than every 90 s — 122
-        //    railed seconds produced 3 trips. A soft freeze means "this one second
-        //    is unreadable", not "forget the last 90"; it now pauses the run
-        //    instead of clearing it. Only a `hard` freeze (real pipeline
-        //    discontinuity, which already wiped the learned state) resets.
-        let sign = driftCorr > Self.driftDeadzone ? 1 : (driftCorr < -Self.driftDeadzone ? -1 : 0)
-        let railedNow = abs(driftCorr) >= Self.driftRail - 1e-9
-        if sign == 0 || sign != authRunSign || hard {
-            authRunSign = sign; authRunSec = 0; authRunStartFill = fillSlow ?? targetFill
-        } else if !freeze.isEmpty {
-            // Soft freeze: hold the run open, accumulate nothing. The correction
-            // is still being applied to the audio, so the evidence stays valid —
-            // we just can't read this interval.
-        } else if let fs = fillSlow {
-            authRunSec += dt
-            let moved = fs - authRunStartFill              // +ve = fill rose
-            // 0.10 s was too tight: normal fill wander during volume pushes
-            // (each one is an RTSP round-trip that stalls the player thread)
-            // routinely exceeds it, so the watchdog fired on healthy sessions
-            // and locked the loop out exactly when the buffer needed defending.
-            // 0.25 s still catches a genuinely inverted loop — which moves fill
-            // monotonically and fast — without tripping on ordinary jitter.
-            let wrongWay = sign > 0 ? moved > 0.25 : moved < -0.25
-            let needSec = railedNow ? Self.driftRailWatchdogSec : Self.driftWatchdogSec
-            if authRunSec >= needSec && wrongWay {
-                // Phantom fill (item_progress_ms under-report) used to only freeze
-                // ratio=1.0 for 30s while leaving the bogus high fillSlow in place.
-                // After lockout the loop saw fill still at ~1.8s, drained again,
-                // and the climb→rail→NOFEEDBACK cycle repeated every ~90s until
-                // the room glitched or the user restarted. Re-anchor the fill
-                // clocks so the next measurement starts from start_buffer again.
-                let phantomRising = sign > 0 && moved > 0.25
-                rateInt = 0; errInt = 0; driftCorr = 0
-                lastSlopePpm = 0
-                slopeAnchorAge = 0; slopeAnchorCorr = 0
-                authRunSec = 0; authRunSign = 0
-                if phantomRising {
-                    progressAnchorMs = nil; writtenAnchor = nil
-                    trueFillEMA = 0; fillSlow = nil
-                    slopeAnchorFill = targetFill
-                    fillJumpStrikes = 0
-                    // Short lockout only: we threw away the bad measurement, so
-                    // there is no wound-up integral left to defend against.
-                    driftLockoutSec = min(Self.driftLockoutSec_, 10.0)
-                    freeze = "NOFEEDBACK"
-                    hard = true
-                    dlog("drift NOFEEDBACK: corr held drain\(railedNow ? " AT RAIL" : "") \(Int(needSec))s, fill moved \(String(format: "%+.2f", moved))s — re-anchoring fill (phantom progress) + \(Int(driftLockoutSec))s lockout")
-                    aiEvent("fill_reanchor_phantom", level: "warn", fields: [
-                        "moved_s": String(format: "%.2f", moved),
-                        "rail": railedNow,
-                        "need_s": Int(needSec),
-                    ])
-                } else {
-                    slopeAnchorFill = fs
-                    driftLockoutSec = Self.driftLockoutSec_
-                    freeze = "NOFEEDBACK"
-                    dlog("drift NOFEEDBACK: corr held \(sign > 0 ? "drain" : "fill")\(railedNow ? " AT RAIL" : "") \(Int(needSec))s, fill moved \(String(format: "%+.2f", moved))s — freezing \(Int(Self.driftLockoutSec_))s at ratio 1.0")
-                }
-            }
-        }
-
-        // Early phantom-climb trip: write is realtime (~100%) and speakers are
-        // streaming, but measured fill has already walked >0.8s above the start
-        // buffer. Waiting for the 30s rail watchdog lets latency climb into the
-        // glitch zone. Re-anchor as soon as the measurement is clearly bogus.
-        if freeze.isEmpty,
-           let fs = fillSlow,
-           fs > targetFill + 0.80,
-           abs(writtenPctVal - 100) < 3,
-           !spkInfo.contains("DEAD"),
-           !spkInfo.contains("OFF") {
-            progressAnchorMs = nil; writtenAnchor = nil
-            trueFillEMA = 0; fillSlow = nil
-            rateInt = 0; errInt = 0; driftCorr = 0
-            lastSlopePpm = 0
-            slopeAnchorAge = 0; slopeAnchorCorr = 0; slopeAnchorFill = targetFill
-            authRunSec = 0; authRunSign = 0; fillJumpStrikes = 0
-            driftLockoutSec = min(Self.driftLockoutSec_, 10.0)
-            freeze = "PHANTOMFILL"
-            hard = true
-            dlog(String(format: "phantom fill climb: slow=%.2fs target=%.2fs write=%.0f%% — re-anchoring", fs, targetFill, writtenPctVal))
-            aiEvent("fill_reanchor_climb", level: "warn", fields: [
-                "slow_s": String(format: "%.2f", fs),
-                "target_s": String(format: "%.2f", targetFill),
-                "write_pct": String(format: "%.1f", writtenPctVal),
-            ])
-        }
-
-        // DEBT CEILING — the last word on the ratio, applied to whatever
-        // driftCorr ended up being: freshly computed, held through a freeze, or
-        // left over from before a lockout. See ASYMMETRY 3 above for why the
-        // integral, not the rate, is the quantity that glitches.
-        // Over budget we do not merely stop draining — we REPAY. Clamping to
-        // exactly 0 looks safer and is worse: the ledger then stops moving in
-        // either direction, so the budget is spent for the rest of the session
-        // and the loop can never steer down again however much it needs to. A
-        // small over-delivery instead walks the debt back to zero in ~5 min AND
-        // deepens the engine's reserve on the way, so the steady state is a slow
-        // drain/repay cycle averaging zero — which is the only honest setpoint
-        // for a correction that is supposed to cancel drift, not create it.
-        if netDrainSec > Self.drainBudgetSec {
-            let capped = min(driftCorr, -Self.drainRepayRate)
-            if capped != driftCorr {
-                if !debtCapActive {
-                    debtCapActive = true
-                }
-                if Date().timeIntervalSince(debtCapLastLogAt) >= 60 {
-                    dlog(String(format: "drain budget spent (%.2fs of %.2fs) — capping %+.2f%% to %+.2f%%",
-                                netDrainSec, Self.drainBudgetSec, driftCorr * 100, capped * 100))
-                    debtCapLastLogAt = Date()
-                }
-                driftCorr = capped
-            }
-        } else if debtCapActive {
-            debtCapActive = false
-            if Date().timeIntervalSince(debtCapLastLogAt) >= 60 {
-                dlog(String(format: "drain budget recovered (%.2fs) — steering again", netDrainSec))
-                debtCapLastLogAt = Date()
-            }
-        }
-
-        // OwnTone now schedules reads from its monotonic wall clock. The app's
-        // older rate matcher used the coarse item-progress counter and was
-        // repeatedly fooled into removing audio at +0.5%. That made both
-        // speakers fall progressively behind together until they appeared to
-        // go out. So the retired loop's command is discarded (zeroed here every
-        // tick) and the capture stays bit-transparent (ratio exactly 1.0) except
-        // while the refill controller below is giving back lost read-ahead.
-        driftCorr = 0
-        rateInt = 0
-        errInt = 0
-        netDrainSec = 0
-
-        // ---- REFILL CONTROLLER ---------------------------------------------
-        // The engine's read-ahead starts at the start buffer, wears down ~0.01-0.02 s
-        // per 10 min and takes sudden 0.1-0.6 s step drops (player-thread stalls
-        // that catch up by reading ahead). It never recovers on its own, and once
-        // it is under ~0.1 s any jitter is an audible underrun. So: when the
-        // smoothed fill sits well under target, ADD a little audio (ratio <= 1
-        // by at most 0.25%, slewed over 8 s each way, exactly 1.0 otherwise) until
-        // it is back. One-sided (never removes audio), budgeted, and frozen by
-        // every invalid-measurement gate above. It integrates nothing and learns
-        // nothing, so it cannot become the old loop. Details: RefillController.
-        //
-        // The measurement is also distrusted for 15 s after any volume change or
-        // push (RTSP volume writes stall the engine's player thread and its
-        // progress clock then jumps) and after a fade.
-        let volSig = speakers.filter { $0.enabled }.map { "\(effectiveVolume($0))" }.joined(separator: "-")
-        if (!refillVolSig.isEmpty && volSig != refillVolSig) || pushInFlight || fading {
-            refillVolHoldSec = 15
-        }
-        refillVolSig = volSig
-        let refillHold = freeze.isEmpty ? (refillVolHoldSec > 0 ? "volume" : "") : freeze
-        refillVolHoldSec = max(0, refillVolHoldSec - dt)
-        if let ev = refill.update(dt: dt, target: targetFill, fillSlow: fillSlow,
-                                  holdReason: refillHold, hard: hard) {
-            logRefillEvent(ev, slow: fillSlow, target: targetFill)
-        }
-        capture.setTargetRatio(1.0 - refill.eps)
-        freeze = refillHold.isEmpty ? "engineclock" : refillHold
-        driftFreeze = refillHold.isEmpty ? "refill:\(refill.label)" : refillHold
-
-        // ---- Logging --------------------------------------------------------
-        let driftPct = String(format: "%+.2f", f.appliedCorr * 100)
-        let fillStr = trueFillSec.map { String(format: "%.2fs", $0) } ?? "?"
-        let slowStr = fillSlow.map { String(format: "%.2fs", $0) } ?? "?"
-        // corr = what the refill controller commanded (negative = filling/stretch).
-        let corrStr = String(format: "%+.2f", -refill.eps * 100)
-        let skewStr = String(format: "%+.0f", lastSlopePpm)
-        let atRail = abs(driftCorr) >= Self.driftRail - 1e-9
-        let flags = [
-            dropDelta > 0 ? "DROP+\(dropDelta)" : nil,
-            freeze == "NOFEEDBACK" ? "DRIFT-NOFEEDBACK" : nil,
-            freeze == "PHANTOMFILL" ? "PHANTOMFILL" : nil,
-            atRail ? "RATERAIL" : nil,
-            (trueFillSec ?? 0) > targetFill + 1.5 ? "FILLHIGH" : nil,
-            (trueFillSec ?? 9) < 0.15 ? "UNDERRUN" : nil,
-            // EAGAIN rate can NOT distinguish healthy backpressure from a dead
-            // reader: the 8 KB pipe + 1 ms retry saturates near ~1000/s in both
-            // cases (review finding M6). The discriminating signal is bytes
-            // actually accepted: a live OwnTone drains 176,400 B/s no matter
-            // what; an interval where the pipe accepted ~nothing while we have
-            // data queued means the reader is genuinely stalled.
-            (writtenDelta < 8_192 && f.pending > 0) ? "READERSTALL" : nil,
-            f.maxGapMs > 120 ? String(format: "captureGap%.0fms", f.maxGapMs) : nil,
-            f.convRebuilds > 0 ? "convRebuild\(f.convRebuilds)" : nil,
-            // fill sinking well under the buffer OwnTone established means its
-            // read deficit is growing — the real precursor to the glitch.
-            (trueFillSec.map { $0 < targetFill * 0.5 } ?? false) ? "FILLLOW" : nil,
-            apiHang ? "APIHANG" : nil,
-            apiMs > 1000 ? "apiSLOW\(apiMs)ms" : nil,
-            playerState != "play" ? "PLAYER=\(playerState)" : nil,
-            spkInfo.contains("OFF") ? "speakerOFF" : nil,
-            spkInfo.contains("DEAD") ? "speakerDEAD" : nil,
-        ].compactMap { $0 }.joined(separator: " ")
-
-        // Duplicate the first appearance/change of an anomaly into the compact
-        // event log. The one-second flight recorder keeps the full data; this
-        // gives a human a short incident index without scanning thousands of
-        // healthy lines. Clearing is logged too, so every incident has bounds.
+        let flags = [sample.dropped > 0 ? "DROP" : nil,
+                     sample.discontinuity ? "CAPTURE_RESET" : nil,
+                     f.maxGapMs > 120 ? "CAPTURE_GAP" : nil,
+                     !busy && ps == nil ? "APIHANG" : nil,
+                     speakers.contains { $0.enabled && $0.health == .trouble } ? "SPEAKER_OUT" : nil]
+            .compactMap { $0 }.joined(separator: " ")
         if flags != lastFlightFlags {
-            if !flags.isEmpty {
-                dlog("FLIGHT anomaly BEGIN/CHANGE: \(flags) fill=\(fillStr) corr=\(corrStr)% api=\(apiMs)ms")
-                aiEvent("anomaly_start_or_change", level: "warn", fields: [
-                    "flags": flags, "fill_s": fillStr, "rate_pct": corrStr, "api_ms": apiMs,
-                ])
-            } else if !lastFlightFlags.isEmpty {
-                dlog("FLIGHT anomaly CLEARED: \(lastFlightFlags)")
-                aiEvent("anomaly_clear", fields: ["flags": lastFlightFlags])
-            }
+            aiEvent(flags.isEmpty ? "anomaly_clear" : "anomaly_start_or_change",
+                    level: flags.isEmpty ? "info" : "warn", fields: ["flags": flags])
             lastFlightFlags = flags
         }
-
-        // fill    = end-to-end backlog, seconds (lightly smoothed, the display value)
-        // slow    = the same, heavily smoothed — this is what the loop actually steers on
-        // corr    = commanded rate correction (+ drains the backlog, - fills it)
-        // drift   = correction ACTUALLY applied to audio this interval (byte-weighted)
-        // skew    = the plant's measured rate mismatch in ppm, i.e. what corr is cancelling
-        // hold    = why the loop is not steering ("" when it is)
-        // HEALTHY, once converged: slow flat within ~±0.05s, skew steady near its
-        // machine's value (~+4000 ppm here), corr ≈ skew, drift ≈ corr, hold empty.
-        // UNHEALTHY: slow trending; corr pinned at the rail (RATERAIL) — authority
-        // exhausted; hold set for long stretches — the loop is blind, look at why;
-        // DRIFT-NOFEEDBACK — corr and fill moved in the same direction, loop disowned.
-        let hold = freeze.isEmpty ? "" : " hold=\(freeze)"
+        let links = speakers.filter(\.enabled).map {
+            "\($0.name)[\($0.health) ref=\(effectiveVolume($0))]"
+        }.joined(separator: " ")
+        let fill = result.fill.map { String(format: "%.3f", $0) } ?? "unknown"
+        Self.flog("v2 fill_estimate=\(fill)s hold=\(result.hold) refill=\(refill.label) ratio=\(result.ratio) gain=\(captureMasterGain) source_dbfs=\(f.signalSamples > 0 ? String(format: "%.1f", f.sourceRMSDBFS) : "unknown") output_dbfs=\(f.signalSamples > 0 ? String(format: "%.1f", f.outputRMSDBFS) : "unknown") signal_samples=\(f.signalSamples) pending=\(f.pending) dropped=\(f.dropped) maxgap=\(Int(f.maxGapMs))ms api=\(queryMs)ms \(links) \(flags)")
         applyRoomDelay()
-        syncBeacon.publish(streaming: phase == .streaming, delaySeconds: roomDelaySec)
-        Self.flog("fill=\(fillStr) slow=\(slowStr) corr=\(corrStr)% drift=\(driftPct)% skew=\(skewStr)ppm debt=\(String(format: "%+.2f", netDrainSec))s\(hold) rm=\(refill.label) tgt=\(String(format: "%.2f", targetFill))s bud=\(String(format: "%.2f", refill.bucketUsed))s write=\(writtenPct)% produce=\(producedPct)% appBuf=\(appBufSec)s bufs=\(f.bufCount) maxgap=\(Int(f.maxGapMs))ms inRate=\(Int(f.inRate)) prog=\(progressMs.map(String.init) ?? "?")ms macVol=\(systemVolume.isFinite ? Int(systemVolume*100) : 0) | \(spkInfo)\(flags.isEmpty ? "" : "  <<< \(flags)")")
-    }
-
-    /// Every refill-controller state change goes to the flight log, the debug log
-    /// and the AI event stream, so a future "why did the pitch move / why is the
-    /// buffer low" is answerable from the record alone.
-    private func logRefillEvent(_ ev: RefillController.Event, slow: Double?, target: Double) {
-        let slowS = slow.map { String(format: "%.2f", $0) } ?? "?"
-        let tgtS = String(format: "%.2f", target)
-        let budS = String(format: "%.2f", refill.bucketUsed)
-        let sessS = String(format: "%.2f", refill.sessionAdded)
-        var name = "", level = "info", msg = "", extra: [String: Any] = [:]
-        switch ev {
-        case .started(let fill, _):
-            name = "refill_start"
-            msg = "refill START: slow fill \(String(format: "%.2f", fill))s vs target \(tgtS)s — stretching by at most +\(String(format: "%.2f", refill.cfg.capEps * 100))% (\(Int(refill.cfg.rampInSec))s ramp, budget \(budS)/\(String(format: "%.2f", refill.cfg.bucketSec))s)"
-        case .easing(let reason, let fill, let added):
-            name = "refill_ease"
-            level = (reason == "noeffect" || reason == "session_cap") ? "warn" : "info"
-            msg = "refill EASE OUT (\(reason)): slow fill \(String(format: "%.2f", fill))s target \(tgtS)s, added \(String(format: "%.2f", added))s this episode"
-            extra = ["reason": reason, "added_s": String(format: "%.2f", added)]
-        case .finished(let reason, let backoff, let added):
-            name = "refill_end"
-            level = backoff > 0 ? "warn" : "info"
-            msg = "refill END (\(reason)): back at ratio 1.0, added \(String(format: "%.2f", added))s, slow fill \(slowS)s target \(tgtS)s"
-                + (backoff > 0 ? " — fill did not improve, backing off \(Int(backoff))s" : "")
-            extra = ["reason": reason, "added_s": String(format: "%.2f", added), "backoff_s": Int(backoff)]
-        case .blocked(let reason):
-            name = "refill_blocked"
-            level = "warn"
-            msg = "refill BLOCKED (\(reason)): slow fill \(slowS)s is under target \(tgtS)s but the \(budS)s budget is spent — waiting for it to leak"
-            extra = ["reason": reason]
-        }
-        dlog(msg)
-        Self.flog("=== \(msg) | session_added=\(sessS)s")
-        var fields: [String: Any] = ["slow_s": slowS, "target_s": tgtS, "budget_used_s": budS,
-                                     "session_added_s": sessS, "state": refill.label]
-        for (k, v) in extra { fields[k] = v }
-        aiEvent(name, level: level, fields: fields)
-    }
-
-    /// Run one engine API read to completion regardless of what happens to the
-    /// calling task. URLSession's async API cancels the underlying request when
-    /// its task is cancelled, which closes the socket while OwnTone may already
-    /// be serving it — the trigger of the known evhttp/jsonapi SIGSEGV. An
-    /// unstructured task does not inherit the caller's cancellation.
-    private nonisolated static func uncancelled<T: Sendable>(
-        _ op: @escaping @Sendable () async throws -> T) async -> T? {
-        await Task.detached { try? await op() }.value
+        syncBeacon.publish(streaming: true, delaySeconds: roomDelaySec)
+        checkPacketLoss()
     }
 
     /// One value drives both video and visualization. Telemetry remains useful
@@ -1242,6 +516,9 @@ final class DALIStore {
         roomDelaySec = RoomDelayPolicy.seconds(startBufferMs: config.startBufferMs,
                                               trimMs: delayTrimMs)
     }
+
+    /// How far ahead of the heard sound the light is sampled, to cancel drawing latency.
+    private static let visualLeadSec = 0.07
 
     private func startLevelLoop() {
         levelTask?.cancel()
@@ -1253,11 +530,14 @@ final class DALIStore {
                 let r = capture.readLevels()
                 if let capturedAt = r.at {
                     levelDelayLine.append(RoomLevelSample(at: capturedAt, level: r.level,
-                                                           bass: r.bass, treble: r.treble,
-                                                           beats: r.beats, beatAt: r.beatAt))
+                                                           bass: r.bass, treble: r.treble, mid: r.mid,
+                                                           spectrum: r.spectrum, beats: r.beats, beatAt: r.beatAt))
                 }
                 // Publish the newest sample the room has actually reached.
-                let newest = levelDelayLine.latestDue(at: now, delay: roomDelaySec)
+                // The light is drawn a frame or two after it is sampled (30 Hz levels, a
+                // canvas frame, display latency, the bars' own rise), so it leads by
+                // `visualLeadSec` to land with the sound, not just after it.
+                let newest = levelDelayLine.latestDue(at: now, delay: max(0, roomDelaySec - Self.visualLeadSec))
                 let visible = roomCanvasVisible
                 if let s = newest, visible {
                     // @Observable fires on every assignment, equal value or not,
@@ -1265,22 +545,27 @@ final class DALIStore {
                     if audioLevel != s.level { audioLevel = s.level }
                     if bassLevel != s.bass { bassLevel = s.bass }
                     if trebleLevel != s.treble { trebleLevel = s.treble }
+                    if midLevel != s.mid { midLevel = s.mid }
+                    if spectrum != s.spectrum { spectrum = s.spectrum }
                     if s.beats != beatCount {
-                        beatPlayedAt = s.beatAt?.addingTimeInterval(roomDelaySec)
+                        beatPlayedAt = s.beatAt?.addingTimeInterval(max(0, roomDelaySec - Self.visualLeadSec))
                         beatCount = s.beats
                     }
                 }
                 // Cheap, and it is the only thing standing between a browser bug
                 // and a room that stays silent while the Mac is playing.
-                if !visible || tick.isMultiple(of: 2) { reviewCutCredibility() }
+                if !visible || tick.isMultiple(of: 4) { reviewCutCredibility() }
                 logCaptureStats()
-                // ~30 Hz to match the canvas; nothing is drawn while it is
-                // hidden, so 10 Hz is plenty for the cut rail and saves wakeups.
-                try? await Task.sleep(nanoseconds: visible ? 33_000_000 : 100_000_000)
+                // ~60 Hz while drawn, so the newest sample is never more than a frame
+                // old when the canvas reads it (it was up to 33 ms at 30 Hz); nothing
+                // is drawn while hidden, so 10 Hz is plenty for the cut rail.
+                try? await Task.sleep(nanoseconds: visible ? 16_000_000 : 100_000_000)
             }
             audioLevel = 0
             bassLevel = 0
             trebleLevel = 0
+            midLevel = 0
+            spectrum = []
             beatPlayedAt = nil
             levelDelayLine.clear()
         }
@@ -1289,13 +574,9 @@ final class DALIStore {
     /// Stream generation that currently owns the tap-rebuild lane, if any.
     private var captureRebuildGeneration: Int?
 
-    /// The ONE lane every tap rebuild goes through (source switch, starved-tap
-    /// watchdog). Rebuilds used to be launched as independent detached tasks,
-    /// which the capture lifecycle lock serialises but in arbitrary order — two
-    /// quick source switches could leave the tap on the FIRST app while the UI
-    /// said the second. The source is now read at the moment the rebuild really
-    /// runs, so the last request always wins. Returns nil when the stream moved
-    /// on (stopped/restarted) before the rebuild could run.
+    /// Watchdog rebuilds replace only the tap token captured here. Source
+    /// changes use a complete room handoff; a stale watchdog never starts a
+    /// new tap after Stop or alongside a direct Spotify pipe writer.
     private func rebuildTapSerialized(generation: Int) async -> Bool? {
         while captureRebuildGeneration == generation {
             try? await Task.sleep(nanoseconds: 50_000_000)
@@ -1308,28 +589,9 @@ final class DALIStore {
         let src = source.tapSource
         let cap = capture
         let captureSession = cap.sessionID
-        return await Task.detached {
-            // No tap running (librespot owned the pipe, or an earlier rebuild
-            // failed): there is nothing to swap, so bring one up instead of
-            // reporting a spurious failure.
-            if !cap.isRunning {
-                return (try? cap.start(fifoPath: fifo, muteLocal: true, source: src)) != nil
-            }
-            return cap.rebuild(fifoPath: fifo, muteLocal: true, source: src,
-                               expectedSession: captureSession)
-        }.value
-    }
-
-    private func rebuildCaptureIfStreaming() {
-        guard phase == .streaming else { return }
-        let generation = streamGeneration
-        Task { @MainActor [weak self] in
-            guard let self, let ok = await self.rebuildTapSerialized(generation: generation),
-                  !ok else { return }
-            guard self.phase == .streaming, self.streamGeneration == generation else { return }
-            self.stopStream()
-            self.phase = .error("The selected app's audio could not be captured.")
-        }
+        guard cap.isRunning else { return false }
+        return await cap.rebuildAsync(fifoPath: fifo, muteLocal: true, source: src,
+                                      expectedSession: captureSession)
     }
 
     /// Recover a tap that starts successfully but produces no IOProc callbacks.
@@ -1339,6 +601,7 @@ final class DALIStore {
     private func rebuildStarvedCapture(expectedGeneration: Int) {
         guard phase == .streaming,
               streamGeneration == expectedGeneration,
+              capture.callbackExpectation.secondsMissingExpectedBuffer > 10,
               !captureWatchdogInFlight else { return }
         captureWatchdogInFlight = true
         let cap = capture
@@ -1362,11 +625,19 @@ final class DALIStore {
                   self.phase == .streaming else { return }
 
             let silenceAfterRebuild = cap.secondsSinceLastBuffer
-            guard silenceAfterRebuild > 2 else {
+            if self.acknowledgeCaptureRecovery(within: 2) {
                 self.captureWatchdogInFlight = false
-                self.captureStallRestartUsed = false
                 self.dlog("tap callbacks recovered after rebuild")
                 self.aiEvent("capture_recovered", fields: ["path": "tap_rebuild"])
+                return
+            }
+
+            let expectation = cap.callbackExpectation
+            if expectation.sourceIsInactive || expectation.secondsMissingExpectedBuffer <= 2 {
+                // No active source can legitimately mean no callbacks. Keep
+                // waiting without declaring real recovery or resetting its budget.
+                self.captureWatchdogInFlight = false
+                self.dlog("tap waiting for source audio before callback recovery")
                 return
             }
 
@@ -1374,97 +645,39 @@ final class DALIStore {
             self.aiEvent("capture_rebuild_no_callbacks", level: "error", fields: [
                 "seconds": Int(silenceAfterRebuild),
             ])
-            if self.captureStallRestartUsed {
+            if self.claimCaptureRecoveryRestart() {
+                await self.restartStreamForCaptureRecovery(expectedGeneration: expectedGeneration)
+            } else {
                 await self.failCaptureRecovery(expectedGeneration: expectedGeneration,
                                                reason: "capture stayed silent after restart")
-            } else {
-                self.captureStallRestartUsed = true
-                await self.restartStreamForCaptureRecovery(expectedGeneration: expectedGeneration)
             }
         }
     }
 
-    /// `capture.stop()` blocks on the capture lifecycle lock (held for the whole
-    /// of a tap rebuild) and on CoreAudio teardown; on the main actor that is a
-    /// frozen app. Recovery paths, which run precisely when CoreAudio is sick,
-    /// tear the tap down from a background thread instead.
+    /// Stop invalidates capture immediately and queues HAL teardown. Retained
+    /// for recovery call sites; hardware work is owned by CaptureController.
     private func stopCaptureOffMain() async {
-        let cap = capture
-        await Task.detached { cap.stop() }.value
+        capture.stop()
     }
 
     /// Tap-only retries left OwnTone playing a starved pipe. One ordered room
     /// restart resets both the capture tap and the pipe clock.
     private func restartStreamForCaptureRecovery(expectedGeneration: Int) async {
-        guard phase == .streaming,
-              streamGeneration == expectedGeneration,
+        guard phase == .streaming, streamGeneration == expectedGeneration,
               captureWatchdogInFlight else { return }
-
-        streamGeneration += 1
-        let recoveryGeneration = streamGeneration
-        healthTask?.cancel(); healthTask = nil
-        levelTask?.cancel(); levelTask = nil
-        flightTask?.cancel(); flightTask = nil
-        speakerRecoveryInFlight.removeAll()
-        fading = false
-        audioLevel = 0
-        resetCutState()
-        for i in speakers.indices where speakers[i].enabled {
-            speakers[i].health = .connecting
-        }
-        phase = .starting
         dlog("capture stayed silent after tap rebuild -> restarting room stream")
         aiEvent("capture_restart", level: "warn", fields: ["reason": "tap callbacks missing"])
-
-        // Off the main actor: stop() waits on the capture lifecycle lock and on
-        // CoreAudio, which is exactly what is misbehaving in this path.
-        await stopCaptureOffMain()
-        guard recoveryGeneration == streamGeneration else { return }
-        await supervisor.setResumePlayback(false)
-        guard recoveryGeneration == streamGeneration else { return }
-        try? await api.stop()
-        guard recoveryGeneration == streamGeneration else { return }
-        await stopSpotify()
-        guard recoveryGeneration == streamGeneration else { return }
-        lastTeardownAt = Date()
-        try? await Task.sleep(nanoseconds: 1_000_000_000)
-        guard recoveryGeneration == streamGeneration,
-              phase == .starting else { return }
-
-        phase = .idle
-        captureWatchdogInFlight = false
+        stopStream()
+        captureStallRestartUsed = true
         startStream(reason: "capture recovery")
     }
 
-    /// If the automatic room restart also fails, stop claiming the room is live
-    /// and surface a retry state instead of cycling forever.
     private func failCaptureRecovery(expectedGeneration: Int, reason: String) async {
-        guard phase == .streaming,
-              streamGeneration == expectedGeneration else { return }
-        streamGeneration += 1
-        let failedGeneration = streamGeneration
-        healthTask?.cancel(); healthTask = nil
-        levelTask?.cancel(); levelTask = nil
-        flightTask?.cancel(); flightTask = nil
-        fading = false
-        audioLevel = 0
-        resetCutState()
-        for i in speakers.indices { speakers[i].health = .off }
-        captureWatchdogInFlight = false
-        captureStallRestartUsed = false
+        guard phase == .streaming, streamGeneration == expectedGeneration else { return }
         dlog("capture recovery gave up: \(reason)")
         aiEvent("capture_recovery_failed", level: "error", fields: ["reason": reason])
-        // Stop the tap BEFORE offering "Press Play to retry": a retry landing
-        // while the old tap is still being torn down would find capture
-        // "running", skip its own start, and then lose the tap.
-        await stopCaptureOffMain()
-        guard failedGeneration == streamGeneration else { return }
+        stopStream()
         phase = .error("Mac audio capture stopped. Press Play to retry.")
-        await supervisor.setResumePlayback(false)
-        guard failedGeneration == streamGeneration else { return }
-        try? await api.stop()
-        guard failedGeneration == streamGeneration else { return }
-        await stopSpotify()
     }
 
     var frontName: String
@@ -1482,12 +695,12 @@ final class DALIStore {
     /// Placement is optional. It keeps the original front/back room drawing for
     /// configured rooms; other speakers have the same playback controls.
     func setPlacement(_ kind: RoomSpeaker.Kind, for speaker: RoomSpeaker?) {
-        guard !phase.isOn, kind != .extra else { return }
+        guard kind != .extra else { return }
         let name = speaker?.name ?? ""
         // Layout changes do not change the playback selection. Persist implicit
         // legacy front/back selections before changing what counts as primary.
         for current in speakers {
-            UserDefaults.standard.set(current.enabled, forKey: "dali.on.\(current.name)")
+            preferences.set(current.enabled, forKey: "dali.on.\(current.name)")
         }
         if kind == .front {
             frontName = name
@@ -1496,8 +709,8 @@ final class DALIStore {
             backName = name
             if !name.isEmpty, frontName == name { frontName = "" }
         }
-        UserDefaults.standard.set(frontName, forKey: "dali.frontName")
-        UserDefaults.standard.set(backName, forKey: "dali.backName")
+        preferences.set(frontName, forKey: "dali.frontName")
+        preferences.set(backName, forKey: "dali.backName")
         for i in speakers.indices {
             speakers[i].kind = speakers[i].name == frontName ? .front
                 : speakers[i].name == backName ? .back : .extra
@@ -1509,7 +722,8 @@ final class DALIStore {
     private let supervisor: EngineSupervisor
     private let spotifySupervisor: SpotifySupervisor
     private let api = BeamAPI()
-    private let capture = CaptureController()
+    private let capture: CaptureController
+    private let roomSession = RoomSessionController()
     private var healthTask: Task<Void, Never>?
 
     // MARK: debug log
@@ -1556,12 +770,14 @@ final class DALIStore {
     }
 
     private func aiEvent(_ event: String, level: String = "info", fields: [String: Any] = [:]) {
+        guard backendEnabled else { return }
         var tagged = fields
         tagged["session"] = aiSessionID
         Self.writeAIEvent(event, level: level, fields: tagged)
     }
 
     private func aiHealth(_ fields: [String: Any]) {
+        guard backendEnabled else { return }
         var tagged = fields
         tagged["session"] = aiSessionID
         Self.writeAIEvent("health", level: "info", fields: tagged)
@@ -1572,21 +788,77 @@ final class DALIStore {
         let line = "\(Date().formatted(date: .omitted, time: .standard)) \(msg)\n"
         appendLog(line, to: debugLogURL, maxBytes: 8 * 1024 * 1024)
     }
-    func dlog(_ msg: String) { Self.dlog(msg) }
+    func dlog(_ msg: String) { if backendEnabled { Self.dlog(msg) } }
 
     /// DALI has one automatic buffer. Video synchronization happens in the
     /// browser companion by delaying the picture to the room's published
     /// delay; changing the audio buffer is not a video-sync mode.
+    /// The AirPlay buffer for the Wi-Fi link the Mac has now: short on a wired or strong
+    /// 5 GHz link, longer on a weak or 2.4 GHz one (see `BufferPolicy`). Read when the
+    /// engine starts, so it follows the link as of launch or the last engine restart.
     static func savedStartBufferMs() -> Int {
-        let value = RoomDelayPolicy.automaticStartBufferMs
-        // Normalize installs that previously selected the 500ms "Video" mode
-        // so engine config, idle UI, and the sync beacon all agree after update.
-        UserDefaults.standard.set(Double(value), forKey: "dali.startBufferMs")
-        return value
+        let wifi = CWWiFiClient.shared().interface()
+        let rssi = wifi?.rssiValue()
+        let is24 = wifi?.wlanChannel()?.channelBand == .band2GHz
+        let until = UserDefaults.standard.double(forKey: lossBufferKey)
+        return BufferPolicy.startBufferMs(rssi: rssi, is24GHz: is24,
+                                          lossRaisedUntil: until > 0 ? Date(timeIntervalSince1970: until) : nil)
     }
 
-    init() {
-        let defaults = UserDefaults.standard
+    /// Until when a sustained packet loss keeps the longer buffer (seconds since 1970).
+    private static let lossBufferKey = "dali.lossBufferUntil"
+    private var packetLoss = PacketLossMonitor()
+    private var lossLogOffset: UInt64?
+    private var lossLogGeneration = -1
+    private var lastLossCheckAt = Date.distantPast
+
+    /// Reads what the engine has reported about delivery since the last look. When a speaker
+    /// keeps losing packets, remember it: the next session starts with the longer buffer, which
+    /// gives lost packets time to be sent again. Never changes the room that is playing now.
+    private func checkPacketLoss() {
+        let now = Date()
+        guard now.timeIntervalSince(lastLossCheckAt) >= 15 else { return }   // the engine reports every 30 s
+        lastLossCheckAt = now
+        guard let handle = try? FileHandle(forReadingFrom: config.logFile) else { return }
+        defer { try? handle.close() }
+        guard let size = try? handle.seekToEnd() else { return }
+        if lossLogGeneration != streamGeneration || lossLogOffset == nil {
+            // A new session: only what the engine says from now on.
+            lossLogGeneration = streamGeneration; lossLogOffset = size; packetLoss.reset()
+            return
+        }
+        var offset = lossLogOffset ?? size
+        if size < offset { offset = 0 }                                      // the engine's log was rotated
+        lossLogOffset = size
+        let from = max(offset, size > 65_536 ? size - 65_536 : 0)
+        guard size > from, (try? handle.seek(toOffset: from)) != nil,
+              let data = try? handle.read(upToCount: Int(size - from)) else { return }
+        for line in String(decoding: data, as: UTF8.self).split(separator: "\n") {
+            guard let report = DeliveryReport.parse(String(line)) else { continue }
+            if packetLoss.record(report, at: now) {
+                packetLoss.reset()
+                let until = now.addingTimeInterval(BufferPolicy.lossMemorySeconds)
+                UserDefaults.standard.set(until.timeIntervalSince1970, forKey: Self.lossBufferKey)
+                let next = Self.savedStartBufferMs()
+                dlog("packet loss to \(report.device) (\(report.resendRequests) resends asked, \(report.resendSuppressed) too late): the next start uses a \(next) ms buffer")
+                aiEvent("loss_buffer_raised", level: "warn", fields: [
+                    "device": report.device, "resend_req": report.resendRequests,
+                    "resend_supp": report.resendSuppressed, "buffer_ms": config.startBufferMs,
+                    "next_buffer_ms": next])
+            }
+        }
+    }
+
+    /// The buffer the engine is running with.
+    var currentStartBufferMs: Int { config.startBufferMs }
+
+    init(defaults: UserDefaults = .standard, backendEnabled: Bool = true,
+         volumeWrite: RoomVolumeCoordinator.Write? = nil,
+         capture: CaptureController = CaptureController()) {
+        self.capture = capture
+        self.preferences = defaults
+        self.backendEnabled = backendEnabled
+        self.injectedVolumeWrite = volumeWrite
         // One-time volume sanity migration: old builds defaulted speakers to 80
         // and had a hidden balance multiplier. Big speakers deserve respect.
         if !defaults.bool(forKey: "dali.migrated.v2") {
@@ -1676,11 +948,12 @@ final class DALIStore {
         let cfg = OwnToneConfig(rootDir: root, startBufferMs: Self.savedStartBufferMs())
         config = cfg
 
-        // Bundled helper; falls back to the repo vendor dir during development.
+        // Use this product's helper. Development overrides are explicit; never
+        // silently run a helper from another checkout or the installed V1 app.
         let bundled = Bundle.main.bundleURL
             .appendingPathComponent("Contents/Helpers/owntone/owntone")
-        let dev = URL(fileURLWithPath: NSString(string: "~/Downloads/beam/vendor/owntone/owntone").expandingTildeInPath)
-        let binary = FileManager.default.isExecutableFile(atPath: bundled.path) ? bundled : dev
+        let override = ProcessInfo.processInfo.environment["DALI_ENGINE_BINARY"]
+        let binary = override.map { URL(fileURLWithPath: $0) } ?? bundled
         supervisor = EngineSupervisor(binary: binary, config: cfg)
         // Spotify Connect device — shares the same pipe so front/back stay PTP-synced.
         let spotifyCache = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
@@ -1690,14 +963,26 @@ final class DALIStore {
             pipePath: cfg.pipePath,
             cacheDir: spotifyCache
         )
+        delayTrimMs = defaults.double(forKey: "dali.delayTrimMs")
+        mode = RoomMode(rawValue: defaults.string(forKey: "dali.mode") ?? "") ?? .mirror
         applyRoomDelay()
+        applyMasterGain()
+        if !backendEnabled { return }
 
         if Self.isPreview {
             applyPreviewState()
             return
         }
 
-        Task { await bootEngine() }
+        logLaunch()
+        if AppleSender.savedSelection {
+            // The Apple AirPlay sender needs the AirPlay clock ports (UDP 319/320)
+            // that the engine holds while it runs, so the engine stays off.
+            engineReleased = true
+            applyDiscoveredSpeakers([])
+        } else {
+            Task { await bootEngine() }
+        }
         reapEngineOnQuit(confPath: cfg.confFile.path)
         startIdleGuard()
         observeSleepWake()
@@ -1727,32 +1012,26 @@ final class DALIStore {
         syncBeacon.start()
         // Volume keys: when the Mac itself is silent (room-only), the hardware
         // volume keys steer the ROOM master via the system volume they change.
-        // Never mirror a Mac volume spike 1:1 onto the speakers — rise is ramped;
-        // falls stay immediate so mute/quiet still feels instant. volumeLimit
-        // remains the hard ceiling inside effectiveVolume().
+        // Restore V1's master-to-receiver volume response through the single
+        // V2 coordinator. Zero also mutes captured PCM and urgently mutes the
+        // receivers to cover audio already in the AirPlay pipeline.
         // @Sendable: CoreAudio invokes this on its own queue, so it must not
         // inherit this initializer's main-actor isolation (a runtime trap).
-        volumeObserver.onChange = { @Sendable [weak self] new, prev in
+        // Keep a muted Mac muted while the asynchronous hardware snapshot is
+        // pending. The first observer publication supplies its actual master.
+        systemVolume = 0
+        desiredSystemVolume = 0
+        volumeObserver.start(onChange: { @Sendable [weak self] new, prev in
             Task { @MainActor in
                 guard let self, new.isFinite, prev.isFinite else { return }
                 self.desiredSystemVolume = min(max(new, 0), 1)
                 if new < prev - 0.001 {
-                    // Drop immediately (mute / volume-down).
                     self.systemVolume = self.desiredSystemVolume
-                    self.sysVolRampTask?.cancel()
-                    self.sysVolRampTask = nil
-                    if self.phase == .streaming, case .system = self.source {
-                        self.prioritizeManualVolumeChange()
-                        self.scheduleVolumePush()
-                    }
                 } else {
                     self.startSysVolRamp()
                 }
             }
-        }
-        let initial = volumeObserver.current() ?? 0.5
-        systemVolume = initial
-        desiredSystemVolume = initial
+        })
     }
 
     /// UI harness only (`DALI_PREVIEW=1`): no engine, no capture, no beacon,
@@ -1765,62 +1044,91 @@ final class DALIStore {
     private func applyPreviewState() {
         let env = ProcessInfo.processInfo.environment
         speakers = [
-            RoomSpeaker(id: "preview-front", name: "Front", type: "AirPlay 2",
+            RoomSpeaker(id: "preview-front", name: "MICHAEL D", type: "AirPlay 2",
                         kind: .front, enabled: true, relVolume: 100, health: .live),
-            RoomSpeaker(id: "preview-back", name: "Back", type: "AirPlay 2",
+            RoomSpeaker(id: "preview-back", name: "MICHAEL S", type: "AirPlay 2",
                         kind: .back, enabled: true, relVolume: 100, health: .live),
         ]
-        audioLevel = 0.62; bassLevel = 0.5; trebleLevel = 0.4
-        if env["DALI_PREVIEW_PHASE"] != "idle" { phase = .streaming }
-    }
-
-    private let volumeObserver = SystemVolumeObserver()
-    /// Mac volume the observer last reported. `systemVolume` may lag behind
-    /// while we ramp up so speakers never jump loud.
-    private var desiredSystemVolume: Double = 0.5
-    private var sysVolRampTask: Task<Void, Never>?
-
-    private func prioritizeManualVolumeChange(ids: [String]? = nil) {
-        for id in ids ?? sessionSpeakers().map(\.id) {
-            volumeFailUntil[id] = nil
-            manualVolumeChanges.insert(id)
+        audioLevel = 0.62; bassLevel = 0.5; trebleLevel = 0.4; midLevel = 0.55
+        switch env["DALI_PREVIEW_PHASE"] {
+        case "idle": break
+        case "starting": phase = .starting
+        default: phase = .streaming
         }
-    }
-
-    /// Coalesce rapid volume-up key repeats into one room command. Sending a
-    /// network volume request every 80 ms overwhelmed the front receiver's
-    /// control connection and dropped it from the group. Falls remain immediate
-    /// so mute/volume-down is always responsive. 200 ms — OwnTone's
-    /// SET_PARAMETER (volume) to the PowerNode times out under chatter and
-    /// tears the AirPlay session down ("failed during execution of volume").
-    private func startSysVolRamp() {
-        guard sysVolRampTask == nil else { return }
-        sysVolRampTask = Task { @MainActor in
-            try? await Task.sleep(nanoseconds: 200_000_000)
-            guard !Task.isCancelled else { sysVolRampTask = nil; return }
-            systemVolume = desiredSystemVolume
-            if phase == .streaming, case .system = source {
-                prioritizeManualVolumeChange()
-                scheduleVolumePush()
+        // Preview only: a made-up music signal so the animation can be screenshotted.
+        if env["DALI_PREVIEW_ANIMATE"] == "1" {
+            Task { @MainActor [weak self] in
+                var t = 0.0, lastBeat = 0.0
+                while let self, !Task.isCancelled {
+                    t += 0.033
+                    self.audioLevel = min(1, max(0, 0.45 + 0.30 * sin(t * 1.9) * sin(t * 0.55) + 0.12 * sin(t * 7.3)))
+                    self.bassLevel = min(1, max(0, 0.5 + 0.45 * sin(t * 3.1)))
+                    self.trebleLevel = min(1, max(0, 0.4 + 0.4 * sin(t * 5.3 + 1)))
+                    self.midLevel = min(1, max(0, 0.45 + 0.4 * sin(t * 2.3 + 2) * sin(t * 0.9)))
+                    // A made-up spectrum shaped like music: strong low end, falling away, each band with its own pulse.
+                    self.spectrum = (0..<32).map { k in
+                        let x = Double(k) / 31
+                        let body = 0.62 * exp(-x * 1.6) + 0.12
+                        let pulse = 0.5 + 0.5 * sin(t * (1.3 + 0.37 * Double(k % 7)) + Double(k) * 1.9)
+                        let hit = max(0, sin(t * 6.0 - x * 4)) * (1 - x) * 0.25
+                        return Float(min(1, max(0, body * (0.55 + 0.6 * pulse) + hit)))
+                    }
+                    if t - lastBeat > 0.52 { lastBeat = t; self.beatPlayedAt = Date(); self.beatCount += 1 }
+                    try? await Task.sleep(for: .milliseconds(33))
+                }
             }
-            sysVolRampTask = nil
         }
+    }
+
+    @ObservationIgnored private lazy var volumeObserver = SystemVolumeObserver()
+    /// Latest Mac master intent; receiver requests are serialized by the coordinator.
+    private var desiredSystemVolume: Double = 0.5
+
+    private func startSysVolRamp() {
+        systemVolume = desiredSystemVolume
+        scheduleVolumePush()
     }
 
     // MARK: engine lifecycle
+
+    /// One line a person (or an AI) can read to answer "which launch was this
+    /// and how long did it take to become ready". The debug log carries only the
+    /// time of day, so the date and build go here, once per launch.
+    private func logLaunch() {
+        let info = Bundle.main.infoDictionary
+        let version = info?["CFBundleShortVersionString"] as? String ?? "dev"
+        let build = info?["CFBundleVersion"] as? String ?? "?"
+        let pid = getpid()
+        dlog("launch \(ISO8601DateFormatter().string(from: Date())) v\(version) build \(build) pid \(pid)")
+        aiEvent("app_launch", fields: ["version": version, "build": build, "pid": Int(pid)])
+    }
+
+    private var launchToReadyMs: Int? {
+        StartupTiming.processStart().map { StartupTiming.milliseconds(from: $0) }
+    }
 
     private func bootEngine() async {
         do {
             try await supervisor.start()
             lastEngineStartAt = Date()
+            let engineMs = launchToReadyMs
             ptpDegraded = await supervisor.ptpAvailable == false
             if ptpDegraded { dlog("PTP degraded — front/back sync may drift (NTP-only)") }
             await refreshSpeakers()
+            let found = speakers.filter { $0.available }.count
+            if let engineMs, let total = launchToReadyMs {
+                dlog("ready: engine answering \(StartupTiming.label(milliseconds: engineMs)) after launch, \(found) speaker(s) listed after \(StartupTiming.label(milliseconds: total))")
+                aiEvent("engine_ready", fields: ["engine_ms": engineMs, "ready_ms": total,
+                                                 "speakers_listed": found, "ptp": !ptpDegraded])
+            }
             await reconcileEngineState()
             await loadLibrary()
         } catch {
             // A late boot failure must not overwrite a session the user has
             // already started (startStream boots the engine itself if needed).
+            dlog("engine failed to start \(launchToReadyMs.map { StartupTiming.label(milliseconds: $0) } ?? "?") after launch: \(error)")
+            aiEvent("engine_start_failed", level: "error",
+                    fields: ["ms": launchToReadyMs ?? -1, "error": String(describing: error)])
             guard !phase.isOn else { return }
             phase = .error("The audio engine could not start.\n\(error)")
         }
@@ -1841,8 +1149,51 @@ final class DALIStore {
         }
     }
 
+    // MARK: engine release for the Apple AirPlay sender
+
+    /// True while the engine is stopped on purpose. The engine holds UDP 319/320
+    /// (the AirPlay clock ports) for as long as it runs, which stops Apple's own
+    /// AirPlay from connecting to AirPlay 2 speakers. While released, speakers
+    /// come from what DALI remembers and the sliders and volume rules still work.
+    private(set) var engineReleased = false
+
+    /// Stop the engine (or keep it stopped) so the Apple AirPlay sender can connect.
+    func releaseEngineForAppleSender() async {
+        guard backendEnabled else { return }
+        // Set at once, so a Play pressed while this is under way is ignored, not started
+        // and then killed. Switching while DALI is playing simply stops it first.
+        engineReleased = true
+        if phase.isOn { stopStream() }
+        await teardownTask?.value
+        dlog("engine released to the Apple AirPlay sender")
+        aiEvent("engine_released", fields: [:])
+        await supervisor.stop()
+        discoveryMessage = nil
+        applyDiscoveredSpeakers([])
+    }
+
+    /// Bring the engine back for DALI's own sender.
+    func reclaimEngine() async {
+        guard backendEnabled, engineReleased else { return }
+        engineReleased = false
+        dlog("engine reclaimed from the Apple AirPlay sender")
+        aiEvent("engine_reclaimed", fields: [:])
+        // The AirPlay clock ports can take a few seconds to come free after Apple's
+        // AirPlay lets go, so a failed start is retried before it is shown.
+        for attempt in 0..<4 {
+            guard !engineReleased else { return }   // released again while waiting
+            await bootEngine()
+            guard case .error = phase, attempt < 3 else { break }
+            dlog("engine start after the Apple AirPlay sender failed; retrying")
+            phase = .idle
+            try? await Task.sleep(for: .seconds(3))
+        }
+    }
+
     func shutdown() async {
-        capture.stop()
+        guard backendEnabled else { return }
+        stopStream()
+        await teardownTask?.value
         await supervisor.stop()
     }
 
@@ -1851,6 +1202,11 @@ final class DALIStore {
     private var engineRestartInFlight = false
 
     func restartEngine() {
+        guard backendEnabled else { return }
+        guard !engineReleased else {
+            dlog("engine restart ignored: the engine is released to the Apple AirPlay sender")
+            return
+        }
         guard !engineRestartInFlight else {
             dlog("engine restart ignored: one already in flight")
             return
@@ -1885,12 +1241,14 @@ final class DALIStore {
         if playerMode { hasQueue = false; isPlaying = false }
         for i in speakers.indices { speakers[i].health = .off }
         phase = .starting
+        let sessionCleanup = roomSession.invalidateAndStop()
         Task { @MainActor in
             defer { engineRestartInFlight = false }
-            // Off the main actor: stop() can wait on a rebuild holding the
-            // capture lifecycle lock and on CoreAudio teardown.
+            await sessionCleanup.value
+            await teardownTask?.value
+            await stopSpotify()
+            guard generation == streamGeneration else { return }
             await stopCaptureOffMain()
-            lastSentVolumes.removeAll()
             // Rebuild config so a changed audio-delay pref takes effect.
             config = OwnToneConfig(rootDir: config.rootDir,
                                    startBufferMs: Self.savedStartBufferMs())
@@ -1923,7 +1281,7 @@ final class DALIStore {
     private var discoveryTask: Task<Void, Never>?
 
     func refreshSpeakers() async {
-        guard !Self.isPreview else { return }
+        guard backendEnabled, !Self.isPreview, !engineReleased else { return }
         // Join a discovery already running instead of returning at once: boot
         // discovery is slow, and a Play pressed during it used to read the still
         // EMPTY speaker list and fail with "Choose at least one speaker".
@@ -1945,8 +1303,9 @@ final class DALIStore {
         await task.value
     }
 
-    private func applyDiscoveredSpeakers(_ outputs: [Output]) {
-        let preferences = SpeakerPreferences(defaults: .standard)
+    /// Shared discovery application also used by the offline app fixture.
+    func applyDiscoveredSpeakers(_ outputs: [Output]) {
+        let preferences = SpeakerPreferences(defaults: preferences)
         var list: [RoomSpeaker] = []
         let host = hostName()
         let discovered = outputs.filter { $0.name != host && $0.type.localizedCaseInsensitiveContains("AirPlay") }
@@ -1963,6 +1322,8 @@ final class DALIStore {
                 enabled: wasEnabled,
                 relVolume: preferences.volume(name: o.name),
                 gain: preferences.gain(name: o.name),
+                levelCurve: preferences.levelCurve(name: o.name),
+                balanceTrim: preferences.balanceTrim(name: o.name),
                 offsetMs: o.offset_ms ?? 0,   // engine persists this in its own DB
                 health: existing?.health ?? .off))
         }
@@ -1979,8 +1340,11 @@ final class DALIStore {
             list.append(RoomSpeaker(
                 id: "unavailable:\(name)", name: name, type: "AirPlay", kind: kind,
                 enabled: enabled, relVolume: preferences.volume(name: name),
-                gain: preferences.gain(name: name), health: enabled && phase.isOn ? .trouble : .off,
-                available: false))
+                gain: preferences.gain(name: name),
+                levelCurve: preferences.levelCurve(name: name),
+                balanceTrim: preferences.balanceTrim(name: name),
+                health: enabled && phase.isOn ? .trouble : .off,
+                available: engineReleased))
         }
         // Front, back, then extras alphabetically.
         let sorted = list.sorted {
@@ -2009,7 +1373,11 @@ final class DALIStore {
     /// the main actor every health poll — cache it.
     private func hostName() -> String {
         if let c = hostNameCache, Date().timeIntervalSince(c.at) < 300 { return c.name }
-        let name = Host.current().localizedName ?? ""
+        // The computer name comes straight from the system configuration store:
+        // local, instant, and identical to `Host.current().localizedName` on
+        // this Mac. Host.current() stays as the fallback only.
+        let name = (SCDynamicStoreCopyComputerName(nil, nil) as String?)
+            ?? Host.current().localizedName ?? ""
         hostNameCache = (name, Date())
         return name
     }
@@ -2047,6 +1415,11 @@ final class DALIStore {
         let deadline = Date().addingTimeInterval(maxWait)
         while Date() < deadline, phase == .starting, gen == streamGeneration {
             guard let outs = try? await api.outputs() else { break }
+            // Wait for `connected` to clear as well as `streaming`. AirPlay 2 receivers
+            // keep `connected` for a few seconds while they tear the old session
+            // down; a new SETUP that lands inside that window leaves the engine
+            // reporting "streaming" while one receiver (random: front, back or
+            // both) plays nothing. Shortening this wait caused exactly that.
             let busy = outs.filter { names.contains($0.name) && ($0.streaming == true || $0.connected == true) }
             if busy.isEmpty { return }
             try? await Task.sleep(nanoseconds: 300_000_000)
@@ -2054,48 +1427,6 @@ final class DALIStore {
         if phase == .starting, gen == streamGeneration {
             dlog("start settle: previous session still reported after \(Int(maxWait)) s; proceeding")
         }
-    }
-
-    /// Activation check for a start: per speaker, connected-or-streaming (AP2
-    /// often stays connected-only while carrying audio). Retries re-assert the
-    /// FULL output list, which keeps the shared AirPlay 2 session intact; a
-    /// per-member deselect is the last resort and both are re-added after it.
-    /// Returns nil when the start was superseded.
-    private func verifyStartupActivation(chosen: [RoomSpeaker], gen: Int) async -> Set<String>? {
-        let all = chosen.map(\.id)
-        func current() -> Bool { phase == .starting && gen == streamGeneration }
-        func names(_ m: Set<String>) -> String {
-            chosen.filter { m.contains($0.id) }.map(\.name).joined(separator: ", ")
-        }
-        var missing = await awaitOutputsReady(ids: Set(all), timeoutMs: 6_000)
-        guard current() else { return nil }
-        for (attempt, backoffMs, waitMs) in [(1, 0, 8_000), (2, 2_000, 10_000)] where !missing.isEmpty {
-            dlog("startup speakers not ready: \(names(missing)) -> re-assert full output list (try \(attempt))")
-            aiEvent("startup_speaker_retry", level: "warn",
-                    fields: ["attempt": attempt, "speakers": names(missing), "mode": "reassert"])
-            if backoffMs > 0 {
-                try? await Task.sleep(nanoseconds: UInt64(backoffMs) * 1_000_000)
-                guard current() else { return nil }
-            }
-            try? await api.setOutputs(ids: all)
-            missing = await awaitOutputsReady(ids: missing, timeoutMs: waitMs)
-            guard current() else { return nil }
-        }
-        if !missing.isEmpty {
-            dlog("startup speakers still not ready: \(names(missing)) -> last resort: per-member rejoin, then re-add both")
-            aiEvent("startup_speaker_retry", level: "warn",
-                    fields: ["attempt": 3, "speakers": names(missing), "mode": "hard"])
-            for sp in chosen where missing.contains(sp.id) {
-                guard current() else { return nil }
-                try? await api.setSelected(outputID: sp.id, selected: false)
-            }
-            try? await Task.sleep(nanoseconds: 1_500_000_000)
-            guard current() else { return nil }
-            try? await api.setOutputs(ids: all)
-            missing = await awaitOutputsReady(ids: missing, timeoutMs: 10_000)
-            guard current() else { return nil }
-        }
-        return missing
     }
 
     func toggleStream() {
@@ -2121,10 +1452,21 @@ final class DALIStore {
     /// can never both pass this guard). `reason` names the caller in the log so
     /// an unexpected second start is attributable.
     func startStream(reason: String = "user") {
+        guard backendEnabled else { return }
+        guard !engineReleased else {
+            dlog("start ignored (\(reason)): the engine is released to the Apple AirPlay sender")
+            return
+        }
         guard !phase.isOn else {
             dlog("start ignored (\(reason)): already \(phase == .streaming ? "streaming" : "starting")")
             return
         }
+        resolveSavedSource()
+        // Respect the saved selection. Front/back describe placement only;
+        // an explicitly disabled speaker must not join a replacement room.
+        let sessionSource = source
+        let precedingTeardown = teardownTask
+        let requestedAt = Date()
         dlog("start requested (\(reason))")
         sessionMembership.reset()
         streamGeneration += 1
@@ -2137,203 +1479,188 @@ final class DALIStore {
         speakerRecoveryInFlight.removeAll()
         recoveryCooldownUntil.removeAll()
         recoveryFailCounts.removeAll()
-        volumeFailUntil.removeAll()
-        volumeFailCounts.removeAll()
-        forceVolumePush = false
         // A settle task from the previous session must not run its recovery
         // against this one.
         networkSettleTask?.cancel(); networkSettleTask = nil
-        Task { @MainActor in
-            do {
-                // An engine restart owns the engine until it finishes.
-                while engineRestartInFlight, phase == .starting, gen == streamGeneration {
-                    try? await Task.sleep(nanoseconds: 250_000_000)
+        let dependencies = RoomSessionController.Dependencies(
+            prepare: { context in
+                while self.engineRestartInFlight {
+                    try context.check()
+                    try await Task.sleep(for: .milliseconds(250))
                 }
-                guard phase == .starting, gen == streamGeneration else { return }
-                if await !api.isUp() {
-                    try await supervisor.start()
-                    lastEngineStartAt = Date()
+                // A longer buffer is wanted than the engine was started with (it lost packets
+                // last time, or the link got weaker): restart it with that before this session.
+                // Only ever longer, so a start is never slowed by a buffer shrinking back.
+                let wanted = Self.savedStartBufferMs()
+                if wanted > self.config.startBufferMs, !self.engineReleased {
+                    self.dlog("raising the buffer \(self.config.startBufferMs) -> \(wanted) ms: restarting the engine first")
+                    self.config = OwnToneConfig(rootDir: self.config.rootDir, startBufferMs: wanted)
+                    await self.supervisor.updateConfig(self.config)
+                    await self.supervisor.setResumePlayback(false)
+                    try? await self.api.stop()
+                    try? await self.supervisor.restart()
+                    self.lastEngineStartAt = Date()
+                    self.applyRoomDelay()
+                    try context.check()
                 }
-                ptpDegraded = await supervisor.ptpAvailable == false
-                if ptpDegraded { dlog("PTP degraded at stream start — will show NEEDS YOU") }
-                guard phase == .starting, gen == streamGeneration else { return }
-                // The previous session (and a fresh engine) must settle before
-                // the same speakers are selected again.
-                await settleAfterTeardown(gen: gen)
-                guard phase == .starting, gen == streamGeneration else { return }
-                resolveSavedSource()
-                await refreshSpeakers()
-                // A fresh engine has not discovered the speakers yet.
-                if Date().timeIntervalSince(lastEngineStartAt) < 30 {
-                    var tries = 0
-                    while tries < 8, phase == .starting, gen == streamGeneration,
-                          sessionSpeakers().contains(where: { $0.enabled && !$0.available }) {
-                        tries += 1
-                        try? await Task.sleep(nanoseconds: 750_000_000)
-                        await refreshSpeakers()
+                if await !self.api.isUp() {
+                    try await self.supervisor.start()
+                    self.lastEngineStartAt = Date()
+                }
+                try context.check()
+                let ptpAvailable = await self.supervisor.ptpAvailable
+                try context.check()
+                self.ptpDegraded = !ptpAvailable
+                // Never join a teardown created by Stop during this startup:
+                // that teardown itself waits for this startup to drain.
+                await precedingTeardown?.value
+                try context.check()
+                await self.refreshSpeakers()
+                try context.check()
+                if Date().timeIntervalSince(self.lastEngineStartAt) < 30 {
+                    for _ in 0..<8 {
+                        guard self.speakers.contains(where: { $0.enabled && !$0.available }) else { break }
+                        try await Task.sleep(for: .milliseconds(750))
+                        try context.check()
+                        await self.refreshSpeakers()
+                        try context.check()
                     }
-                    guard phase == .starting, gen == streamGeneration else { return }
                 }
-                // Select the whole session set (front/back always, enabled extras)
-                // so toggling a pair member later only mutes it, never changes the
-                // group, preserving sync.
-                let chosen = sessionSpeakers()
+                let chosen = self.sessionSpeakers()
                 guard chosen.contains(where: \.enabled) else {
-                    guard gen == streamGeneration else { return }
-                    phase = .error(speakers.contains(where: \.enabled)
-                        ? "Your selected speakers are unavailable. Check their power and Wi-Fi, then try again."
-                        : "Choose at least one speaker in Settings → Room.")
-                    return
+                    throw BeamAPIError(what: self.speakers.contains(where: \.enabled)
+                        ? "Your selected speakers are unavailable. Check their power and Wi-Fi."
+                        : "Choose at least one speaker in Room settings.")
                 }
-                for speaker in chosen { sessionMembership.retain(speaker.name) }
-                lastSentVolumes.removeAll()
-                markHealth(of: chosen.map(\.id), .connecting)
-                // Stop any stale pipe session before selecting this run's group.
-                // Selecting first and then stopping left a race where the UI
-                // still said selected while one newly-created AirPlay session
-                // had already been torn down.
-                try? await api.stop()
-                guard phase == .starting, gen == streamGeneration else { return }
-                try await api.setOutputs(ids: chosen.map(\.id))
-                // Always start SILENT, then fade in after playback begins.
-                for sp in chosen {
-                    guard phase == .starting, gen == streamGeneration else { return }
-                    try? await api.setVolume(outputID: sp.id, volume: 0)
+                for speaker in chosen { self.sessionMembership.retain(speaker.name) }
+                self.markHealth(of: chosen.map(\.id), .connecting)
+                self.updateVolumeIntent()
+                return RoomSessionController.Plan(speakers: chosen.map {
+                    RoomSessionController.Speaker(id: $0.id, name: $0.name)
+                }, allowsCaptureReset: sessionSource != .spotify)
+            },
+            isCurrent: { self.phase == .starting && self.streamGeneration == gen },
+            settle: { context in
+                await self.settleAfterTeardown(gen: gen)
+                try context.check()
+            },
+            setOutputs: { try await self.api.setOutputs(ids: $0) },
+            setSelected: { try await self.api.setSelected(outputID: $0, selected: $1) },
+            outputs: { try await self.api.outputs() },
+            silenceOutputs: { ids in
+                for id in ids { try await self.silenceOutput(id) }
+            },
+            startCapture: { context in
+                // The source is frozen at admission. Source changes replace
+                // the session and the preceding teardown owns the old child.
+                guard await self.stopSpotify() else {
+                    throw BeamAPIError(what: "The previous Spotify audio producer did not exit. Retry after it has stopped.")
                 }
-                guard phase == .starting, gen == streamGeneration else { return }
-
-                // Spotify Connect: librespot feeds the same pipe PTP-synced to front/back.
-                // If librespot binary is present, it is the SOLE writer — starting a
-                // ProcessTap as well would garble the FIFO with two interleaved writers.
-                if source == .spotify {
-                    await startSpotifyIfNeeded()
-                    let hasLibrespot = await spotifySupervisor.isLibrespotAvailable
-                    // Both awaits above are windows in which the user can press
-                    // stop; starting a tap after that would leave an orphaned
-                    // capture running under an idle phase.
-                    guard phase == .starting, gen == streamGeneration else { return }
-                    if hasLibrespot {
-                        dlog("Spotify mode with librespot — skipping ProcessTap, librespot owns the pipe")
-                        // Ensure pipe exists (OwnTone materializes it) even without capture
-                        try? FileManager.default.createDirectory(at: URL(fileURLWithPath: config.pipePath.path).deletingLastPathComponent(), withIntermediateDirectories: true)
-                    } else {
-                        dlog("Spotify mode without librespot — tapping Spotify app (\(source.label))")
-                        try capture.start(fifoPath: config.pipePath.path,
-                                          muteLocal: true,
-                                          source: source.tapSource)
-                    }
-                } else {
-                    // DALI takes over the speakers: whatever they were playing is replaced.
-                    try capture.start(fifoPath: config.pipePath.path,
-                                      muteLocal: true,
-                                      source: source.tapSource)
+                try context.check()
+                if sessionSource == .spotify {
+                    try await self.startSpotifyIfNeeded(context: context)
+                    try context.check()
+                    let direct = await self.spotifySupervisor.isLibrespotAvailable
+                    try context.check()
+                    if direct { return }
                 }
-                await supervisor.setResumePlayback(true)
-                guard phase == .starting, gen == streamGeneration else {
-                    return
+                // Set the latest shared gain before admission and preserve it
+                // while HAL setup waits. The capture layer rechecks it at frame1.
+                self.applyMasterGain()
+                try context.check()
+                try await self.capture.startAsync(fifoPath: self.config.pipePath.path,
+                                                  muteLocal: true, source: sessionSource.tapSource)
+                try context.check()
+            },
+            stopCapture: { self.capture.stop() },
+            stopPlayback: { try await self.api.stop() },
+            setResumePlayback: { await self.supervisor.setResumePlayback($0) },
+            isPlaying: { try await self.api.playerState().state == "play" },
+            rescan: { try await self.api.rescan() },
+            pipeTrackURI: { try await self.api.pipeTrackURI(named: "beam.pipe") },
+            playPipe: { try await self.api.playPipe(uri: $0) },
+            didTearDown: { self.lastTeardownAt = Date() },
+            event: { self.noteStartupRecovery($0) }
+        )
+        Task { @MainActor in
+            guard phase == .starting, gen == streamGeneration else { return }
+            do {
+                guard let result = try await roomSession.start(using: dependencies),
+                      phase == .starting, gen == streamGeneration else { return }
+                readyOutputIDs = result.readyIDs
+                markHealth(of: result.plan.ids, .live)
+                markHealth(of: Array(result.missing), .trouble)
+                if !result.missing.isEmpty {
+                    aiEvent("start_partial", level: "warn", fields: ["missing_ids": Array(result.missing)])
                 }
-
-                // The engine's pipe_autostart begins playback by itself as soon as
-                // audio flows. Queueing while it does that returns 500, so first
-                // give autostart a moment, then queue manually only if needed.
-                var playing = false
-                for _ in 0..<8 {
-                    guard phase == .starting, gen == streamGeneration else { return }
-                    if let st = try? await api.playerState(), st.state == "play" { playing = true; break }
-                    try await Task.sleep(nanoseconds: 500_000_000)
-                }
-                if !playing {
-                    try? await api.rescan()
-                    var uri: String?
-                    for _ in 0..<6 {
-                        guard phase == .starting, gen == streamGeneration else { return }
-                        if let u = (try? await api.pipeTrackURI(named: "beam.pipe")) ?? nil { uri = u; break }
-                        try await Task.sleep(nanoseconds: 500_000_000)
-                    }
-                    if let uri {
-                        try? await api.playPipe(uri: uri)   // tolerated: autostart may win the race
-                    }
-                    // Either our play or a late autostart counts.
-                    for _ in 0..<6 {
-                        guard phase == .starting, gen == streamGeneration else { return }
-                        if let st = try? await api.playerState(), st.state == "play" { playing = true; break }
-                        try await Task.sleep(nanoseconds: 500_000_000)
-                    }
-                }
-                guard phase == .starting, gen == streamGeneration else { return }
-                guard playing else {
-                    capture.stop()
-                    try? await api.stop()
-                    guard gen == streamGeneration else { return }
-                    await supervisor.setResumePlayback(false)
-                    guard gen == streamGeneration else { return }
-                    phase = .error("The room did not start playing. Is any audio playing on the Mac?")
-                    return
-                }
-                // Do not trust `selected`: OwnTone persists that preference even
-                // when the actual AirPlay session is stopped or failed. Activation
-                // is verified per speaker and retried gently (full output list
-                // re-asserted, partner untouched); see verifyStartupActivation.
-                guard let missing = await verifyStartupActivation(chosen: chosen, gen: gen) else { return }
-                if !missing.isEmpty {
-                    let names = chosen.filter { missing.contains($0.id) }.map(\.name).joined(separator: ", ")
-                    guard missing.count < chosen.count else {
-                        capture.stop()
-                        lastTeardownAt = Date()
-                        try? await api.stop()
-                        guard gen == streamGeneration else { return }
-                        markHealth(of: chosen.map(\.id), .off)
-                        throw BeamAPIError(what: "Speakers did not connect: \(names)")
-                    }
-                    // One speaker is playing: keep it playing. The other stays
-                    // visible as `.trouble` and the health loop keeps rejoining it
-                    // with backoff (never abandoned, never tearing the partner down).
-                    dlog("stream starting with \(names) not yet connected -> health loop keeps rejoining it")
-                    aiEvent("start_partial", level: "warn", fields: ["missing": names])
-                }
-                markHealth(of: chosen.map(\.id), .live)
-                markHealth(of: Array(missing), .trouble)
-                // Output ids are session-scoped, so the engine's stored offsets
-                // do not necessarily follow a new session — re-assert zero.
                 resetOffsetCache()
                 enforceZeroOffsets(force: true)
                 phase = .streaming
-                dlog("stream started -> \(chosen.map(\.name).joined(separator: ", ")) (tap clockAnchored=\(capture.isClockAnchored))")
-                startHealthLoop()
-                startLevelLoop()
-                startFlightRecorder()
+                startHealthLoop(); startLevelLoop(); startFlightRecorder()
+                let readyMs = StartupTiming.milliseconds(from: requestedAt)
+                dlog("stream live \(StartupTiming.label(milliseconds: readyMs)) after start (\(reason)); \(result.readyIDs.count) of \(result.plan.ids.count) speaker(s) up")
+                aiEvent("stream_ready", fields: ["ms": readyMs, "reason": reason,
+                                                 "ready": result.readyIDs.count, "wanted": result.plan.ids.count])
                 await fadeIn()
-            } catch let e as ProcessTap.TapError {
+            } catch let error as ProcessTap.TapError {
                 guard gen == streamGeneration else { return }
-                capture.stop()
-                lastTeardownAt = Date()
-                try? await api.stop()
-                guard gen == streamGeneration else { return }
-                await supervisor.setResumePlayback(false)
-                guard gen == streamGeneration else { return }
-                for i in speakers.indices { speakers[i].health = .off }
-                phase = .error("DALI needs permission to capture your Mac's audio. (\(e.stage))")
+                noteStartFailure(error, after: requestedAt, reason: reason)
+                markHealth(of: sessionSpeakers().map(\.id), .off)
+                phase = .error("DALI needs permission to capture your Mac's audio. (\(error.stage))")
             } catch {
                 guard gen == streamGeneration else { return }
-                capture.stop()
-                lastTeardownAt = Date()
-                try? await api.stop()
-                guard gen == streamGeneration else { return }
-                await supervisor.setResumePlayback(false)
-                guard gen == streamGeneration else { return }
-                healthTask?.cancel()
-                levelTask?.cancel()
-                flightTask?.cancel()
-                for i in speakers.indices { speakers[i].health = .off }
-                phase = .error("Could not start the stream.\n\(error)")
+                noteStartFailure(error, after: requestedAt, reason: reason)
+                markHealth(of: sessionSpeakers().map(\.id), .off)
+                phase = .error("Could not start the stream.\n\(error.localizedDescription)")
             }
         }
     }
 
+    /// A failed start used to leave nothing in either log (`stream_start` is
+    /// written only once a start has succeeded, and the V2 recovery steps wrote
+    /// no readable line), so a 60-second spinner that ended in an error could
+    /// not be reconstructed afterwards.
+    private func noteStartFailure(_ error: Error, after requestedAt: Date, reason: String) {
+        let ms = StartupTiming.milliseconds(from: requestedAt)
+        dlog("start failed after \(StartupTiming.label(milliseconds: ms)) (\(reason)): \(error.localizedDescription)")
+        aiEvent("stream_start_failed", level: "error",
+                fields: ["ms": ms, "reason": reason, "error": String(describing: error)])
+    }
+
+    private func noteStartupRecovery(_ event: RoomSessionController.Event) {
+        let names = event.missingIDs.map { id in speakers.first { $0.id == id }?.name ?? id }
+        dlog("startup recovery \(event.step): not ready yet: \(names.joined(separator: ", "))")
+        aiEvent("startup_recovery", level: "warn",
+                fields: ["step": event.step, "missing": names])
+    }
+
+    private var teardownTask: Task<Void, Never>?
+
+    /// All terminal phases drain startup and the previous producer before a
+    /// replacement can use the same FIFO. Next generation never skips teardown.
+    private func enqueueSessionTeardown() {
+        lastTeardownAt = Date()
+        capture.stop()
+        let sessionCleanup = roomSession.invalidateAndStop()
+        let previousTeardown = teardownTask
+        teardownTask = Task {
+            await previousTeardown?.value
+            await sessionCleanup.value
+            await stopSpotify()
+            // Player sessions have no RoomSession startup dependency snapshot.
+            // Their stop lives in this same barrier, before any replacement.
+            try? await api.stop()
+            try? await api.setOutputs(ids: [])
+            await supervisor.setResumePlayback(false)
+        }
+    }
+
     func stopStream() {
+        cancelPendingWake()
+        guard backendEnabled else { phase = .idle; return }
         lastTeardownAt = Date()
         streamGeneration += 1
-        let generation = streamGeneration
+        _ = api.invalidateSession()
         captureWatchdogInFlight = false
         captureStallRestartUsed = false
         healthTask?.cancel()
@@ -2342,22 +1669,11 @@ final class DALIStore {
         speakerRecoveryInFlight.removeAll()
         recoveryCooldownUntil.removeAll()
         recoveryFailCounts.removeAll()
-        volumeFailUntil.removeAll()
-        volumeFailCounts.removeAll()
-        forceVolumePush = false
         fading = false
         audioLevel = 0
         resetCutState()
         networkSettleTask?.cancel(); networkSettleTask = nil
         capture.stop()
-        Task {
-            guard generation == streamGeneration else { return }
-            await supervisor.setResumePlayback(false)
-            guard generation == streamGeneration else { return }
-            try? await api.stop()
-            guard generation == streamGeneration else { return }
-            await stopSpotify()
-        }
         for i in speakers.indices { speakers[i].health = .off }
         dlog("stream stopped by user")
         aiEvent("stream_stop", fields: ["reason": "user"])
@@ -2366,23 +1682,23 @@ final class DALIStore {
     }
 
     // MARK: Spotify Connect
-    private func startSpotifyIfNeeded() async {
-        // Only run when source is Spotify and we're streaming
-        guard source == .spotify else { return }
-        dlog("Spotify Connect starting — device 'DALI' will appear in Spotify app")
+    private func startSpotifyIfNeeded(context: RoomSessionController.Context) async throws {
+        try context.check()
+        dlog("Spotify Connect starting")
         aiEvent("spotify_start", fields: ["device": "DALI"])
-        try? await spotifySupervisor.start()
-        // If librespot is available, it feeds the pipe directly — no tap needed.
-        // If not, we already mapped tapSource to the Spotify app pid above,
-        // so the existing capture path will tap Spotify desktop audio.
+        try await spotifySupervisor.start()
+        try context.check()
         if await spotifySupervisor.state == .running {
-            dlog("Spotify Connect ready — select 'DALI' in Spotify")
+            try context.check()
+            dlog("Spotify Connect ready")
         }
     }
 
-    private func stopSpotify() async {
-        await spotifySupervisor.stop()
-        dlog("Spotify Connect stopped")
+    @discardableResult
+    private func stopSpotify() async -> Bool {
+        let stopped = await spotifySupervisor.stopConfirmed()
+        dlog(stopped ? "Spotify Connect stopped" : "Spotify producer shutdown not confirmed")
+        return stopped
     }
 
     private func markHealth(of ids: [String], _ h: RoomSpeaker.Health) {
@@ -2400,10 +1716,10 @@ final class DALIStore {
     /// Mirror = capture the Mac's audio (Chrome, YouTube, anything) and relay it.
     /// Player = the engine sources music from your library itself (no capture).
     enum RoomMode: String, Hashable { case mirror, player }
-    var mode: RoomMode = RoomMode(rawValue: UserDefaults.standard.string(forKey: "dali.mode") ?? "") ?? .mirror {
+    var mode: RoomMode = .mirror {
         didSet {
             guard oldValue != mode else { return }
-            UserDefaults.standard.set(mode.rawValue, forKey: "dali.mode")
+            preferences.set(mode.rawValue, forKey: "dali.mode")
             // Switching mode stops whatever the other mode was doing.
             if phase.isOn { oldValue == .player ? stopPlayback() : stopStream() }
         }
@@ -2423,6 +1739,7 @@ final class DALIStore {
 
     /// Load the album list from the engine's library (best-effort).
     func loadLibrary() async {
+        guard backendEnabled else { return }
         guard !Self.isPreview else { return }
         guard await api.isUp() else { return }
         library = (try? await api.albums()) ?? []
@@ -2453,64 +1770,94 @@ final class DALIStore {
     }
 
     /// Select the speakers, make sure the engine is up, and start silent.
-    private func prepareRoom() async -> Bool {
-        if await !api.isUp() { try? await supervisor.start() }
+    private func prepareRoom(current: @MainActor () -> Bool) async -> Bool {
+        guard current() else { return false }
+        if await !api.isUp() {
+            guard current() else { return false }
+            try? await supervisor.start()
+        }
+        guard current() else { return false }
         await refreshSpeakers()
-        // The user may have pressed stop while discovery ran; an error or a
-        // selection pushed now would resurrect a session they already ended.
-        guard phase == .starting else { return false }
+        guard current() else { return false }
         let chosen = sessionSpeakers()
         guard chosen.contains(where: \.enabled) else {
             phase = .error("Choose an available speaker in Settings → Room.")
             return false
         }
         for speaker in chosen { sessionMembership.retain(speaker.name) }
-        lastSentVolumes.removeAll()
         markHealth(of: chosen.map(\.id), .connecting)
-        try? await api.setOutputs(ids: chosen.map(\.id))
-        for sp in chosen {
-            guard phase == .starting else { return false }
-            try? await api.setVolume(outputID: sp.id, volume: 0)
-        }
-        return phase == .starting
+        updateVolumeIntent()
+        return current()
     }
 
     private func playToRoom(_ start: @escaping (BeamAPI) async throws -> Void) {
+        guard backendEnabled, playerMode else { return }
         guard !startingPlayback else { return }
+        streamGeneration += 1
         playerCommandGeneration += 1
         let command = playerCommandGeneration
         let stream = streamGeneration
+        let precedingTeardown = teardownTask
         startingPlayback = true
         phase = .starting
         Task {
-            defer { startingPlayback = false }
+            defer { if command == playerCommandGeneration { startingPlayback = false } }
             // stopPlayback() bumps both counters. Every await below is a window
             // for it; without these checks a stopped room flipped itself back
             // to `.streaming` and kept playing under an idle UI.
             @MainActor func current() -> Bool {
-                command == playerCommandGeneration && stream == streamGeneration && phase == .starting
+                playerMode && command == playerCommandGeneration && stream == streamGeneration && phase == .starting
             }
-            guard await prepareRoom(), current() else { return }
-            do { try await start(api) }
+            guard current() else { return }
+            await precedingTeardown?.value
+            guard current() else { return }
+            let producerStopped = await stopSpotify()
+            guard current() else { return }
+            guard producerStopped else {
+                phase = .error("The previous Spotify audio producer did not exit. Retry after it has stopped.")
+                return
+            }
+            guard await prepareRoom(current: current), current() else { return }
+            await settleAfterTeardown(gen: stream)
+            guard current() else { return }
+            do {
+                let ids = sessionSpeakers().map(\.id)
+                try await api.setOutputs(ids: ids)
+                guard current() else { return }
+                for id in ids {
+                    try await silenceOutput(id)
+                    guard current() else { return }
+                }
+                try await start(api)
+            }
             catch {
                 guard current() else { return }
                 markHealth(of: sessionSpeakers().map(\.id), .off)
                 phase = .error("Could not start playback.\n\(error)")
                 return
             }
-            guard current() else {
-                // Stopped while the queue was being built: the engine is now
-                // playing something nobody asked for.
-                if !phase.isOn { try? await api.stop() }
+            guard current() else { return }
+            // A rejected selection must not be presented as a live room.
+            do { try await api.setOutputs(ids: sessionSpeakers().map(\.id)) }
+            catch {
+                guard current() else { return }
+                phase = .error("Could not select the room speakers.\n\(error.localizedDescription)")
                 return
             }
-            // DALI takes over the speakers whatever they were doing.
-            try? await api.setOutputs(ids: sessionSpeakers().map(\.id))
             guard current() else { return }
+            let ids = Set(sessionSpeakers().map(\.id))
+            let missing = await awaitOutputsReady(ids: ids, timeoutMs: 8_000)
+            guard current() else { return }
+            guard missing.count < ids.count else {
+                markHealth(of: Array(missing), .trouble)
+                phase = .error("The room's speakers did not connect.")
+                return
+            }
             hasQueue = true
             isPlaying = true
             phase = .streaming
-            markHealth(of: sessionSpeakers().map(\.id), .live)
+            markHealth(of: Array(ids.subtracting(missing)), .live)
+            markHealth(of: Array(missing), .trouble)
             dlog("player: started -> \(sessionSpeakers().map(\.name).joined(separator: ", "))")
             startHealthLoop()
             startNowPlayingLoop()
@@ -2534,9 +1881,11 @@ final class DALIStore {
         nowTask?.cancel(); nowTask = nil
         isPlaying = shouldPlay
         if !shouldPlay {
-            audioLevel = 0; bassLevel = 0; trebleLevel = 0
+            audioLevel = 0; bassLevel = 0; trebleLevel = 0; midLevel = 0; spectrum = []
         }
         Task { @MainActor in
+            guard playerMode, command == playerCommandGeneration,
+                  stream == streamGeneration, phase == .streaming else { return }
             do {
                 if shouldPlay { try await api.play() }
                 else { try await api.pause() }
@@ -2559,23 +1908,17 @@ final class DALIStore {
     func previous() { Task { try? await api.previous() } }
 
     func stopPlayback() {
+        cancelPendingWake()
+        guard backendEnabled else { phase = .idle; return }
         streamGeneration += 1
         playerCommandGeneration += 1
-        let command = playerCommandGeneration
+        _ = api.invalidateSession()
+        startingPlayback = false
         nowTask?.cancel(); nowTask = nil
         healthTask?.cancel()
         networkSettleTask?.cancel(); networkSettleTask = nil
-        volumeFailUntil.removeAll()
-        volumeFailCounts.removeAll()
-        forceVolumePush = false
         fading = false
         resetCutState()
-        // A newer play command replaces the queue itself (clear=true); a stale
-        // stop landing after it would silence the room that just started.
-        Task {
-            guard command == playerCommandGeneration else { return }
-            try? await api.stop()
-        }
         isPlaying = false; hasQueue = false; phase = .idle
         nowTitle = ""; nowArtist = ""; nowProgress = 0; audioLevel = 0
         for i in speakers.indices { speakers[i].health = .off }
@@ -2618,7 +1961,7 @@ final class DALIStore {
                 if trebleLevel != t { trebleLevel = t }
                 try? await Task.sleep(nanoseconds: 700_000_000)
             }
-            audioLevel = 0; bassLevel = 0; trebleLevel = 0
+            audioLevel = 0; bassLevel = 0; trebleLevel = 0; midLevel = 0; spectrum = []
         }
     }
 
@@ -2634,22 +1977,31 @@ final class DALIStore {
         let alreadyJoined = sessionMembership.contains(name: speaker.name, enabled: false,
                                                        primary: speaker.kind != .extra)
         speakers[idx].enabled = enabling
-        UserDefaults.standard.set(enabling, forKey: "dali.on.\(speaker.name)")
+        preferences.set(enabling, forKey: "dali.on.\(speaker.name)")
         guard phase == .streaming else { return }
         let sp = speakers[idx]
         if enabling && !alreadyJoined {
+            guard backendEnabled else {
+                speakers[idx].health = .connecting
+                scheduleVolumePush()
+                return
+            }
             sessionMembership.retain(sp.name)
             speakers[idx].health = .connecting
             let generation = streamGeneration
             speakerRecoveryInFlight.insert(sp.id)
             Task { @MainActor in
                 defer {
-                    if generation == streamGeneration { speakerRecoveryInFlight.remove(sp.id) }
+                    if generation == streamGeneration {
+                        speakerRecoveryInFlight.remove(sp.id)
+                        volumeController.releaseHold(sp.id, session: generation)
+                        scheduleVolumePush()
+                    }
                 }
                 do {
                     // Join quietly. Reading readiness before restoring volume
                     // avoids reporting a selected-but-disconnected device live.
-                    try await writeVolume(sp.id, 0)
+                    try await silenceOutput(sp.id)
                     guard streamIsCurrent(generation) else { return }
                     try await api.setSelected(outputID: sp.id, selected: true)
                     guard streamIsCurrent(generation) else { return }
@@ -2674,16 +2026,38 @@ final class DALIStore {
             // preserving the shared clock for both primary and extra speakers.
             let ready = readyOutputIDs.contains(sp.id)
             speakers[idx].health = enabling ? (ready ? .live : .connecting) : .off
-            if enabling { readyStrikes[sp.id] = ready ? 2 : 0; troubleStrikes[sp.id] = 0 }
-            lastSentVolumes[sp.id] = nil
-            prioritizeManualVolumeChange(ids: [sp.id])
+            if enabling {
+                readyStrikes[sp.id] = ready ? 2 : 0
+                troubleStrikes[sp.id] = 0
+                if !ready {
+                    // A deliberate retry must not inherit an automatic five-minute backoff.
+                    recoveryCooldownUntil[sp.id] = nil
+                    recoveryFailCounts[sp.id] = 0
+                    if backendEnabled {
+                        let generation = streamGeneration
+                        Task { @MainActor in
+                            // Whole-room recovery owns selection until it finishes.
+                            while resumeInFlight {
+                                guard streamIsCurrent(generation),
+                                      speakers.contains(where: { $0.id == sp.id && $0.enabled }) else { return }
+                                do { try await Task.sleep(for: .milliseconds(100)) } catch { return }
+                            }
+                            guard streamIsCurrent(generation),
+                                  let current = speakers.first(where: { $0.id == sp.id }),
+                                  current.enabled, current.available, current.health != .live else { return }
+                            recoveryCooldownUntil[sp.id] = nil
+                            recoveryFailCounts[sp.id] = 0
+                            await recoverSpeaker(current)
+                        }
+                    }
+                }
+            }
             scheduleVolumePush()
         }
     }
 
-    /// Speakers that are part of the live AirPlay session: the front/back pair is
-    /// always in the group while streaming (muted when "off" to preserve sync);
-    /// extras join when enabled and remain silently joined until playback stops.
+    /// Selected speakers join regardless of placement. Once joined, switching
+    /// one off mutes it until playback stops, preserving the shared clock.
     private func sessionSpeakers() -> [RoomSpeaker] {
         speakers.filter {
             $0.available && sessionMembership.contains(name: $0.name, enabled: $0.enabled,
@@ -2692,15 +2066,14 @@ final class DALIStore {
     }
 
     // MARK: volume model
-    // Effective speaker volume = relVolume * master/100 * balanceWeight.
+    // Receiver references and shared PCM master are planned together.
 
     func setRelVolume(_ v: Double, for speaker: RoomSpeaker) {
         guard let idx = speakers.firstIndex(where: { $0.id == speaker.id }) else { return }
         guard v.isFinite else { return }
         let clamped = min(max(v, 0), 100)
         speakers[idx].relVolume = clamped
-        UserDefaults.standard.set(clamped, forKey: "dali.vol.\(speaker.name)")
-        if phase == .streaming { prioritizeManualVolumeChange(ids: [speaker.id]) }
+        preferences.set(clamped, forKey: "dali.vol.\(speaker.name)")
         scheduleVolumePush()
     }
 
@@ -2712,8 +2085,17 @@ final class DALIStore {
         guard g.isFinite else { return }
         let clamped = min(max(g, 0.25), 4)
         speakers[idx].gain = clamped
-        UserDefaults.standard.set(clamped, forKey: "dali.gain.\(speaker.name)")
-        lastSentVolumes[speaker.id] = nil
+        preferences.set(clamped, forKey: "dali.gain.\(speaker.name)")
+        scheduleVolumePush()
+    }
+
+    /// The one balance trim (percent, whole numbers, -30...30) that shifts a curve
+    /// speaker's whole leveling curve up or down. 0 is the measured curve.
+    func setBalanceTrim(_ percent: Double, for speaker: RoomSpeaker) {
+        guard let idx = speakers.firstIndex(where: { $0.id == speaker.id }), percent.isFinite else { return }
+        let clamped = min(max(percent.rounded(), RoomVolumePolicy.trimRange.lowerBound), RoomVolumePolicy.trimRange.upperBound)
+        speakers[idx].balanceTrim = clamped
+        preferences.set(clamped, forKey: "dali.balance.\(speaker.name)")
         scheduleVolumePush()
     }
 
@@ -2727,7 +2109,7 @@ final class DALIStore {
             let clamped = volumeLimit.isFinite ? min(max(volumeLimit, 1), 100) : oldValue
             if clamped != volumeLimit { volumeLimit = clamped }
             guard clamped != oldValue else { return }
-            UserDefaults.standard.set(volumeLimit, forKey: "dali.volumeLimit")
+            preferences.set(volumeLimit, forKey: "dali.volumeLimit")
             scheduleVolumePush()
         }
     }
@@ -2735,8 +2117,9 @@ final class DALIStore {
     /// What we have CONFIRMED the engine holds. Only written after a PUT
     /// actually succeeded — see scheduleOffsetPush().
     private var lastSentOffset: [String: Int] = [:]
-    private var offsetPushInFlight = false
+    private var offsetPushTask: Task<Void, Never>?
     private var offsetPushAgain = false
+    private var offsetPushEpoch = 0
 
     /// Drive both pair members to a timing offset of zero.
     ///
@@ -2749,7 +2132,7 @@ final class DALIStore {
     ///
     /// Still pushed rather than merely assumed, for two reasons: output ids are
     /// session-scoped so a new stream can inherit whatever the engine last
-    /// stored (the DB held a stale `Front = 60` from the old control long
+    /// stored (the DB held a stale `MICHAEL D = 60` from the old control long
     /// after the app had moved on), and a muted pair member stays in the AirPlay
     /// group, so skipping it would leave a wrong value to surface on unmute.
     ///
@@ -2771,59 +2154,46 @@ final class DALIStore {
         scheduleOffsetPush()
     }
 
-    /// Single serialized, latest-wins offset pusher.
-    ///
-    /// THE BUG THIS REPLACES (why Space had no audible effect): the old version
-    /// wrote `lastSentOffset[id] = want` at the moment it QUEUED a batch, then
-    /// did `offsetPushTask?.cancel()` on the very next drag tick. A drag emits
-    /// ticks far faster than an HTTP round-trip completes, so batch after batch
-    /// was cancelled before its PUT landed — while the cache recorded every one
-    /// of them as already sent. From then on the dedupe suppressed those exact
-    /// values forever, so returning the slider to a position it had passed
-    /// through sent nothing at all and the engine kept a stale offset.
-    ///
-    /// This version never cancels an in-flight request and only records a value
-    /// once the engine has actually accepted it. A failed PUT clears the cache
-    /// entry so the next pass retries instead of believing a write that never
-    /// happened. Same proven shape as scheduleVolumePush().
+    /// Zero-offset assertions are serialized and fenced by session and epoch.
+    /// A canceled HTTP request drains through BeamAPI, but its late receipt
+    /// cannot populate a replacement engine/session's offset cache.
     private func scheduleOffsetPush() {
-        if offsetPushInFlight { offsetPushAgain = true; return }
-        offsetPushInFlight = true
-        Task {
+        guard backendEnabled, phase.isOn else { return }
+        if offsetPushTask != nil { offsetPushAgain = true; return }
+        let generation = streamGeneration
+        let epoch = offsetPushEpoch
+        offsetPushTask = Task {
+            defer { if offsetPushEpoch == epoch { offsetPushTask = nil } }
             repeat {
+                guard phase.isOn, generation == streamGeneration,
+                      epoch == offsetPushEpoch, !Task.isCancelled else { return }
                 offsetPushAgain = false
-                // Re-read the model each pass, so a drag that moved on while we
-                // were mid-request converges on the LATEST value, not a stale
-                // snapshot captured when the batch was queued.
-                let snapshot = sessionSpeakers()
-                    .map { ($0.id, $0.offsetMs) }
+                let snapshot = sessionSpeakers().map { ($0.id, $0.offsetMs) }
                 for (id, ms) in snapshot where lastSentOffset[id] != ms {
-                    // During playback an offset is only ever written at session
-                    // start (resetOffsetCache clears this stamp); there is no
-                    // user offset control any more. Anything else — an engine reading that
-                    // disagrees with the model on every 3 s poll — is throttled
-                    // to one attempt per 20 s per speaker instead of a PUT per
-                    // poll; the next poll retries.
+                    guard phase.isOn, generation == streamGeneration,
+                          epoch == offsetPushEpoch, !Task.isCancelled else { return }
                     if let last = lastOffsetWriteAt[id], Date().timeIntervalSince(last) < 20,
                        phase == .streaming { continue }
                     lastOffsetWriteAt[id] = Date()
                     do {
                         try await api.setOffset(outputID: id, offsetMs: ms)
+                        guard generation == streamGeneration, epoch == offsetPushEpoch,
+                              !Task.isCancelled else { return }
                         lastSentOffset[id] = ms
                     } catch {
-                        // Never claim a write we did not land.
+                        guard generation == streamGeneration, epoch == offsetPushEpoch else { return }
                         lastSentOffset[id] = nil
                     }
                 }
-                try? await Task.sleep(nanoseconds: 80_000_000)   // pace a drag
             } while offsetPushAgain
-            offsetPushInFlight = false
         }
     }
 
-    /// Forget what we believe the engine holds — after a restart or a new
-    /// session its output ids and stored offsets may not match ours.
-    func resetOffsetCache() { lastSentOffset.removeAll(); lastOffsetWriteAt.removeAll() }
+    func resetOffsetCache() {
+        offsetPushEpoch += 1
+        offsetPushTask?.cancel(); offsetPushTask = nil; offsetPushAgain = false
+        lastSentOffset.removeAll(); lastOffsetWriteAt.removeAll()
+    }
 
     /// INSTANT CUT-OFF.
     ///
@@ -3006,7 +2376,6 @@ final class DALIStore {
         // CUT/restore pairs in the log, each up to four redundant PUTs. The
         // target crossing zero is already treated as urgent by the push lane,
         // and a flip that reverts before the pass runs sends nothing at all.
-        prioritizeManualVolumeChange()
         scheduleVolumePush()
     }
 
@@ -3023,134 +2392,182 @@ final class DALIStore {
             // playing over the top of it stops).
             if cutOverridden {
                 cutOverridden = false
+                cutDisbeliefLogged = false
                 dlog("audio cut believed again — the source really did go silent")
                 applyCutMute()
             }
             return
         }
-        // Not silent. A cut that was never believed stays that way; log it
-        // once so the flight record shows the browser was overruled.
-        guard cutOverridden, !cutDisbeliefLogged, let armed = cutArmedAt else { return }
+        // New sound disproves even a previously confirmed cut. A paused
+        // browser tab cannot keep another Mac source muted by renewing it.
+        guard let armed = cutArmedAt else { return }
         let age = Date().timeIntervalSince(armed)
         guard age > 0.4 else { return }
+        if !cutOverridden {
+            cutOverridden = true
+            applyCutMute()
+        }
+        guard !cutDisbeliefLogged else { return }
         cutDisbeliefLogged = true
         dlog(String(format: "audio cut IGNORED: the Mac is still making sound %.1fs after the browser's cut — something else is playing", age))
         aiEvent("audio_cut_overridden", level: "info", fields: ["age_s": Int(age)])
     }
 
-    func effectiveVolume(_ s: RoomSpeaker) -> Int {
-        guard !roomMutedByCut else { return 0 }   // video stopped: silence everything now
-        guard s.enabled else { return 0 }   // muted but still in the group (sync)
-        let base: Double
-        if playerMode {
-            // Player model: the engine sources the audio, so the Mac's own volume
-            // is irrelevant. Each speaker's slider IS its absolute AirPlay volume.
-            base = s.relVolume
-        } else {
-            switch source {
-            // Map the Mac's full 0...100% master range across the room's safe
-            // 0...volumeLimit range. The old formula hit the limit at only 20%
-            // Mac volume (then a second 15% cap flattened it again), so most
-            // volume-key presses appeared to do nothing.
-            case .system: base = s.relVolume * systemVolume * (volumeLimit / 100)
-            case .app:    base = s.relVolume
-            case .spotify: base = s.relVolume
-            }
-        }
-        // Calibration gain balances devices of different efficiency.
-        let raw = min(base * s.gain, 100)
-        let limited = min(raw, volumeLimit)
-        // Int(NaN) traps. min() propagates a NaN from a bad Mac-volume read or a
-        // corrupt stored value, so refuse it here rather than at every caller.
-        guard limited.isFinite else { return 0 }
-        return Int(max(limited, 0).rounded())
+    var roomVolumePlan: RoomVolumePlan {
+        RoomVolumePolicy.plan(speakers: speakers.filter {
+            $0.kind != .extra || $0.enabled
+                || sessionMembership.contains(name: $0.name, enabled: false, primary: false)
+        }.map {
+            RoomVolumeSpeaker(id: $0.id, slider: $0.relVolume, gain: $0.gain, enabled: $0.enabled,
+                              curve: $0.levelCurve, trim: $0.balanceTrim)
+        }, ceiling: volumeLimit, systemMaster: roomMaster, muted: roomMutedByCut)
     }
 
-    // Single serialized pipeline: sends IMMEDIATELY, never overlaps requests,
-    // and always ends on the latest values. Concurrent pushes used to race,
-    // letting a stale high volume land after a newer low one (loud spikes).
-    private var pushInFlight = false
+    /// The Mac master volume when it is what drives the room (system-audio mode).
+    private var roomMaster: Double? { !playerMode && source == .system ? systemVolume : nil }
 
-    // ENGINE WRITE BUDGET. Every volume / offset / select PUT becomes an RTSP
-    // SET_PARAMETER on OwnTone's single command/player thread. Flight-log
-    // evidence (2026-09-28..30, ~67 h): 7 of 18 sudden 0.1-0.9 s read-ahead
-    // step drops sat within -6..+3 s of a speaker volume write, against ~5 %
-    // of stream time being that close to a write; bursts averaged 6-7 writes
-    // (max 75) because Mac volume keys / slider drags / mute flips each became
-    // their own PUT. So: leading-edge immediate, then at most one write pass
-    // per `volumeMinSpacing`, latest target wins.
-    /// Minimum gap between two volume write passes to the engine. Mute/unmute
-    /// (a target crossing zero), forced resyncs and the resume fade ignore it —
-    /// the instant cut-off and the pop-free fade are worth their writes.
-    /// 0.5 s: 1.5 s felt like a laggy, stepped volume; the 200 ms key-repeat
-    /// debounce above already stops the chatter that dropped the front receiver.
-    private static let volumeMinSpacing: TimeInterval = 0.5
-    /// When the last volume PUT (any speaker, any path) finished, and per output.
-    private var lastVolumeWriteAt = Date.distantPast
-    private var volumeWriteDoneAt: [String: Date] = [:]
-    /// Newest engine-reported volume per output and when that poll STARTED, so a
-    /// reading is only trusted if no write finished after it was requested.
-    private var engineVolumeSeen: [String: (volume: Int, polledAt: Date)] = [:]
-    /// Drift-resend governor: at most once per cool-down and three tries per
-    /// episode (reset as soon as the engine agrees again).
-    private var driftResendAt: [String: Date] = [:]
-    private var driftResendCount: [String: Int] = [:]
+    /// The adjustment actually applied to a speaker right now: its curve value at
+    /// the current Mac volume, or its fixed saved gain.
+    func effectiveGain(_ speaker: RoomSpeaker) -> Double {
+        RoomVolumePolicy.effectiveGain(
+            for: RoomVolumeSpeaker(id: speaker.id, slider: speaker.relVolume, gain: speaker.gain,
+                                   enabled: speaker.enabled,
+                                   curve: speaker.levelCurve, trim: speaker.balanceTrim),
+            systemMaster: roomMaster)
+    }
+
+    func effectiveVolume(_ speaker: RoomSpeaker) -> Int { roomVolumePlan.hardware[speaker.id] ?? 0 }
+    private(set) var captureMasterGain = 1.0
+    @ObservationIgnored private lazy var volumeController = RoomVolumeCoordinator(write: injectedVolumeWrite ?? { [weak self, api] id, value in
+        let began = DispatchTime.now().uptimeNanoseconds
+        let result = await api.setVolumeConfirmed(outputID: id, volume: value)
+        let elapsedMs = Double(DispatchTime.now().uptimeNanoseconds - began) / 1_000_000
+        let label: String
+        switch result {
+        case .applied: label = "applied"
+        case .superseded: label = "superseded"
+        case .unknown: label = "unknown"
+        }
+        Task { @MainActor [weak self] in
+            self?.aiEvent("volume_write", fields: ["speaker": id, "target": value,
+                "ms": elapsedMs, "result": label])
+        }
+        switch result {
+        case .applied: return .applied
+        case .superseded: return .superseded
+        case .unknown: return .unknown
+        }
+    })
+    private var pushInFlight: Bool { volumeController.isWriting }
+    private var lastVolumeWriteAt: Date { volumeController.lastCompletionAt }
     private var healthPollDeferrals = 0
     private var lastWriteReportAt = Date()
     private var lastWriteReportTotal = 0
     private var lastOffsetWriteAt: [String: Date] = [:]
 
-    /// The single door for volume PUTs from this file: stamps completion time so
-    /// polls can tell whether an engine reading predates our last write.
-    private func writeVolume(_ id: String, _ volume: Int) async throws {
-        defer {
-            let now = Date()
-            lastVolumeWriteAt = now
-            volumeWriteDoneAt[id] = now
-        }
-        try await api.setVolume(outputID: id, volume: volume)
+    private func applyMasterGain() {
+        let gain = roomVolumePlan.pcmGain
+        captureMasterGain = gain
+        if backendEnabled { capture.setMasterGain(gain) }
     }
 
-    /// Writes per minute to the engine, by kind — published so the next flight
-    /// log can be lined up against glitches. Called from the 3 s health tick.
+    @ObservationIgnored private var floorSyncTask: Task<Void, Never>?
+    @ObservationIgnored private var lastSentTargets: [String: Int] = [:]
+    @ObservationIgnored private var lastSentPcmGain = 1.0
+    @ObservationIgnored private var muteHold = MuteHold()
+    @ObservationIgnored private var muteRecheck: Task<Void, Never>?
+
+    private func updateVolumeIntent(force: Set<String> = []) {
+        applyMasterGain()
+        guard backendEnabled || injectedVolumeWrite != nil else { return }
+        let members = sessionSpeakers()
+        let plan = roomVolumePlan
+        var targets = Dictionary(members.map { ($0.id, plan.hardware[$0.id] ?? 0) },
+                                 uniquingKeysWith: { a, _ in a })
+        if phase == .streaming {
+            // A brush through zero at the quiet end of the Mac volume must not mute the
+            // speakers: hold their volume for a moment (the audio itself is already silent).
+            let resolved = muteHold.resolve(targets: targets, master: roomMaster,
+                                            mutedByOther: roomMutedByCut, now: Date())
+            targets = resolved.targets
+            muteRecheck?.cancel(); muteRecheck = nil
+            if let after = resolved.recheckAfter {
+                muteRecheck = Task { [weak self] in
+                    try? await Task.sleep(for: .seconds(after))
+                    guard !Task.isCancelled else { return }
+                    self?.updateVolumeIntent()
+                }
+            }
+            // At the quiet end the digital gain reaches the speakers one room delay after
+            // it changes, but their own volume changes at once. Hold the speaker volume
+            // at what was last sent for that delay so the two land as one change. Anything
+            // else (a forced resync, a speaker joining, a mute) goes through untouched.
+            let silencing = plan.pcmGain == 0 || roomMutedByCut
+            if !force.isEmpty || silencing {
+                floorSyncTask?.cancel(); floorSyncTask = nil
+                lastSentPcmGain = plan.pcmGain
+            } else if floorSyncTask == nil,
+                      FloorSync.shouldHold(previousGain: lastSentPcmGain, newGain: plan.pcmGain) {
+                floorSyncTask = Task { [weak self] in
+                    try? await Task.sleep(for: .seconds(FloorSync.holdSeconds(roomDelaySeconds: self?.roomDelaySec ?? 1)))
+                    guard !Task.isCancelled, let self else { return }
+                    self.floorSyncTask = nil
+                    self.lastSentPcmGain = self.roomVolumePlan.pcmGain
+                    self.updateVolumeIntent()
+                }
+            }
+            if floorSyncTask != nil {
+                for id in targets.keys { if let sent = lastSentTargets[id] { targets[id] = sent } }
+            } else {
+                lastSentPcmGain = plan.pcmGain
+            }
+        } else {
+            floorSyncTask?.cancel(); floorSyncTask = nil
+            lastSentPcmGain = plan.pcmGain
+            muteHold.reset()
+            lastSentTargets = [:]
+        }
+        let eligible = Set(members.filter {
+            phase == .streaming && (!$0.enabled || $0.health == .live)
+                && !speakerRecoveryInFlight.contains($0.id)
+        }.map(\.id))
+        if phase == .streaming { lastSentTargets = targets }
+        volumeController.update(session: streamGeneration, active: phase.isOn,
+                                targets: targets, eligible: eligible,
+                                urgent: targets.values.contains(0), force: force)
+    }
+
+    private func silenceOutput(_ id: String) async throws {
+        let generation = streamGeneration
+        updateVolumeIntent()
+        guard await volumeController.silence(id, session: generation) else {
+            throw BeamAPIError(what: "Speaker silence was not accepted by the engine")
+        }
+    }
+
+    private func restoreOutput(_ id: String) async throws {
+        let generation = streamGeneration
+        updateVolumeIntent()
+        guard await volumeController.restore(id, session: generation) else {
+            throw BeamAPIError(what: "Speaker volume was not accepted by the engine")
+        }
+    }
+
     private func reportEngineWrites() {
         let now = Date()
         guard now.timeIntervalSince(lastWriteReportAt) >= 60 else { return }
         let total = api.totalWrites
-        let delta = total - lastWriteReportTotal
-        let perMin = Double(delta) / max(now.timeIntervalSince(lastWriteReportAt) / 60, 0.01)
-        lastWriteReportAt = now
-        lastWriteReportTotal = total
-        engineWritesPerMin = perMin
-        guard delta > 0 else { return }
-        let kinds = api.recentWrites(window: 60)
-        dlog(String(format: "engine writes last 60s: %d (%@)", delta,
-                    kinds.sorted { $0.key < $1.key }.map { "\($0.key)=\($0.value)" }.joined(separator: " ")))
-        aiEvent("engine_writes", fields: ["per_min": Int(perMin.rounded()), "total_60s": delta,
-                                          "volume": kinds["volume"] ?? 0, "offset": kinds["offset"] ?? 0,
-                                          "select": kinds["select"] ?? 0, "player": kinds["player"] ?? 0])
+        let count = total - lastWriteReportTotal
+        engineWritesPerMin = Double(count) / max(now.timeIntervalSince(lastWriteReportAt) / 60, 0.001)
+        lastWriteReportTotal = total; lastWriteReportAt = now
+        aiEvent("engine_writes", fields: ["per_min": engineWritesPerMin,
+                                           "counts": api.recentWrites(window: 60)])
     }
+
     /// Engine writes per minute over the last report window (0 until first report).
     /// Public so the flight-recorder line can append it: `w/min=\(engineWritesPerMin)`.
     private(set) var engineWritesPerMin: Double = 0
 
-    private var volumePushTask: Task<Void, Never>?
-    private var volumePushGeneration = 0
-    private var pushAgain = false
-    private var forceVolumePush = false
-    /// New user input bypasses an automatic timeout backoff once, so the
-    /// requested value is tried immediately instead of waiting three seconds.
-    private var manualVolumeChanges: Set<String> = []
-    private var lastSentVolumes: [String: Int] = [:]
-    private var lastReconciledEcho: [String: Int] = [:]
-    /// After a SET_PARAMETER (volume) failure, OwnTone often tears that device
-    /// down. Cool off before retrying so we don't pile more volume RTSP on a
-    /// dying PowerNode control connection.
-    private var volumeFailUntil: [String: Date] = [:]
-    /// Consecutive failed volume writes per output. The cool-off doubles with
-    /// each one (3 s ... 30 s): a fixed 3 s retried a dying receiver's control
-    /// connection every health poll for as long as it stayed sick.
-    private var volumeFailCounts: [String: Int] = [:]
     private var troubleStrikes: [String: Int] = [:]
     /// Resume attempts in a row that did not bring the room back. Drives a
     /// cool-off between resumes and, past a limit, a visible error — an engine
@@ -3168,6 +2585,20 @@ final class DALIStore {
     private var rememberedNamesCache: Set<String> = []
     private var rememberedNamesAt = Date.distantPast
     private var captureStallRestartUsed = false
+
+    /// Only newly published PCM can give a failed capture path another restart.
+    @discardableResult
+    func acknowledgeCaptureRecovery(within seconds: Double) -> Bool {
+        guard capture.publicationProgress.isRecent(within: seconds) else { return false }
+        captureStallRestartUsed = false
+        return true
+    }
+
+    func claimCaptureRecoveryRestart() -> Bool {
+        guard !captureStallRestartUsed else { return false }
+        captureStallRestartUsed = true
+        return true
+    }
     /// After a failed hard rejoin, back off before trying again — endless
     /// deselect/select every poll is what thrash-kills AirPlay 2 sessions.
     private var recoveryCooldownUntil: [String: Date] = [:]
@@ -3191,9 +2622,10 @@ final class DALIStore {
     }
 
     /// Returns the ids that did not become genuinely ready before the deadline.
-    private func awaitOutputsReady(ids: Set<String>, timeoutMs: Int) async -> Set<String> {
+    private func awaitOutputsReady(ids: Set<String>, timeoutMs: Int, failFast: Bool = false) async -> Set<String> {
         let client = api
-        return await OutputReadiness.missing(ids: ids, timeout: .milliseconds(timeoutMs)) {
+        return await OutputReadiness.missing(ids: ids, timeout: .milliseconds(timeoutMs),
+                                             failFastAfter: failFast ? .milliseconds(1_500) : nil) {
             try await client.outputs()
         }
     }
@@ -3208,7 +2640,11 @@ final class DALIStore {
 
     private func recoverSpeaker(_ sp: RoomSpeaker) async {
         let generation = streamGeneration
-        guard sp.available, streamIsCurrent(generation), !speakerRecoveryInFlight.contains(sp.id) else { return }
+        func stillWanted() -> Bool {
+            streamIsCurrent(generation)
+                && speakers.contains { $0.id == sp.id && $0.available && $0.enabled }
+        }
+        guard stillWanted(), !speakerRecoveryInFlight.contains(sp.id) else { return }
         if let until = recoveryCooldownUntil[sp.id], until > Date() { return }
         let fails = recoveryFailCounts[sp.id] ?? 0
         // Never give up for good: a speaker abandoned after a few failures stayed
@@ -3220,32 +2656,36 @@ final class DALIStore {
             // Stamp the END too: the engine API stalls on the RTSP handshake
             // this deselect/select started (see noteEngineAPIFailure).
             lastRecoveryActivityAt = Date()
-            if generation == streamGeneration { speakerRecoveryInFlight.remove(sp.id) }
+            if generation == streamGeneration {
+                speakerRecoveryInFlight.remove(sp.id)
+                volumeController.releaseHold(sp.id, session: generation)
+                scheduleVolumePush()
+            }
         }
         speakers.indices.filter { speakers[$0].id == sp.id }.forEach { speakers[$0].health = .connecting }
         // Silence first so a mid-rejoin device never blasts at its own default.
-        try? await writeVolume(sp.id, 0)
-        guard streamIsCurrent(generation) else { return }
-        lastSentVolumes[sp.id] = 0
+        try? await silenceOutput(sp.id)
+        guard stillWanted() else { return }
         // GENTLE FIRST. Re-asserting the whole output list keeps the shared
         // AirPlay 2 session (a per-member deselect can take the PARTNER down
         // with it: the "it plays one or the other" failure). Only after two
         // gentle failures is this one member hard-cycled, and then both are
         // re-added together.
-        let sessionIDs = sessionSpeakers().filter(\.available).map(\.id)
         if fails < 2 {
-            try? await api.setOutputs(ids: sessionIDs)
+            try? await api.setOutputs(ids: sessionSpeakers().map(\.id))
         } else {
             dlog("\(sp.name) gentle re-assert failed \(fails)x -> per-member rejoin")
             try? await api.setSelected(outputID: sp.id, selected: false)
-            guard streamIsCurrent(generation) else { return }
+            guard stillWanted() else { return }
             try? await Task.sleep(nanoseconds: 750_000_000)
-            guard streamIsCurrent(generation) else { return }
-            try? await api.setOutputs(ids: sessionIDs)
+            guard stillWanted() else { return }
+            // A speaker may have been added during the deselect/settle waits.
+            // Re-read membership so this recovery cannot remove its new session.
+            try? await api.setOutputs(ids: sessionSpeakers().map(\.id))
         }
-        guard streamIsCurrent(generation) else { return }
+        guard stillWanted() else { return }
         let missing = await awaitOutputsReady(ids: Set([sp.id]), timeoutMs: 8_000)
-        guard streamIsCurrent(generation) else { return }
+        guard stillWanted() else { return }
         guard missing.isEmpty else {
             speakers.indices.filter { speakers[$0].id == sp.id }.forEach { speakers[$0].health = .trouble }
             let nextFails = fails + 1
@@ -3262,28 +2702,23 @@ final class DALIStore {
         // Restore the bounded target with one command. Multi-step fades were a
         // command storm and one ignored receiver reply can block OwnTone's
         // global command lane.
-        volumeFailUntil[sp.id] = nil
-        try? await writeVolume(sp.id, 0)
-        guard streamIsCurrent(generation) else { return }
+        try? await silenceOutput(sp.id)
+        guard stillWanted() else { return }
         try? await Task.sleep(nanoseconds: 180_000_000)
-        guard streamIsCurrent(generation),
+        guard stillWanted(),
               let current = speakers.first(where: { $0.id == sp.id }) else { return }
         let target = min(effectiveVolume(current), Int(volumeLimit.rounded()))
         do {
-            try await writeVolume(sp.id, target)
-            guard streamIsCurrent(generation) else { return }
-            lastSentVolumes[sp.id] = target
+            try await restoreOutput(sp.id)
+            guard stillWanted() else { return }
         } catch {
-            guard streamIsCurrent(generation) else { return }
-            lastSentVolumes[sp.id] = nil
-            volumeFailUntil[sp.id] = Date().addingTimeInterval(3)
+            guard stillWanted() else { return }
             dlog("\(sp.name) setVolume(\(target)) failed after rejoin: \(error)")
         }
         troubleStrikes[sp.id] = 0
         readyStrikes[sp.id] = 2
         recoveryFailCounts[sp.id] = 0
         recoveryCooldownUntil[sp.id] = nil
-        lastReconciledEcho[sp.id] = nil
         speakers.indices.filter { speakers[$0].id == sp.id }.forEach {
             speakers[$0].health = speakers[$0].enabled ? .live : .off
         }
@@ -3292,192 +2727,37 @@ final class DALIStore {
         speakerRecoveryInFlight.remove(sp.id)
         // Mac/slider may have moved while we owned volume during recovery.
         guard let latest = speakers.first(where: { $0.id == sp.id }) else { return }
-        let wantNow = min(effectiveVolume(latest), Int(volumeLimit.rounded()))
-        if lastSentVolumes[sp.id] != wantNow {
-            forceVolumeResync(ids: [sp.id])
-        }
-    }
-
-    /// Invalidate cached sent volumes and push as soon as speakers are live.
-    /// Call on connecting/trouble → live so volume changes made during a blip
-    /// (when pushes were skipped) actually land — including deltas ≤ 12 that
-    /// the reconcile dead-zone would otherwise leave stuck forever.
-    private func forceVolumeResync(ids: [String]? = nil) {
-        let targets = ids ?? sessionSpeakers().map(\.id)
-        for id in targets {
-            lastSentVolumes[id] = nil
-            lastReconciledEcho[id] = nil
-            volumeFailUntil[id] = nil
-        }
-        forceVolumePush = true
+        _ = latest
         scheduleVolumePush()
     }
 
-    /// True when a pending volume change must not wait out the spacing window:
-    /// a forced resync, a target crossing zero (mute / cut / unmute — the
-    /// instant cut-off must stay instant), or a speaker whose engine value we
-    /// do not know at all.
-    private func volumeWriteIsUrgent() -> Bool {
-        if forceVolumePush { return true }
-        let ceiling = Int(volumeLimit.rounded())
-        for sp in sessionSpeakers()
-        where (!sp.enabled || sp.health == .live) && !speakerRecoveryInFlight.contains(sp.id) {
-            guard let prev = lastSentVolumes[sp.id] else {
-                // Unknown engine value: send at once — unless it just failed and
-                // is cooling off (the loop would only skip it again).
-                if let until = volumeFailUntil[sp.id], until > Date() { continue }
-                return true
-            }
-            let v = min(effectiveVolume(sp), ceiling)
-            if v != prev, (v == 0) != (prev == 0) { return true }
-        }
-        return false
+
+    private func forceVolumeResync(ids: [String]? = nil) {
+        updateVolumeIntent(force: Set(ids ?? sessionSpeakers().map(\.id)))
     }
 
-    private func awaitVolumeWriteSlot(generation: Int) async {
-        while !Task.isCancelled, phase == .streaming, generation == volumePushGeneration {
-            let gap = Self.volumeMinSpacing - Date().timeIntervalSince(lastVolumeWriteAt)
-            if gap <= 0 || volumeWriteIsUrgent() { return }
-            try? await Task.sleep(nanoseconds: UInt64(min(gap, 0.1) * 1_000_000_000))
-        }
-    }
-
-    private func cancelVolumePush() {
-        volumePushGeneration += 1
-        volumePushTask?.cancel()
-        volumePushTask = nil
-        pushInFlight = false
-        pushAgain = false
-        forceVolumePush = false
-    }
-
-    private func scheduleVolumePush() {
-        guard phase == .streaming, !fading else { return }
-        if pushInFlight { pushAgain = true; return }
-        pushInFlight = true
-        let generation = volumePushGeneration
-        volumePushTask = Task { @MainActor in
-            defer {
-                // An old request may finish after stop/start. It cannot release
-                // the new session's lane or change its cached volume state.
-                if generation == volumePushGeneration {
-                    pushInFlight = false
-                    volumePushTask = nil
-                }
-            }
-            repeat {
-                guard !Task.isCancelled, phase == .streaming,
-                      generation == volumePushGeneration else { return }
-                // Leading edge is immediate; a follow-up pass waits out the
-                // spacing window (unless a mute/unmute/forced resync is pending)
-                // and then reads the CURRENT targets — latest wins, so a burst of
-                // key presses or a slider drag lands as 1-2 writes, not a ramp.
-                await awaitVolumeWriteSlot(generation: generation)
-                guard !Task.isCancelled, phase == .streaming,
-                      generation == volumePushGeneration else { return }
-                pushAgain = false
-                let force = forceVolumePush
-                forceVolumePush = false
-                // Skip speakers mid-recovery or in trouble — recoverSpeaker owns
-                // their volume so a concurrent push cannot blast them. Non-live
-                // speakers keep a stale lastSentVolumes; forceVolumeResync on
-                // return-to-live is what closes that gap.
-                // A pair switched OFF stays in the AirPlay group and is muted by
-                // sending volume 0 — but toggle() also marks it `.off`, and this
-                // filter used to require `.live`, so the mute was never sent and
-                // the "off" pair kept playing at its old volume. Disabled members
-                // are always eligible: their target is 0 by construction.
-                let ids = sessionSpeakers().map(\.id)
-                for id in ids {
-                    guard !Task.isCancelled, phase == .streaming,
-                          generation == volumePushGeneration else { return }
-                    guard let sp = sessionSpeakers().first(where: { $0.id == id }),
-                          !sp.enabled || sp.health == .live,
-                          !speakerRecoveryInFlight.contains(id) else { continue }
-                    let name = sp.name
-                    let v = min(effectiveVolume(sp), Int(volumeLimit.rounded()))
-                    let manuallyChanged = manualVolumeChanges.remove(id) != nil
-                    if let until = volumeFailUntil[id], until > Date(), !force && !manuallyChanged { continue }
-                    let prev = lastSentVolumes[id]
-                    // Quantize routine updates: ±1 chatter from Mac-volume float
-                    // rounding spammed RTSP and killed the PowerNode. Forced
-                    // resync (live recovery / fade / cut) always sends exact.
-                    if !force, let prev, abs(prev - v) < 2, (v == 0) == (prev == 0) { continue }
-                    if prev == v { continue }
-                    // The engine already holds what we want (fresh poll, taken
-                    // after our last write to it, within ±1): nothing to send.
-                    if !force, let seen = engineVolumeSeen[id], abs(seen.volume - v) <= 1,
-                       seen.polledAt > (volumeWriteDoneAt[id] ?? .distantPast),
-                       Date().timeIntervalSince(seen.polledAt) < 10 {
-                        lastSentVolumes[id] = v
-                        continue
-                    }
-                    do {
-                        try await writeVolume(id, v)
-                        guard !Task.isCancelled, phase == .streaming,
-                              generation == volumePushGeneration else { return }
-                        lastSentVolumes[id] = v
-                        volumeFailUntil[id] = nil
-                        volumeFailCounts[id] = nil
-                    } catch {
-                        guard !Task.isCancelled, phase == .streaming,
-                              generation == volumePushGeneration else { return }
-                        // Never suppress a retry for a command that did not land,
-                        // but space the retries out: 3, 6, 12, 24, 30 s.
-                        lastSentVolumes[id] = nil
-                        let fails = min((volumeFailCounts[id] ?? 0) + 1, 5)
-                        volumeFailCounts[id] = fails
-                        volumeFailUntil[id] = Date().addingTimeInterval(min(3 * pow(2, Double(fails - 1)), 30))
-                        dlog("\(name) setVolume(\(v)) failed: \(error)")
-                        aiEvent("volume_push_failed", level: "warn", fields: [
-                            "speaker": name, "want": v, "error": "\(error)"
-                        ])
-                    }
-                    // Pace between speakers (was 100ms end-of-batch only). AirPlay
-                    // volume is RTSP SET_PARAMETER — stacking both devices at once
-                    // is what produced APIHANG + "No response to SET_PARAMETER".
-                    try? await Task.sleep(nanoseconds: 180_000_000)
-                }
-            } while pushAgain || forceVolumePush
-        }
-    }
+    private func cancelVolumePush() { volumeController.stop(session: streamGeneration) }
+    private func scheduleVolumePush() { updateVolumeIntent() }
 
     private var fading = false
 
-    /// Bring the enabled speakers out of the silent setup state. The old eight-
-    /// step fade sent 16 RTSP volume commands for a two-speaker room. A single
-    /// ignored reply then blocked OwnTone's global player-command lane for 15s,
-    /// backed the FIFO up and dropped audio. One bounded write per speaker keeps
-    /// startup quiet without turning volume into a network stress test.
+    /// Release setup/recovery silence only after readiness, using current intent.
     private func fadeIn() async {
         let generation = streamGeneration
         fading = true
         defer {
             if generation == streamGeneration {
-                fading = false
-                scheduleVolumePush()
+                for id in sessionSpeakers().map(\.id) where !speakerRecoveryInFlight.contains(id) {
+                    volumeController.releaseHold(id, session: generation)
+                }
+                fading = false; scheduleVolumePush()
             }
         }
-        try? await Task.sleep(nanoseconds: 180_000_000)
-        guard !Task.isCancelled, phase == .streaming,
-              generation == streamGeneration else { return }
-        for sp in sessionSpeakers() {
-            guard !Task.isCancelled, phase == .streaming,
-                  generation == streamGeneration else { return }
-            // A speaker that never connected is the health loop's to recover;
-            // a volume write into a dead session only stalls the engine lane.
-            if sp.health == .trouble { continue }
-            let target = min(effectiveVolume(sp), Int(volumeLimit.rounded()))
-            do {
-                try await writeVolume(sp.id, target)
-                guard !Task.isCancelled, phase == .streaming,
-                      generation == streamGeneration else { return }
-                lastSentVolumes[sp.id] = target
-            } catch {
-                guard !Task.isCancelled, phase == .streaming,
-                      generation == streamGeneration else { return }
-                lastSentVolumes[sp.id] = nil
-            }
+        do { try await Task.sleep(for: .milliseconds(180)) } catch { return }
+        for id in sessionSpeakers().map(\.id) {
+            guard streamIsCurrent(generation) else { return }
+            guard speakers.first(where: { $0.id == id })?.health != .trouble else { continue }
+            try? await restoreOutput(id)
         }
     }
 
@@ -3507,12 +2787,25 @@ final class DALIStore {
         guard streamIsCurrent(generation) else { return }
         let ids = sessionSpeakers().map(\.id)
         guard !ids.isEmpty else { return }
+        // Muted retained members keep their clock, but do not hold up recovery.
+        // Re-read after awaits so turning a speaker off cancels its recovery need.
+        func requiredIDs() -> Set<String> {
+            Set(speakers.filter { ids.contains($0.id) && $0.enabled && $0.available }.map(\.id))
+        }
+        defer {
+            if generation == streamGeneration {
+                for id in ids where !speakerRecoveryInFlight.contains(id) {
+                    volumeController.releaseHold(id, session: generation)
+                }
+                scheduleVolumePush()
+            }
+        }
         // Replaying the pipe resets item_progress_ms to ~0. Without re-anchoring,
         // the fill diagnostic computes rendered-bytes from a stale anchor and
         // reads absurd values for the rest of the session — exactly the numbers
         // we need trustworthy when diagnosing whatever caused this resume.
         resetDriftAnchors()
-        markHealth(of: ids, .connecting)
+        markHealth(of: Array(requiredIDs()), .connecting)
         try? await api.setOutputs(ids: ids)
         guard streamIsCurrent(generation) else { return }
         if playerMode {
@@ -3534,10 +2827,19 @@ final class DALIStore {
                 }
             }
             guard streamIsCurrent(generation) else { return }
-            if let uri { try? await api.playPipe(uri: uri) }
+            if let uri {
+                // Whatever queued while the reader was stalled is already late.
+                // Replaying it would keep the room (and the browser picture,
+                // which follows the nominal delay) behind for the whole session.
+                let dropped = capture.discardQueuedAudio()
+                if dropped > 0 {
+                    dlog(String(format: "dropped %.2fs of stale queued audio before replaying the pipe",
+                                Double(dropped) / LatencyBacklogMonitor.bytesPerSecond))
+                }
+                try? await api.playPipe(uri: uri)
+            }
         }
         guard streamIsCurrent(generation) else { return }
-        lastSentVolumes.removeAll()
         // Silence first, settle, then FADE IN (the old double pushVolumes landed
         // as a loud jump mid-session whenever a rejoined device came back at its
         // own default volume and ignored the pre-session volume set). Only the
@@ -3545,21 +2847,27 @@ final class DALIStore {
         // placeholder id the engine has never heard of.
         for id in ids {
             guard streamIsCurrent(generation) else { return }
-            try? await writeVolume(id, 0)
+            try? await silenceOutput(id)
         }
         guard streamIsCurrent(generation) else { return }
         try? await Task.sleep(nanoseconds: 1_200_000_000)
         guard streamIsCurrent(generation) else { return }
-        var missing = await awaitOutputsReady(ids: Set(ids), timeoutMs: 8_000)
+        var checkedIDs = requiredIDs()
+        var missing = await awaitOutputsReady(ids: checkedIDs, timeoutMs: 8_000)
         guard streamIsCurrent(generation) else { return }
+        // A newly enabled member was not covered by the previous readiness read.
+        missing = requiredIDs().subtracting(checkedIDs.subtracting(missing))
         if !missing.isEmpty {
-            for sp in sessionSpeakers() where missing.contains(sp.id) {
+            for sp in sessionSpeakers() where sp.enabled && missing.contains(sp.id) {
                 await recoverSpeaker(sp)
                 guard streamIsCurrent(generation) else { return }
             }
-            missing = await awaitOutputsReady(ids: Set(ids), timeoutMs: 3_000)
+            checkedIDs = requiredIDs()
+            missing = await awaitOutputsReady(ids: checkedIDs, timeoutMs: 3_000)
         }
         guard streamIsCurrent(generation) else { return }
+        missing = requiredIDs().subtracting(checkedIDs.subtracting(missing))
+        let confirmedReadyIDs = checkedIDs.subtracting(missing)
         guard missing.isEmpty else {
             let names = sessionSpeakers().filter { missing.contains($0.id) }.map(\.name).joined(separator: ", ")
             dlog("resume incomplete; not all speakers streaming: \(names)")
@@ -3568,6 +2876,11 @@ final class DALIStore {
             // outputs so chrome stops claiming LIVE / healthy.
             markHealth(of: Array(missing), .trouble)
             for id in missing { readyStrikes[id] = 0 }
+            // Restore the already-ready members even when another speaker
+            // remains missing. Its failure must not leave its partner held at 0.
+            markHealth(of: Array(requiredIDs().intersection(confirmedReadyIDs)), .live)
+            await fadeIn()
+            guard streamIsCurrent(generation) else { return }
             // A dead speaker beside a playing engine is recoverSpeaker's job and
             // must not count as a failed resume; a silent engine must.
             let enginePlaying = (try? await api.playerState())?.state == "play"
@@ -3580,13 +2893,14 @@ final class DALIStore {
         let st = try? await api.playerState()
         guard streamIsCurrent(generation) else { return }
         if st?.state == "play" {
-            markHealth(of: ids, .live)
-            for id in ids { readyStrikes[id] = 2; troubleStrikes[id] = 0 }
+            let ready = requiredIDs().intersection(confirmedReadyIDs)
+            markHealth(of: Array(ready), .live)
+            for id in ready { readyStrikes[id] = 2; troubleStrikes[id] = 0 }
             dlog("resume succeeded, volumes faded in")
             noteResumeOutcome(ok: true)
         } else {
             dlog("resume did NOT reach play state")
-            markHealth(of: ids, .connecting)
+            markHealth(of: Array(requiredIDs()), .connecting)
             noteResumeOutcome(ok: false)
         }
     }
@@ -3622,34 +2936,9 @@ final class DALIStore {
 
     // MARK: wedge recovery
 
-    /// Re-anchor the drift controller after the engine is replaced under us, so a
-    /// fresh playback clock does not produce a garbage fill estimate or a wound-up
-    /// integral that bends the pitch right after recovery.
     private func resetDriftAnchors() {
-        progressAnchorMs = nil; writtenAnchor = nil; trueFillEMA = 0
-        nonPlayAnchorStrikes = 0
-        rateInt = 0; errInt = 0; driftCorr = 0; fillSlow = nil
-        slopeAnchorFill = 0; slopeAnchorAge = 0; slopeAnchorCorr = 0; lastSlopePpm = 0
-        fillJumpStrikes = 0; driftLockoutSec = 0
-        authRunSec = 0; authRunSign = 0; authRunStartFill = 0
-        // Cleared HERE and nowhere else: OwnTone's read_deficit is a property of
-        // the engine's stream, so our mirror of it may only be forgiven when that
-        // stream restarts. Clearing it on an ordinary freeze would hand the loop
-        // a fresh budget every hiccup, which is precisely how an unbounded
-        // integral gets rebuilt by accident.
-        netDrainSec = 0; debtCapActive = false; debtCapLastLogAt = Date.distantPast
-        driftFreeze = "reanchor"
-        // New engine stream: the buffer we were healing no longer exists, and the
-        // next anchor really is a fresh start buffer (no carried fill).
-        anchorCarryFill = nil
-        refillVolHoldSec = 15; refillVolSig = ""
-        if refill.mode != .idle || refill.eps > 0 {
-            dlog(String(format: "refill RESET: engine stream restarted while %@ (eps %.3f%%) — ratio back to 1.0",
-                        refill.label, refill.eps * 100))
-            aiEvent("refill_reset", level: "info", fields: ["state": refill.label])
-        }
-        refill.reset()
-        capture.setTargetRatio(1.0)
+        timingController.reset()
+        capture.setTargetRatio(1)
     }
 
     /// Force the wedged engine to be replaced and wait for it to come back. Used
@@ -3685,10 +2974,18 @@ final class DALIStore {
         // second — an overlapping burst at the moment it is least able to take
         // one. Hand the flag back afterwards.
         let resumeFlag = await supervisor.resumePlaybackOnRestart
+        guard streamIsCurrent(generation) else { return }
         await supervisor.setResumePlayback(false)
+        defer {
+            Task { @MainActor [weak self] in
+                guard let self, generation == self.streamGeneration else { return }
+                await self.supervisor.setResumePlayback(resumeFlag)
+            }
+        }
+        guard streamIsCurrent(generation) else { return }
         await supervisor.killForRespawn()
         // Poll for the replacement instead of a blind 8 s sleep + 2 s steps.
-        // killForRespawn SIGKILLs synchronously, so the old engine no longer
+        // killForRespawn waits for process exit and transport drain, so the old engine no longer
         // answers; "running AND the API answers" can only be the new child. The
         // 1 s floor lets handleDeath observe the exit before we read `state`.
         // The 30 s ceiling covers the supervisor's PTP-port wait (≤12 s) plus
@@ -3708,7 +3005,9 @@ final class DALIStore {
             // persistently-wedging engine loop kill->respawn->wedge forever,
             // each cycle getting a fresh breaker.
             if case .failed = s {
+                guard streamIsCurrent(generation) else { return }
                 try? await supervisor.restart(resettingBudgets: false)
+                guard streamIsCurrent(generation) else { return }
                 engineBack = await supervisor.state == .running
                 break
             }
@@ -3719,7 +3018,6 @@ final class DALIStore {
         // rejoin fired 13-19 s later (2026-09-22 00:43:52->00:44:08,
         // 02:14:03->02:14:20, 02:16:20->02:16:39, 02:21:53->02:22:06), and the
         // rejoin itself then took 1-3 s. Rebuild the session now instead.
-        if generation == streamGeneration { await supervisor.setResumePlayback(resumeFlag) }
         guard engineBack, streamIsCurrent(generation) else { return }
         dlog("engine back after respawn -> resuming session")
         // Output ids belong to the engine that issued them; re-read them from
@@ -3730,6 +3028,10 @@ final class DALIStore {
         enforceZeroOffsets(force: true)
         resumeFailStreak = 0; resumeCooldownUntil = .distantPast
         await resumePlaybackOnce(reason: "engine respawned")
+    }
+
+    static func shouldRejoinOutput(troubleReadings: Int, readyNow: Bool) -> Bool {
+        troubleReadings >= 2 && !readyNow
     }
 
     // MARK: health loop (websocket-lite: poll while streaming)
@@ -3757,7 +3059,7 @@ final class DALIStore {
         // The same stall follows DALI's OWN speaker rejoins/resumes: OwnTone's
         // command lane blocks on the RTSP handshake to the device being
         // re-selected. Log evidence (dali-debug.log 2026-09-22 02:14-02:25): the
-        // 02:16:20 respawn fired 10 s after "Back hard rejoin succeeded"
+        // 02:16:20 respawn fired 10 s after "MICHAEL S hard rejoin succeeded"
         // and threw that recovered session away.
         let settling = now.timeIntervalSince(lastNetworkChangeAt) < 20
             || now.timeIntervalSince(lastRecoveryActivityAt) < 20
@@ -3795,9 +3097,6 @@ final class DALIStore {
         recoveryFailCounts.removeAll()
         // Stale echo entries from a previous session would suppress the first
         // volume reconciliation of this one (review finding L6).
-        lastReconciledEcho.removeAll()
-        engineVolumeSeen.removeAll()
-        driftResendAt.removeAll(); driftResendCount.removeAll()
         healthPollDeferrals = 0
         lastWriteReportAt = Date(); lastWriteReportTotal = api.totalWrites
         resumeFailStreak = 0; resumeCooldownUntil = .distantPast
@@ -3829,11 +3128,10 @@ final class DALIStore {
                 // 17:55:23 on 2026-08-02, creating a 242ms capture gap and a
                 // measured 218ms sync jump on both speakers — the reported echo.
                 // A speculative recovery must not manufacture the audible fault.
-                let starvedSec = capture.secondsSinceLastBuffer
-                if capture.isRunning && starvedSec <= 1 {
-                    // A real callback proves the capture path has recovered.
-                    captureStallRestartUsed = false
-                }
+                let starvedSec = capture.callbackExpectation.secondsMissingExpectedBuffer
+                // Start/rebuild seeds the stall clock even without callbacks.
+                // Only fresh PCM from the current tap restores the budget.
+                acknowledgeCaptureRecovery(within: 1)
                 if capture.isRunning && starvedSec > 10 && !captureWatchdogInFlight {
                     dlog(String(format: "tap: no buffers for %.0fs -> rebuilding tap", starvedSec))
                     aiEvent("capture_no_buffers", level: "warn", fields: ["seconds": Int(starvedSec)])
@@ -3873,9 +3171,7 @@ final class DALIStore {
                 // What each speaker SHOULD be at when this poll goes out; a
                 // reading is only evidence of drift if that did not move
                 // while the request was in flight.
-                let pollStartedAt = Date()
-                let wantAtPoll = Dictionary(speakers.map { ($0.id, effectiveVolume($0)) },
-                                            uniquingKeysWith: { a, _ in a })
+                let volumeToken = volumeController.observationToken
                 guard let st = try? await api.playerState() else {
                     guard !Task.isCancelled else { break }
                     await noteEngineAPIFailure("player")
@@ -3937,7 +3233,6 @@ final class DALIStore {
                 guard !Task.isCancelled, phase == .streaming else { break }
                 apiDeadStrikes = 0; apiDeadSince = nil
                 applyDiscoveredSpeakers(outs)
-                for o in outs { engineVolumeSeen[o.id] = (o.volume, pollStartedAt) }
 
                 for i in speakers.indices where speakers[i].enabled {
                     guard speakers[i].available else { continue }
@@ -3978,8 +3273,13 @@ final class DALIStore {
                         // the gentle rejoin. The rejoin never deselects the partner.
                         if strikes >= 2 {
                             if speakers[i].health != .trouble {
-                                dlog("\(speakers[i].name) dropped (2 strikes, ~6 s) -> rejoining gently")
-                                aiEvent("speaker_rejoin", level: "warn", fields: ["speaker": speakers[i].name])
+                                // Context for the next dropout: both speakers going at
+                                // once (and a path change just before) means the Mac or
+                                // engine stalled, not the speaker.
+                                let others = speakers.filter { $0.id != id && $0.enabled && $0.health != .live }.map(\.name)
+                                let netAge = Int(Date().timeIntervalSince(lastNetworkChangeAt))
+                                dlog("\(speakers[i].name) dropped (2 strikes, ~6 s) -> rejoining gently [also down: \(others.isEmpty ? "none" : others.joined(separator: ",")); path ok=\(pathSatisfied) last change \(netAge)s ago]")
+                                aiEvent("speaker_rejoin", level: "warn", fields: ["speaker": speakers[i].name, "also_down": others.joined(separator: ","), "path_ok": "\(pathSatisfied)"])
                             }
                             speakers[i].health = .trouble
                         }
@@ -3992,71 +3292,21 @@ final class DALIStore {
                 // outputs. Both at once deselected a speaker mid-resume
                 // (2026-09-22 20:42:44-20:43:01: two 3-strike rejoins interleaved
                 // with a resume that ended "resume did NOT reach play state").
-                for sp in speakers where sp.enabled && sp.health == .trouble && !resumeInFlight {
+                for sp in speakers where sp.enabled && sp.health == .trouble && !resumeInFlight
+                    && (troubleStrikes[sp.id] ?? 0) >= 2 {
                     // The loop iterates a snapshot and each rejoin takes many
                     // seconds; the next speaker may have healed (or the stream
                     // ended) in the meantime.
                     guard !Task.isCancelled, phase == .streaming,
-                          speakers.first(where: { $0.id == sp.id })?.health == .trouble else { continue }
+                          speakers.first(where: { $0.id == sp.id })?.health == .trouble,
+                          Self.shouldRejoinOutput(troubleReadings: troubleStrikes[sp.id] ?? 0,
+                              readyNow: outputIsReady(outs.first(where: { $0.id == sp.id }))) else { continue }
                     await recoverSpeaker(sp)
                 }
-                // Volume reconciliation: a rejoined or reset device comes back at
-                // its own volume; if the engine reports a value FAR from intent,
-                // resend ours. Threshold 12 (not 2): AirPlay volume round-trips
-                // through a dB scale, so the engine's reported 0-100 value
-                // routinely differs from ours by ~5 just from rounding. Resending
-                // on that noise spammed the POWERNODE with volume commands every
-                // few seconds, which can itself destabilize the device. Only act
-                // on a real gap (a device that actually reset its volume).
-                for sp in speakers where sp.enabled && sp.health == .live
-                    && !speakerRecoveryInFlight.contains(sp.id) {
-                    if let until = volumeFailUntil[sp.id], until > Date() { continue }
-                    guard let o = outs.first(where: { $0.id == sp.id }) else { continue }
-                    let want = effectiveVolume(sp)
-                    // ROOT CAUSE of "drift engine=18 want=0" / "engine=25 want=38"
-                    // (274 lines, gaps of exactly one or two Mac-volume steps):
-                    // the reading is STALE. The poll's GET is queued on the same
-                    // lane as our writes, so it can be answered with the value
-                    // from before a write that has since been sent (or from
-                    // before a key press moved the target) — then compared with
-                    // the NEWER want. That is not drift, and "correcting" it
-                    // re-sent a value the engine already held. Only a reading
-                    // that no write and no target change overlapped counts.
-                    let settled = !pushInFlight && !fading
-                        && wantAtPoll[sp.id] == want
-                        && lastVolumeWriteAt.addingTimeInterval(2) <= pollStartedAt
-                        && lastRecoveryActivityAt < pollStartedAt
-                        && Date().timeIntervalSince(pollStartedAt) < 6
-                    guard settled else { continue }
-                    guard abs(o.volume - want) > 7 else {
-                        driftResendCount[sp.id] = nil     // engine agrees again: new episode next time
-                        continue
-                    }
-                    // Correct once per DISTINCT echoed value. If the engine
-                    // persistently reports a value >12 from intent (its dB
-                    // curve vs our volumeLimit clamp), re-nil-ing the cache
-                    // every 3s dripped a setVolume command at that device
-                    // forever, which can itself destabilize it. On top of that:
-                    // 30 s cool-down and three tries per episode.
-                    guard lastReconciledEcho[sp.id] != o.volume,
-                          Date().timeIntervalSince(driftResendAt[sp.id] ?? .distantPast) >= 30,
-                          (driftResendCount[sp.id] ?? 0) < 3 else { continue }
-                    lastReconciledEcho[sp.id] = o.volume
-                    driftResendAt[sp.id] = Date()
-                    driftResendCount[sp.id, default: 0] += 1
-                    if lastSentVolumes[sp.id] != nil {
-                        dlog("\(sp.name) volume drift engine=\(o.volume) want=\(want) -> resend (try \(driftResendCount[sp.id] ?? 0)/3)")
-                    }
-                    lastSentVolumes[sp.id] = nil
-                    forceVolumePush = true
-                }
-                if sessionSpeakers().contains(where: {
-                    $0.health == .live
-                        && !speakerRecoveryInFlight.contains($0.id)
-                        && lastSentVolumes[$0.id] == nil
-                }) {
-                    scheduleVolumePush()
-                }
+                updateVolumeIntent()
+                volumeController.observe(Dictionary(outs.map { ($0.id, $0.volume) },
+                                                    uniquingKeysWith: { a, _ in a }), token: volumeToken)
+
             }
         }
     }
@@ -4088,41 +3338,82 @@ final class DALIStore {
     /// EngineSupervisor.reapEngines). Posted synchronously on the main thread
     /// before exit, so blocking up to ~3 s here is the whole point.
     private func reapEngineOnQuit(confPath: String) {
+        let api = self.api
         NotificationCenter.default.addObserver(forName: NSApplication.willTerminateNotification,
                                                object: nil, queue: nil) { _ in
+            // Release the receivers first: a killed engine never tears its
+            // AirPlay sessions down, and the next launch then waits for them.
+            api.releaseOutputsForQuit()
             EngineSupervisor.reapEngines(matchingConfig: confPath, graceSeconds: 3.0)
+        }
+    }
+
+    private struct SleepResume {
+        let generation: Int
+        let mode: RoomMode
+        let hadQueue: Bool
+        let wasPlaying: Bool
+    }
+    private var sleepResume: SleepResume?
+    private var wakeTask: Task<Void, Never>?
+    private var wakeTaskID: UUID?
+    var hasPendingWake: Bool { sleepResume != nil || wakeTask != nil }
+
+    private func cancelPendingWake() {
+        wakeTask?.cancel(); wakeTask = nil; wakeTaskID = nil
+        sleepResume = nil
+    }
+
+    func handleSystemSleep() {
+        guard phase.isOn else {
+            // The lid can close again while the previous wake is settling.
+            // Keep the resume snapshot, but invalidate that delayed task.
+            wakeTask?.cancel(); wakeTask = nil; wakeTaskID = nil
+            return
+        }
+        let savedMode = mode, queued = hasQueue, playing = isPlaying
+        if playerMode { stopPlayback() } else { stopStream() }
+        sleepResume = SleepResume(generation: streamGeneration, mode: savedMode,
+                                  hadQueue: queued, wasPlaying: playing)
+    }
+
+    func handleSystemWake() {
+        guard let resume = sleepResume, wakeTask == nil else { return }
+        let token = UUID()
+        wakeTaskID = token
+        wakeTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer {
+                if self.wakeTaskID == token {
+                    self.sleepResume = nil; self.wakeTask = nil; self.wakeTaskID = nil
+                }
+            }
+            await self.awaitNetwork()
+            do { try await Task.sleep(for: .seconds(1)) } catch { return }
+            guard !Task.isCancelled, self.pathSatisfied, self.phase == .idle,
+                  self.streamGeneration == resume.generation, self.mode == resume.mode else { return }
+            if resume.mode == .player {
+                // stop pauses OwnTone's queue; do not replace it with shuffle
+                // or start Mac capture under a library-player interface.
+                self.hasQueue = resume.hadQueue
+                if resume.hadQueue && resume.wasPlaying {
+                    self.playToRoom { try await $0.play() }
+                }
+            } else {
+                self.startStream(reason: "wake")
+            }
         }
     }
 
     private func observeSleepWake() {
         let nc = NSWorkspace.shared.notificationCenter
         nc.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: .main) { [weak self] _ in
-            Task { @MainActor in
-                // `.starting` counts: a start still connecting when the lid
-                // closes would otherwise run on into the sleep and land as an
-                // error (or a half-built session) on wake.
-                guard let self, self.phase.isOn else { return }
-                self.wasStreamingBeforeSleep = true
-                if self.playerMode { self.stopPlayback() } else { self.stopStream() }
-            }
+            Task { @MainActor in self?.handleSystemSleep() }
         }
         nc.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in
-            Task { @MainActor in
-                guard let self, self.wasStreamingBeforeSleep else { return }
-                self.wasStreamingBeforeSleep = false
-                // Wait for the network to actually come back rather than
-                // guessing 3s — Wi-Fi after a lid-open regularly takes longer,
-                // and starting early just fails discovery and shows an error.
-                await self.awaitNetwork()
-                try? await Task.sleep(nanoseconds: 1_000_000_000)   // let mDNS settle
-                // Player mode has no capture stream to restart; starting one
-                // here would begin mirroring the Mac under a player-mode UI.
-                guard !self.playerMode else { return }
-                self.startStream(reason: "wake")
-            }
+            Task { @MainActor in self?.handleSystemWake() }
         }
     }
-    private var wasStreamingBeforeSleep = false
 
     // MARK: network resilience
     //
@@ -4222,7 +3513,7 @@ final class DALIStore {
     /// a fixed sleep is a guess, and guessing short means the resume fails.
     private func awaitNetwork(timeoutMs: Int = 15_000) async {
         var waited = 0
-        while !pathSatisfied && waited < timeoutMs {
+        while !Task.isCancelled && !pathSatisfied && waited < timeoutMs {
             try? await Task.sleep(nanoseconds: 250_000_000)
             waited += 250
         }

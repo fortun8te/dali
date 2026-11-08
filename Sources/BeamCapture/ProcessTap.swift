@@ -33,6 +33,9 @@ final class TapContext: @unchecked Sendable {
     let callbacks = Atomic<Int>(0)
     let overruns = Atomic<Int>(0)
     let layoutErrors = Atomic<Int>(0)
+    let staleRecords = Atomic<Int>(0)
+    static let recordHeaderBytes = 12
+    static let maximumRecordAgeNs: UInt64 = 250_000_000
 
     init(ring: AudioRing, bufferCount: Int, channelsPerBuffer: Int) {
         self.ring = ring
@@ -41,7 +44,7 @@ final class TapContext: @unchecked Sendable {
         self.bytesPerFrame = channelsPerBuffer * MemoryLayout<Float>.size
     }
 
-    /// Record layout in the ring: [UInt32 frames][bufferCount x frames*bytesPerFrame].
+    /// Record layout: [UInt32 frames][UInt64 host time][bufferCount x payload].
     /// REALTIME: no locks, no allocation, no syscalls, bounded work.
     @inline(__always)
     func deliver(_ list: UnsafePointer<AudioBufferList>) {
@@ -60,7 +63,7 @@ final class TapContext: @unchecked Sendable {
         }
         guard frames > 0, frames <= Self.maxFrames else { return }
         let payload = frames * bytesPerFrame
-        let need = 4 + bufferCount * payload
+        let need = Self.recordHeaderBytes + bufferCount * payload
         guard ring.freeBytes() >= need else {
             // Consumer is behind by seconds. Dropping the NEW record is the only
             // legal move (only the consumer may advance tail); it is counted.
@@ -69,7 +72,9 @@ final class TapContext: @unchecked Sendable {
         }
         var f32 = UInt32(truncatingIfNeeded: frames)
         withUnsafeBytes(of: &f32) { ring.copyIn($0.baseAddress!, count: 4, at: 0) }
-        var off = 4
+        var hostTime = AudioGetCurrentHostTime()
+        withUnsafeBytes(of: &hostTime) { ring.copyIn($0.baseAddress!, count: 8, at: 4) }
+        var off = Self.recordHeaderBytes
         for i in 0..<bufferCount {
             ring.copyIn(UnsafeRawPointer(abl[first + i].mData!), count: payload, at: off)
             off += payload
@@ -98,7 +103,6 @@ final class TapConsumer: @unchecked Sendable {
     private let handler: ((AVAudioPCMBuffer) -> Void)?
     private let stopFlag = Atomic<Bool>(false)
     private let finished = DispatchSemaphore(value: 0)
-    private var started = false
 
     init(context: TapContext, format: AVAudioFormat, handler: ((AVAudioPCMBuffer) -> Void)?) {
         ctx = context
@@ -107,7 +111,6 @@ final class TapConsumer: @unchecked Sendable {
     }
 
     func start() {
-        started = true
         let t = Thread { [self] in
             run()
             finished.signal()
@@ -117,10 +120,11 @@ final class TapConsumer: @unchecked Sendable {
         t.start()
     }
 
-    func stopAndJoin() {
-        stopFlag.store(true, ordering: .relaxed)
-        if started { _ = finished.wait(timeout: .now() + 2) }
-        started = false
+    // The thread owns itself and its context until run returns. Cancellation
+    // does not pretend that a timed-out join terminated an in-flight handler.
+    func requestStop() { stopFlag.store(true, ordering: .releasing) }
+    func waitForCompletion(timeout: TimeInterval) -> Bool {
+        finished.wait(timeout: .now() + timeout) == .success
     }
 
     private func run() {
@@ -129,29 +133,39 @@ final class TapConsumer: @unchecked Sendable {
         let ring = ctx.ring
         let bytesPerFrame = ctx.bytesPerFrame
         let perBuffer = ctx.channelsPerBuffer
-        while !stopFlag.load(ordering: .relaxed) {
-            while ring.readableBytes() >= 4 {
+        while !stopFlag.load(ordering: .acquiring) {
+            while !stopFlag.load(ordering: .acquiring), ring.readableBytes() >= TapContext.recordHeaderBytes {
                 var f32: UInt32 = 0
                 ring.copyOut(&f32, count: 4, at: 0)
                 let frames = Int(f32)
                 let payload = frames * bytesPerFrame
                 guard frames > 0, frames <= TapContext.maxFrames,
-                      ring.readableBytes() >= 4 + ctx.bufferCount * payload else {
+                      ring.readableBytes() >= TapContext.recordHeaderBytes + ctx.bufferCount * payload else {
                     // Impossible unless memory was corrupted: resync by discarding.
                     ring.release(ring.readableBytes())
                     break
                 }
+                let recordBytes = TapContext.recordHeaderBytes + ctx.bufferCount * payload
+                var capturedHost: UInt64 = 0
+                ring.copyOut(&capturedHost, count: 8, at: 4)
+                let hostNow = AudioGetCurrentHostTime()
+                if hostNow >= capturedHost,
+                   AudioConvertHostTimeToNanos(hostNow - capturedHost) > TapContext.maximumRecordAgeNs {
+                    ring.release(recordBytes)
+                    _ = ctx.staleRecords.wrappingAdd(1, ordering: .relaxed)
+                    continue
+                }
                 if capacity < AVAudioFrameCount(frames) {
                     capacity = AVAudioFrameCount(frames)
                     guard let bigger = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: capacity) else {
-                        ring.release(4 + ctx.bufferCount * payload)
+                        ring.release(recordBytes)
                         continue
                     }
                     pcm = bigger
                 }
                 pcm.frameLength = AVAudioFrameCount(frames)
                 let dst = UnsafeMutableAudioBufferListPointer(pcm.mutableAudioBufferList)
-                var off = 4
+                var off = TapContext.recordHeaderBytes
                 var ok = dst.count >= ctx.bufferCount
                 if ok {
                     for i in 0..<ctx.bufferCount {
@@ -161,8 +175,8 @@ final class TapConsumer: @unchecked Sendable {
                         off += payload
                     }
                 }
-                ring.release(4 + ctx.bufferCount * payload)
-                if ok { handler?(pcm) }
+                ring.release(recordBytes)
+                if ok, !stopFlag.load(ordering: .acquiring) { handler?(pcm) }
             }
             usleep(1500)
         }
@@ -186,7 +200,65 @@ final class TapConsumer: @unchecked Sendable {
 
 // MARK: - tap
 
-public final class ProcessTap {
+/// Runs on the tap event queue. HAL access is injected so exclusion updates can
+/// be verified without creating a tap, aggregate, IOProc, or audio device.
+enum ProcessTapExclusionRefresh {
+    enum Result: Equatable { case unchanged, updated, failed, stale }
+
+    private struct Identity: Equatable {
+        let uuid: UUID
+        let name: String
+        let isPrivate: Bool
+        let isExclusive: Bool
+        let isMixdown: Bool
+        let isMono: Bool
+        let mute: CATapMuteBehavior
+        let deviceUID: String?
+
+        init(_ description: CATapDescription) {
+            uuid = description.uuid; name = description.name
+            isPrivate = description.isPrivate; isExclusive = description.isExclusive
+            isMixdown = description.isMixdown; isMono = description.isMono
+            mute = description.muteBehavior; deviceUID = description.deviceUID
+        }
+    }
+
+    static func apply(previous: Set<AudioObjectID>, requested: Set<AudioObjectID>,
+                      isCurrent: () -> Bool, read: () -> CATapDescription?,
+                      write: (CATapDescription) -> OSStatus,
+                      wait: (TimeInterval) -> Void = { Thread.sleep(forTimeInterval: $0) }) -> Result {
+        guard isCurrent() else { return .stale }
+        guard !requested.isSubset(of: previous) else { return .unchanged }
+        guard let description = read() else { return isCurrent() ? .failed : .stale }
+        guard isCurrent() else { return .stale }
+        let identity = Identity(description)
+        let originalProcesses = Set(description.processes)
+        description.processes = requested.sorted()
+        guard isCurrent() else { return .stale }
+        let status = write(description)
+        guard isCurrent() else { return .stale }
+        guard status == noErr else { return .failed }
+        // HAL property changes may complete asynchronously. Only an intact,
+        // unchanged description is a pending acknowledgement worth retrying.
+        // This private event queue waits at most 50 ms; Stop is checked before
+        // every read/wait and can end confirmation after the current 10 ms wait.
+        for attempt in 0...5 {
+            guard isCurrent() else { return .stale }
+            guard let accepted = read() else { return isCurrent() ? .failed : .stale }
+            guard isCurrent() else { return .stale }
+            guard Identity(accepted) == identity else { return .failed }
+            let processes = Set(accepted.processes)
+            if processes == requested { return .updated }
+            guard processes == originalProcesses, attempt < 5 else { return .failed }
+            guard isCurrent() else { return .stale }
+            wait(0.01)
+            guard isCurrent() else { return .stale }
+        }
+        return .failed
+    }
+}
+
+public final class ProcessTap: @unchecked Sendable {
     public struct TapError: Error, CustomStringConvertible {
         public let stage: String
         public let status: OSStatus
@@ -221,21 +293,57 @@ public final class ProcessTap {
     /// IOProc invocations since start (proves the HAL is calling us).
     public var callbackCount: Int { context?.callbacks.load(ordering: .relaxed) ?? 0 }
     /// Records dropped because the consumer thread fell seconds behind.
-    public var overrunCount: Int { context?.overruns.load(ordering: .relaxed) ?? 0 }
+    public var overrunCount: Int {
+        (context?.overruns.load(ordering: .relaxed) ?? 0) + (context?.staleRecords.load(ordering: .relaxed) ?? 0)
+    }
     /// Callbacks whose buffer layout did not match the tap's format.
     public var layoutErrorCount: Int { context?.layoutErrors.load(ordering: .relaxed) ?? 0 }
 
     private let stopping = Atomic<Bool>(false)
     private let invalidated = Atomic<Bool>(false)
+    private let eventGeneration = Atomic<Int>(0)
     private var anchorUID: String?
+    /// Call-app process objects left out of a .system tap; nil for a single-app tap.
+    /// Written in start() strictly before installListeners() (eventQueue.sync gives
+    /// the happens-before), and only read by listener callbacks on eventQueue.
+    /// CaptureController never restarts a ProcessTap instance; it makes a new one.
+    private var excludedCallObjects: Set<AudioObjectID>?
     private var startRate = 0.0
     private var listeners: [(AudioObjectID, AudioObjectPropertyAddress, AudioObjectPropertyListenerBlock)] = []
 
     private static let aggregateUIDPrefix = "com.dali.beam.tap."
     private static let aggregateName = "Beam Tap Aggregate"
     private static let liveAggregates = Mutex<Set<AudioObjectID>>([])
+    // Exceptional HAL failure quarantine is identity-keyed, so repeated
+    // teardown attempts never retain duplicate contexts. It may grow if the HAL
+    // fails to destroy distinct IOProcs; those live pointers cannot be freed.
+    private static let quarantinedContexts = Mutex<[ObjectIdentifier: TapContext]>([:])
+    private static let teardownFailures = Atomic<Int>(0)
+    public static var teardownFailureCount: Int { teardownFailures.load(ordering: .relaxed) }
 
     public init() {}
+
+    /// Leave this process out of a .system tap. Needed when the app itself plays
+    /// the captured audio (the Apple-managed sender); otherwise the tap hears its
+    /// own output. Off by default. When on and this process has no audio object
+    /// yet, start() throws rather than tapping, so it can never loop or mute.
+    public var excludeOwnProcess = false
+
+    /// True once Core Audio knows this process as an audio client.
+    public static func ownProcessObjectExists() -> Bool {
+        (try? processObject(for: getpid())) != nil
+    }
+
+    /// This process's audio object, found when the tap started and kept for refreshes.
+    private var ownExcludedObject: AudioObjectID?
+
+    private func ownExclusion() -> [AudioObjectID] {
+        guard excludeOwnProcess else { return [] }
+        if let own = ownExcludedObject { return [own] }
+        guard let own = try? Self.processObject(for: getpid()) else { return [] }
+        ownExcludedObject = own
+        return [own]
+    }
 
     public enum Source: Equatable, Sendable {
         case system            // everything the Mac plays
@@ -248,8 +356,10 @@ public final class ProcessTap {
         // A second start() on a live instance would orphan the first tap.
         if tapID != kAudioObjectUnknown || aggregateID != kAudioObjectUnknown || ioProcID != nil {
             stop()
+            guard ioProcID == nil else { throw TapError(stage: "previous tap teardown", status: -3) }
         }
-        stopping.store(false, ordering: .relaxed)
+        _ = eventGeneration.wrappingAdd(1, ordering: .relaxed)
+        stopping.store(false, ordering: .releasing)
         invalidated.store(false, ordering: .relaxed)
         // Every throw below happens AFTER at least one HAL object exists, and
         // those objects are process-global: an abandoned aggregate device stays
@@ -267,8 +377,19 @@ public final class ProcessTap {
         let desc: CATapDescription
         switch source {
         case .system:
-            desc = CATapDescription(stereoGlobalTapButExcludeProcesses: [])
+            // Call apps are excluded only when they are kept on the Mac
+            // (CallAudio.keepCallsOnMac); otherwise they play in the room.
+            var calls = CallAudio.keepCallsOnMac
+                ? CallAudio.callProcessObjects(in: CallAudio.currentProcesses()) : []
+            if excludeOwnProcess {
+                let own = ownExclusion()
+                guard !own.isEmpty else { throw TapError(stage: "own process not an audio client", status: -4) }
+                calls.append(contentsOf: own.filter { !calls.contains($0) })
+            }
+            excludedCallObjects = Set(calls)
+            desc = CATapDescription(stereoGlobalTapButExcludeProcesses: calls)
         case .process(let pid):
+            excludedCallObjects = nil
             let obj = try Self.processObject(for: pid)
             desc = CATapDescription(stereoMixdownOfProcesses: [obj])
         }
@@ -358,7 +479,7 @@ public final class ProcessTap {
         // The ring/consumer copy raw Float32; refuse anything else loudly rather
         // than reinterpreting bytes.
         guard format.commonFormat == .pcmFormatFloat32,
-              format.sampleRate.isFinite, format.sampleRate > 0,
+              format.sampleRate.isFinite, format.sampleRate > 0, format.sampleRate <= 768_000,
               (1...8).contains(Int(format.channelCount)) else {
             throw TapError(stage: "unsupported tap format", status: -2)
         }
@@ -368,7 +489,9 @@ public final class ProcessTap {
         // 4. IO proc: input buffers on the aggregate are the tapped audio.
         let interleaved = format.isInterleaved
         let ctx = TapContext(
-            ring: AudioRing(capacity: 1 << 21),          // 2 MiB ~ 5 s of 48 kHz stereo Float32
+            // Half a second of input storage; age-based discard below limits
+            // delivery to the freshest 250ms even when the source pauses.
+            ring: AudioRing(capacity: min(1 << 22, Int(format.sampleRate * Double(format.channelCount) * 4 * 0.5))),
             bufferCount: interleaved ? 1 : Int(format.channelCount),
             channelsPerBuffer: interleaved ? Int(format.channelCount) : 1)
         context = ctx
@@ -380,7 +503,7 @@ public final class ProcessTap {
         guard status == noErr, ioProcID != nil else { throw TapError(stage: "create ioproc", status: status) }
 
         cons.start()
-        installListeners()
+        eventQueue.sync { installListeners() }
         status = AudioDeviceStart(aggregateID, ioProcID)
         guard status == noErr else { throw TapError(stage: "start device", status: status) }
         ok = true
@@ -390,13 +513,15 @@ public final class ProcessTap {
 
     private func installListeners() {
         let sys = AudioObjectID(kAudioObjectSystemObject)
+        let generation = eventGeneration.load(ordering: .relaxed)
         func add(_ obj: AudioObjectID, _ selector: AudioObjectPropertySelector, _ why: String) {
             var addr = AudioObjectPropertyAddress(
                 mSelector: selector,
                 mScope: kAudioObjectPropertyScopeGlobal,
                 mElement: kAudioObjectPropertyElementMain)
             let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
-                self?.evaluate(trigger: why)
+                guard let self, self.eventGeneration.load(ordering: .acquiring) == generation else { return }
+                self.evaluate(trigger: why)
             }
             if AudioObjectAddPropertyListenerBlock(obj, &addr, eventQueue, block) == noErr {
                 listeners.append((obj, addr, block))
@@ -407,6 +532,11 @@ public final class ProcessTap {
         add(aggregateID, kAudioDevicePropertyNominalSampleRate, "rate_changed")
         add(aggregateID, kAudioDevicePropertyDeviceIsAlive, "aggregate_dead")
         add(tapID, kAudioTapPropertyFormat, "tap_format_changed")
+        // A call app that starts after the tap would otherwise be captured
+        // (and muted locally) until the next rebuild.
+        if excludedCallObjects != nil {
+            add(sys, kAudioHardwarePropertyProcessObjectList, "process_list_changed")
+        }
     }
 
     private func removeListeners() {
@@ -421,6 +551,7 @@ public final class ProcessTap {
     /// fires `onInvalidated` at most once per start().
     private func evaluate(trigger: String) {
         guard !stopping.load(ordering: .relaxed) else { return }
+        let generation = eventGeneration.load(ordering: .acquiring)
         var reason: String?
         if trigger == "hal_restarted" {
             reason = trigger
@@ -433,13 +564,49 @@ public final class ProcessTap {
         } else if let f = tapFormat, let now = Self.currentTapFormat(tapID),
                   now.sampleRate != f.sampleRate || now.channelCount != f.channelCount {
             reason = "tap_format_changed"
+        } else if trigger == "process_list_changed", let excluded = excludedCallObjects {
+            let requested = Set((CallAudio.keepCallsOnMac
+                ? CallAudio.callProcessObjects(in: CallAudio.currentProcesses()) : []) + ownExclusion())
+            let result = ProcessTapExclusionRefresh.apply(previous: excluded, requested: requested,
+                isCurrent: { !self.stopping.load(ordering: .acquiring) &&
+                    self.eventGeneration.load(ordering: .acquiring) == generation },
+                read: { Self.currentTapDescription(self.tapID) },
+                write: { Self.setTapDescription(self.tapID, description: $0) })
+            switch result {
+            case .updated: excludedCallObjects = requested
+            case .failed: reason = "call_exclusion_update_failed"
+            case .unchanged, .stale: break
+            }
         }
         guard let reason else { return }
+        guard !stopping.load(ordering: .acquiring), eventGeneration.load(ordering: .acquiring) == generation else { return }
         guard !invalidated.exchange(true, ordering: .relaxed) else { return }
         onInvalidated?(reason)
     }
 
     // MARK: HAL helpers
+
+    private static func currentTapDescription(_ tap: AudioObjectID) -> CATapDescription? {
+        var address = AudioObjectPropertyAddress(mSelector: kAudioTapPropertyDescription,
+            mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
+        var description: Unmanaged<CATapDescription>?
+        var size = UInt32(MemoryLayout<Unmanaged<CATapDescription>?>.size)
+        let status = AudioObjectGetPropertyData(tap, &address, 0, nil, &size, &description)
+        guard status == noErr else { return nil }
+        return description?.takeRetainedValue()
+    }
+
+    private static func setTapDescription(_ tap: AudioObjectID, description: CATapDescription) -> OSStatus {
+        var address = AudioObjectPropertyAddress(mSelector: kAudioTapPropertyDescription,
+            mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
+        // The setter copies a non-owning Objective-C pointer; it does not take
+        // ownership. Keep the Swift object alive through the synchronous call.
+        var value: UnsafeMutableRawPointer? = Unmanaged.passUnretained(description).toOpaque()
+        return withExtendedLifetime(description) {
+            AudioObjectSetPropertyData(tap, &address, 0, nil,
+                UInt32(MemoryLayout<UnsafeMutableRawPointer?>.size), &value)
+        }
+    }
 
     private static func stringProperty(_ obj: AudioObjectID, _ selector: AudioObjectPropertySelector) -> String? {
         var addr = AudioObjectPropertyAddress(
@@ -550,17 +717,29 @@ public final class ProcessTap {
     }
 
     /// Teardown order matters: listeners -> stop IOProc -> destroy IOProc (after
-    /// which the HAL can no longer touch `context`) -> join consumer -> destroy
+    /// which the HAL can no longer touch `context`) -> retire consumer -> destroy
     /// aggregate -> destroy tap. Idempotent.
     public func stop() {
-        stopping.store(true, ordering: .relaxed)
-        removeListeners()
+        stopping.store(true, ordering: .releasing)
+        _ = eventGeneration.wrappingAdd(1, ordering: .releasing)
+        consumer?.requestStop()
+        eventQueue.sync { removeListeners() }
         if let proc = ioProcID, aggregateID != kAudioObjectUnknown {
             AudioDeviceStop(aggregateID, proc)
-            AudioDeviceDestroyIOProcID(aggregateID, proc)
+            let status = AudioDeviceDestroyIOProcID(aggregateID, proc)
+            guard status == noErr else {
+                // The HAL may still hold the unretained context. Preserve all
+                // resources rather than manufacture a use-after-free. The
+                // consumer cancels independently and its old generation cannot
+                // publish into CaptureController. A later stop may retry.
+                FileHandle.standardError.write(Data("ProcessTap: IOProc teardown failed: \(status)\n".utf8))
+                _ = Self.teardownFailures.wrappingAdd(1, ordering: .relaxed)
+                if let context { Self.quarantinedContexts.withLock { $0[ObjectIdentifier(context)] = context } }
+                return
+            }
         }
         ioProcID = nil
-        consumer?.stopAndJoin()
+        if let context { Self.quarantinedContexts.withLock { _ = $0.removeValue(forKey: ObjectIdentifier(context)) } }
         consumer = nil
         context = nil
         if aggregateID != kAudioObjectUnknown {

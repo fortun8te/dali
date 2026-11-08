@@ -12,7 +12,7 @@ speed, and player controls stay with the website.
 3. Play a video while DALI streams to your speakers.
 
 For source installations, select this `chrome-extension` folder instead.
-Chrome 110 or later is required. There is no popup or toolbar setting to
+Chrome 120 or later is required. There is no popup or toolbar setting to
 configure. The extension releases the picture when DALI is offline or idle.
 
 ## Updates
@@ -33,7 +33,7 @@ To check the active version, open the extension's **service worker** console
 from `chrome://extensions`. This release prints:
 
 ```
-[DALI Video Sync] v1.1.0  build 2026-09-13.a
+[DALI Video Sync] v1.2.5  build 2026-10-17.d
 ```
 
 ## Video support
@@ -42,7 +42,7 @@ from `chrome://extensions`. This release prints:
 | --- | --- |
 | YouTube and Shorts | Normal playback, buffering, seeking, reused ad/video elements, feed changes, cached-page return |
 | TikTok | Visible feed selection, swiping past an older playing video, replacing the video element |
-| Instagram Reels | Visible feed selection, muted previews, changing the source on a reused video element |
+| Instagram Reels | Left untouched so the original player remains usable; picture delay is not supported |
 | Other HTML video players | Standard video elements, embedded frames, open shadow-root discovery, source and layout changes |
 
 These are tests of actual extension code against controlled browser and media
@@ -58,7 +58,46 @@ The delay comes from DALI's stable configured buffer, engine scheduling
 allowance, and saved timing trim. Receiver-specific latency and network conditions can still
 need in-room calibration. A clean browser test cannot prove speaker lip-sync.
 
-## What changed in 1.1.0
+## What changed in 1.2.5
+
+- Native looping videos preserve their delayed frame history at each wrap,
+  avoiding the repeated jump and freeze caused by treating a loop as a seek.
+  Manual rewinds and jumps still release old frames.
+- Tall, high-resolution videos retain the full requested picture delay within
+  the memory budget by reducing capture resolution when necessary.
+- Captures that complete late cannot move the displayed picture backward.
+- Site-created clones of a playing video restore their inherited original
+  visibility when sync stops, preventing an invisible replacement player.
+- Pause/resume shares the pending app-status request, preventing an older
+  reply from overwriting newer room status.
+- The native browser smoke check uses a disposable, silent Chrome for Testing
+  profile and real frame callbacks. It does not touch personal Chrome or audio.
+
+Run the deterministic release checks from the repository root:
+
+```sh
+node --test chrome-extension/tools/harness/regressions.mjs
+```
+
+Run the native browser check with a separate testing executable:
+
+```sh
+python3 chrome-extension/tools/harness/native-check.py \
+  --chrome '/path/to/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing' \
+  --output /tmp/dali-native-results.json
+```
+
+The same runner supports two additional release checks:
+
+- `--loop-probe` runs a short native looping video and asserts that frame
+  history, pipeline generation and delay survive every wrap.
+- `--real-extension` loads the actual Manifest V3 extension in a disposable
+  Chrome profile. It uses real content-script messaging and real worker
+  requests against an isolated fake app, then verifies extension reload,
+  app reconnect and video replacement. Only the copied beacon endpoint is
+  changed. The running DALI app and personal Chrome are never contacted.
+
+## Earlier reliability changes
 
 - Feed selection uses the visible part of each player. Offscreen and CSS-hidden
   clips no longer keep sync attached to the previous item.
