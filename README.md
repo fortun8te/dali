@@ -1,12 +1,6 @@
 # DALI — Multi-speaker AirPlay for Mac
 
-### Play your Mac’s audio on multiple AirPlay speakers.
-
-DALI is an open-source macOS app for **multi-room AirPlay audio**. Send your Mac’s system audio or a selected app to multiple AirPlay speakers, choose which speakers play, and control their volume from one window.
-
-For watching videos, the optional **DALI Video Sync** Chrome extension delays supported web video to match the room’s audio.
-
-*Vibe-coded slop, but it works.*
+DALI sends Mac audio to multiple AirPlay speakers and gives each speaker its own volume control. The optional Chrome extension delays supported video to match the audio.
 
 [Preview release](https://github.com/fortun8te/dali/releases/tag/v1.2.0-preview.1) · [Setup](docs/getting-started.md) · [Build from source](docs/building.md) · [Privacy](PRIVACY.md) · [Report an issue](https://github.com/fortun8te/dali/issues)
 
