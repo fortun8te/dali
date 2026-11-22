@@ -10,20 +10,23 @@ struct RoomCard: View {
     /// Where the pointer is over the card, so the glow's lines can lean toward it.
     @State private var pointer: CGPoint?
 
+    /// Surround lives in DALI's own engine, so Apple's sender has no use for it.
+    private var showsSurround: Bool { store.back != nil && !AppleSender.shared.isSelected }
+
     var body: some View {
         VStack(spacing: 0) {
             if store.hasRoomPlan {
                 RoomCanvas()
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .overlay { SpeakerTestOverlay() }
                 NowPlayingSlot()
                     .padding(.horizontal, Space.m + 2)
                 VStack(spacing: 0) {
                     if let front = store.front { PairRow(speaker: front, title: "Front") }
                     if let back = store.back { PairRow(speaker: back, title: "Back") }
+                    if showsSurround { SurroundRow() }
                 }
-                .frame(height: PanelMetrics.rowHeight * 2
-                    + SpeakerLoudnessAdjustment.height(for: store.front, in: store)
-                    + SpeakerLoudnessAdjustment.height(for: store.back, in: store), alignment: .top)
+                .frame(height: PanelMetrics.rowHeight * (showsSurround ? 3 : 2), alignment: .top)
                 .padding(.horizontal, Space.m + 2)
                 .padding(.bottom, Space.s)
             } else {
@@ -189,7 +192,7 @@ struct PairRow: View {
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-                .help(speaker.available ? "\(speaker.name) — click to switch \(speaker.enabled ? "off" : "on")"
+                .help(speaker.available ? "Turn \(speaker.name) \(speaker.enabled ? "off" : "on")"
                                         : "\(speaker.name) is unavailable")
                 .accessibilityLabel("\(title) speakers")
                 .accessibilityValue(speaker.enabled ? "On" : "Off")
@@ -207,41 +210,6 @@ struct PairRow: View {
                     .frame(width: 28, alignment: .trailing)
             }
             .frame(height: PanelMetrics.rowHeight)
-            SpeakerLoudnessAdjustment(speaker: speaker)
-                .padding(.leading, 64 + Space.m)
-        }
-    }
-}
-
-/// Where the user trims a speaker's loudness, right under its volume slider.
-/// A speaker with a leveling curve (MICHAEL D) has exactly one control, Balance,
-/// which shifts the whole curve by -30...+30 %. Other speakers show their saved
-/// fixed adjustment with Reset, as before.
-struct SpeakerLoudnessAdjustment: View {
-    @Environment(DALIStore.self) private var store
-    let speaker: RoomSpeaker
-
-    @MainActor static func height(for speaker: RoomSpeaker?, in store: DALIStore) -> CGFloat {
-        speaker.map { $0.levelCurve == nil && $0.gain != 1 ? 20 : 0 } ?? 0
-    }
-
-    var body: some View {
-        // A speaker with a leveling curve keeps its trim in Settings > Room > Fine
-        // tuning, not under every volume slider. The saved value still applies.
-        if speaker.levelCurve != nil {
-            EmptyView()
-        } else if speaker.gain != 1 {
-            HStack(spacing: Space.s) {
-                Text("Adjustment: \(safeInt((speaker.gain * 100).rounded()))%")
-                    .font(.caption).foregroundStyle(Color.paper62)
-                Spacer(minLength: 0)
-                Button("Reset") { store.setGain(1, for: speaker) }
-                    .buttonStyle(.plain).font(.captionMedium)
-                    .foregroundStyle(Color.paper)
-                    .accessibilityLabel("Reset \(speaker.name) loudness adjustment")
-                    .help("Set this speaker's adjustment to 100%")
-            }
-            .frame(height: 20)
         }
     }
 }
@@ -264,7 +232,7 @@ struct BalanceTrimControl: View {
         HStack(spacing: Space.s) {
             Text(Self.label(speaker.balanceTrim))
                 .font(.caption).foregroundStyle(Color.paper62)
-                .help("Shifts \(speaker.name)'s whole leveling curve up or down, from -30% to +30%")
+                .help("Adjust \(speaker.name) to match the other speaker")
             Spacer(minLength: 0)
             if speaker.balanceTrim != 0 {
                 Button("Reset") { store.setBalanceTrim(0, for: speaker) }
@@ -490,11 +458,10 @@ struct SpeakerControlRow: View {
                 SliderRow(value: Binding(get: { speaker.relVolume },
                                          set: { store.setRelVolume($0, for: speaker) }),
                           live: store.isLit(speaker), enabled: speaker.available,
-                          readout: "\(safeInt(speaker.relVolume))", labelWidth: 36) {
-                    Text("Vol").font(.caption).foregroundStyle(Color.paper38)
+                          readout: "\(safeInt(speaker.relVolume))", labelWidth: 48) {
+                    Text("Volume").font(.caption).foregroundStyle(Color.paper38)
                 }
                 .accessibilityLabel("\(speaker.name) volume")
-                SpeakerLoudnessAdjustment(speaker: speaker)
             }
         }
     }
@@ -537,5 +504,63 @@ struct ErrorCard: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .glassCard()
+    }
+}
+
+
+/// Surround, under the two volume sliders. On: the back pair plays its own mix of
+/// the song, and the Front and Back sliders still set each pair's level. Off: both
+/// pairs play the same stream. It switches instantly.
+struct SurroundRow: View {
+    @Environment(DALIStore.self) private var store
+
+    var body: some View {
+        @Bindable var store = store
+        HStack(spacing: Space.m) {
+            Text("Surround")
+                .font(.body13Medium)
+                .foregroundStyle(store.surround ? Color.paper : Color.paper62)
+            Spacer(minLength: 0)
+            GlassSwitch(title: "Surround", isOn: $store.surround)
+        }
+        .padding(.leading, 6 + Space.s) // Match the status dot and gap in PairRow.
+        .frame(height: PanelMetrics.rowHeight)
+        .animation(Motion.fade, value: store.surround)
+        .help("Give the back speakers their own mix.")
+    }
+}
+
+/// While a speaker test runs: the name of the corner playing sits by the listener, and
+/// in the circle test a point of light goes round the room with the sound.
+struct SpeakerTestOverlay: View {
+    @Environment(DALIStore.self) private var store
+
+    var body: some View {
+        GeometryReader { geo in
+            if let started = store.circleStartedAt {
+                TimelineView(.animation(minimumInterval: 1.0 / 60.0)) { timeline in
+                    let elapsed = timeline.date.timeIntervalSince(started)
+                    if elapsed >= 0 {
+                        let angle = 2 * Double.pi * elapsed / SpeakerTestSignal.circleSeconds
+                        let me = RoomLayout.listener.scaled(to: geo.size)
+                        Circle()
+                            .fill(Color.bloomHighlight)
+                            .frame(width: 7, height: 7)
+                            .shadow(color: Color.bloomPeriwinkle, radius: 9)
+                            .position(x: me.x + sin(angle) * geo.size.width * 0.33,
+                                      y: me.y - cos(angle) * geo.size.height * 0.30)
+                    }
+                }
+            } else if store.isSpeakerTesting {
+                Text(store.speakerTestCorner?.title ?? "Listen")
+                    .font(.body13Medium)
+                    .foregroundStyle(store.speakerTestCorner == nil ? Color.paper38 : Color.paper)
+                    .contentTransition(.opacity)
+                    .position(x: RoomLayout.listener.x * geo.size.width,
+                              y: RoomLayout.listener.y * geo.size.height + 34)
+            }
+        }
+        .animation(Motion.fade, value: store.speakerTestCorner)
+        .allowsHitTesting(false)
     }
 }

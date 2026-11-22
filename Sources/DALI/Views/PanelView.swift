@@ -4,7 +4,7 @@
 //   [ primary button ]
 //   ┌ room card ──────┐   (or the error card, in exactly the same frame)
 //   └─────────────────┘
-//   ( source ··· delay · gear )
+//   ( source ··· video sync · speakers · gear )
 //
 // A quiet room glow under native glass controls and a stable room surface.
 
@@ -13,6 +13,7 @@ import SwiftUI
 struct PanelView: View {
     @Environment(DALIStore.self) private var store
     @Environment(\.openWindow) private var openWindow
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     private var apple: AppleSender { .shared }
 
     var body: some View {
@@ -41,6 +42,9 @@ struct PanelView: View {
                 }
             }
                 .buttonStyle(PrimaryButtonStyle())
+                .overlay {
+                    if store.phase == .starting && !reduceMotion && !apple.isSelected { ConnectingSheen() }
+                }
                 .disabled(apple.isSelected ? apple.phase == .starting : store.isError)
                 .padding(.bottom, Space.l)
             Group {

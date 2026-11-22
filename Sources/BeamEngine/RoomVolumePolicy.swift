@@ -10,11 +10,13 @@ public struct RoomVolumeSpeaker: Equatable, Sendable {
     /// set, the saved fixed `gain` is ignored (it stays saved, untouched).
     public var curve: SpeakerLevelCurve?
     public var trim: Double
+    public var masterCurve: SpeakerLevelCurve?
 
     public init(id: String, slider: Double, gain: Double = 1, enabled: Bool = true,
-                curve: SpeakerLevelCurve? = nil, trim: Double = 0) {
+                curve: SpeakerLevelCurve? = nil, trim: Double = 0, masterCurve: SpeakerLevelCurve? = nil) {
         self.id = id; self.slider = slider; self.gain = gain; self.enabled = enabled
         self.curve = curve; self.trim = trim
+        self.masterCurve = masterCurve
     }
 }
 
@@ -66,7 +68,9 @@ public enum RoomVolumePolicy {
     /// (1 + trim/100); everything else keeps its fixed saved gain.
     public static func effectiveGain(for speaker: RoomVolumeSpeaker, systemMaster: Double?) -> Double {
         let raw: Double
-        if let curve = speaker.curve {
+        if let master = systemMaster, let curve = speaker.masterCurve {
+            raw = curve.gain(atMaster: bounded(master, fallback: 0, lower: 0, upper: 1))
+        } else if let curve = speaker.curve {
             let master = systemMaster.map { bounded($0, fallback: 0, lower: 0, upper: 1) } ?? 1
             let trim = bounded(speaker.trim, fallback: 0, lower: trimRange.lowerBound, upper: trimRange.upperBound)
             raw = curve.gain(atMaster: master) * (1 + trim / 100)

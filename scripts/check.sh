@@ -19,6 +19,7 @@ run_check 'System volume observer responsiveness' bash scripts/tests/system-volu
 run_check 'Desk output restore transitions' bash scripts/tests/video-mode.sh
 run_check 'Actual app controller integration' bash scripts/tests/app-controller.sh
 run_check 'Bundled engine source and patch hashes' python3 scripts/engine-source-provenance.py
+run_check 'Rear surround stream' bash scripts/tests/rear-surround.sh
 run_check 'Production C engine regressions' env DALI_ENGINE_TEST_SOURCE="$PWD/third_party/owntone" node scripts/tests/airplay-backpressure.mjs
 run_check 'Onboarding and managed extension update' bash scripts/tests/onboarding.sh
 run_check 'Browser extension regressions' node --test --test-reporter=spec chrome-extension/tools/harness/regressions.mjs

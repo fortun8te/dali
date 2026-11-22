@@ -117,6 +117,96 @@ private struct PrimaryButtonBody: View {
     }
 }
 
+/// An on/off switch made of the same glass as the rest of the window: tinted glass for
+/// the track, so the room's light shows through it, and a bright drop of a thumb that
+/// stretches as you press it and springs across.
+struct GlassSwitch: View {
+    let title: String
+    @Binding var isOn: Bool
+
+    var body: some View {
+        Button { isOn.toggle() } label: { EmptyView() }
+            .buttonStyle(GlassSwitchStyle(isOn: isOn))
+            .accessibilityLabel(title)
+            .accessibilityValue(isOn ? "On" : "Off")
+            .accessibilityAddTraits(.isToggle)
+    }
+}
+
+private struct GlassSwitchStyle: ButtonStyle {
+    let isOn: Bool
+    func makeBody(configuration: Configuration) -> some View {
+        GlassSwitchBody(isOn: isOn, pressed: configuration.isPressed)
+    }
+}
+
+private struct GlassSwitchBody: View {
+    let isOn: Bool
+    let pressed: Bool
+    @State private var hovering = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    private static let width: CGFloat = 38
+    private static let height: CGFloat = 22
+    private static let thumb: CGFloat = 16
+    private static let springy = Animation.spring(response: 0.34, dampingFraction: 0.68)
+
+    var body: some View {
+        let track = Capsule()
+        let stretch: CGFloat = pressed && !reduceMotion ? 6 : 0
+        let thumbWidth = Self.thumb + 4 + stretch
+        let travel = (Self.width - thumbWidth) / 2 - 3
+        ZStack {
+            // The light the switch throws onto the room when it is on.
+            track.fill(Color.accentBlue.opacity(isOn ? 0.55 : 0))
+                .blur(radius: 9)
+                .scaleEffect(x: 1.05, y: 1.1)
+                .allowsHitTesting(false)
+            track.fill(Color.accentBlue.opacity(isOn ? 0.62 : 0))
+                .frame(width: Self.width, height: Self.height)
+                .glass(track, clear: true, tint: isOn ? Color.accentBlue.opacity(0.7) : Color.white.opacity(hovering ? 0.12 : 0.07))
+            // Light along the top edge of the glass, darker along the bottom.
+            track.strokeBorder(LinearGradient(colors: [.white.opacity(isOn ? 0.38 : 0.24), .white.opacity(0.03)],
+                                              startPoint: .top, endPoint: .bottom), lineWidth: 0.5)
+                .frame(width: Self.width, height: Self.height)
+                .allowsHitTesting(false)
+            track.fill(LinearGradient(colors: [.white, Color(white: 0.86)], startPoint: .top, endPoint: .bottom))
+                .overlay(track.strokeBorder(.white.opacity(0.65), lineWidth: 0.5))
+                .frame(width: thumbWidth, height: Self.thumb)
+                .shadow(color: .black.opacity(0.32), radius: 2.5, y: 1)
+                .offset(x: isOn ? travel : -travel)
+        }
+        .frame(width: Self.width, height: Self.height)
+        .contentShape(track)
+        .onHover { hovering = $0 }
+        .animation(reduceMotion ? nil : Self.springy, value: isOn)
+        .animation(reduceMotion ? nil : Self.springy, value: pressed)
+        .animation(Motion.fade, value: hovering)
+    }
+}
+
+/// While the room connects: a soft band of light crossing a control, again and again.
+struct ConnectingSheen: View {
+    var body: some View {
+        TimelineView(.animation(minimumInterval: 1.0 / 60.0)) { timeline in
+            GeometryReader { geo in
+                let phase = (timeline.date.timeIntervalSinceReferenceDate / 1.7).truncatingRemainder(dividingBy: 1)
+                let band = geo.size.width * 0.55
+                LinearGradient(stops: [
+                    .init(color: .white.opacity(0), location: 0),
+                    .init(color: Color.bloomHighlight.opacity(0.13), location: 0.5),
+                    .init(color: .white.opacity(0), location: 1),
+                ], startPoint: .leading, endPoint: .trailing)
+                .frame(width: band)
+                .offset(x: -band + (geo.size.width + band) * phase)
+            }
+        }
+        .clipShape(RoundedRectangle(cornerRadius: Radius.control, style: .continuous))
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
+    }
+}
+
 /// Plain text action: paper 62 → paper on hover. Blue only when `accent`.
 struct SecondaryButtonStyle: ButtonStyle {
     var accent = false

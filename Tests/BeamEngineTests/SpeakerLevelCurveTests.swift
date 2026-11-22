@@ -6,6 +6,17 @@ import XCTest
 /// macOS volume step. They are evidence for the curve; the tests pin that the code
 /// applies exactly these values.
 final class SpeakerLevelCurveTests: XCTestCase {
+    func testIndependentMasterCurvePreservesOtherSourcesAndCeiling() {
+        let curve = SpeakerLevelCurve(percentPerStep: Array(repeating: 120, count: 16))!
+        let rear = RoomVolumeSpeaker(id: "rear", slider: 100, gain: 1, masterCurve: curve)
+        let front = RoomVolumeSpeaker(id: "front", slider: 100)
+        let plan = RoomVolumePolicy.plan(speakers: [front, rear], ceiling: 70, systemMaster: 0.5)
+        XCTAssertEqual(plan.hardware["front"], 35)
+        XCTAssertEqual(plan.hardware["rear"], 42)
+        XCTAssertEqual(RoomVolumePolicy.effectiveGain(for: rear, systemMaster: nil), 1)
+        XCTAssertEqual(RoomVolumePolicy.plan(speakers: [rear], ceiling: 70, systemMaster: 1).hardware["rear"], 70)
+        XCTAssertEqual(RoomVolumePolicy.plan(speakers: [rear], ceiling: 70, systemMaster: 0).hardware["rear"], 0)
+    }
     private let targets: [(step: Int, percent: Double)] =
         [(1, 250), (2, 205), (3, 182), (4, 156), (5, 143), (6, 136), (7, 136)]
 

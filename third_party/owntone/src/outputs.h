@@ -138,6 +138,8 @@ struct output_device
 
   // For user config of speaker start
   int offset_ms;
+  // DALI: 0 = the stereo program as is, 1 = the back of Surround, 2 = the front.
+  int channel_mix;
 
   // Address
   char *v4_address;
@@ -195,6 +197,9 @@ struct output_buffer
   // subscribers, and the last element is a zero terminator.
   struct output_data data[OUTPUTS_MAX_QUALITY_SUBSCRIPTIONS + 2];
 };
+
+// DALI: while true, rear streams play the input straight through (Surround off, speaker test).
+extern bool outputs_rear_direct;
 
 struct output_definition
 {

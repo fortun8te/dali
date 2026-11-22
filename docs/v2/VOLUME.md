@@ -12,7 +12,7 @@ V2 zero emits protocol mute (-144 dB). The existing 15 ms PCM ramp remains for m
 
 ## Visible speaker adjustments
 
-A non-neutral saved gain is shown beside the main front/back slider and in the speaker list as an adjustment percentage, with a per-speaker Reset action. Reset sets that gain to one through the existing coordinator, preserving the slider, other speakers and Mac master. Fine tuning uses the same rounded percentage instead of a one-decimal multiplier. These percentages describe saved settings, not measured acoustic output. No general preference migration or master-curve change is performed.
+Settings > Room > Fine tuning shows the saved gain as a percentage, with Reset available when a speaker has a non-neutral gain. Reset sets that gain to one through the existing coordinator, preserving the slider, other speakers and Mac master. These percentages describe saved settings, not measured acoustic output. No general preference migration or master-curve change is performed.
 
 ## Per-master-step leveling (DALI speaker, 13 Oct 2026)
 

@@ -54,8 +54,8 @@
   // Bump BUILD on every edit. The service worker prints version + build on
   // startup (chrome://extensions -> "service worker"); that line is the only
   // way to confirm which code Chrome actually has loaded.
-  const VERSION = '1.2.5';
-  const BUILD = '2026-10-17.d';
+  const VERSION = '1.2.6';
+  const BUILD = '2026-11-08.a';
 
   if (typeof chrome === 'undefined' || !chrome.runtime) return;
 
@@ -637,7 +637,13 @@
       this.listen(v, 'seeking', () => this.onSeek());
 
       this.listen(v, 'seeked', () => { markFresh(v); this.lastTimeSeen = v.currentTime; });
-      this.listen(v, 'play', () => { markFresh(v); this.resumeDraw(); });
+      this.listen(v, 'play', () => {
+        markFresh(v);
+        // Decoder startup can outlast FRESH_MS. Keep this restart pending
+        // until its first captured frame, just as for a source replacement.
+        if (!this.armed) this.freshPending = true;
+        this.resumeDraw();
+      });
       // NOT 'playing': that also fires when a stall ends, and a stall is not a
       // fresh audio start — the speakers are still working through the audio
       // that was already in the pipe, so the delay must be eased back in, not
@@ -944,9 +950,9 @@
       let w = Math.min(vw, MAX_CAPTURE_WIDTH, Math.max(160, wantW));
       w = Math.max(2, Math.round(w / 2) * 2);
       let h = Math.max(2, Math.round((w * vh) / vw / 2) * 2);
-      // Size for the TARGET delay, not the ramped one: the ring has to be able
-      // to hold the full delay by the time the ramp reaches it.
-      const delaySec = Math.max(0.05, activeDelayMs() / 1000);
+      // Retain enough history for both the destination and the current delay.
+      // A downward glide still needs old frames until the picture catches up.
+      const delaySec = Math.max(0.05, activeDelayMs() / 1000, this.eff / 1000);
 
       // Portrait frames can cost much more than landscape at the same width.
       // If even MIN_FPS cannot fit the requested history, reduce resolution

@@ -60,6 +60,13 @@ final class CaptureController: @unchecked Sendable {
     private var callTimer: DispatchSourceTimer?
     var isCallDucked: Bool { lock.withLock { callDuck.isDucked } }
     private var desiredMasterGain = 1.0
+    /// Speaker test: while set, this replaces the captured audio on its way to the
+    /// pipe. nil returns to the real audio. Pacing and drift control are unaffected.
+    func setSpeakerTest(_ output: SpeakerTestSignal.Output?) {
+        lock.lock(); speakerTest = output; lock.unlock()
+    }
+    private var speakerTest: SpeakerTestSignal.Output?
+
     func setMasterGain(_ value: Double) {
         guard value.isFinite else { return }
         lock.lock(); desiredMasterGain = min(max(value, 0), 1); lock.unlock()
@@ -757,6 +764,7 @@ final class CaptureController: @unchecked Sendable {
         // Consumer-thread state (one thread per tap, so no locking needed).
         var conv: FormatConverter?
         var varispeed = Varispeed()          // smooth drift control
+        var testSignal = SpeakerTestSignal()
         tap.onBuffer = { [weak self] buffer in
             guard let self else { return }
             let conversionBegan = Self.monoNow()
@@ -786,8 +794,8 @@ final class CaptureController: @unchecked Sendable {
                 varispeed.reset()
                 conv?.fadeInNextBuffer()
             }
-            guard let converted = conv?.convert(buffer, masterGain: gain) else { return }
-            let sourceHasAudio = !(conv?.outputWasSilent ?? true)
+            guard var converted = conv?.convert(buffer, masterGain: gain) else { return }
+            var sourceHasAudio = !(conv?.outputWasSilent ?? true)
             // SMOOTH DRIFT CONTROL: resample by a hair to match the AirPlay speaker
             // clock. The ratio is set once/sec by the flight loop from OwnTone's
             // REAL drain + playback clock (setTargetRatio), so it tracks the actual
@@ -802,7 +810,12 @@ final class CaptureController: @unchecked Sendable {
                 self.appliedRatio = max(self.appliedRatio - maxStep, self.targetRatio)
             }
             let rawRatio = self.appliedRatio
+            let speakerTest = self.speakerTest
             self.lock.unlock()
+            if let speakerTest {
+                testSignal.write(speakerTest, into: &converted)
+                sourceHasAudio = true        // the test is not the source going quiet
+            }
             // Bit-transparency deadzone (see driftDeadzone): sub-200 ppm
             // corrections snap to exactly 1.0 so the varispeed takes its
             // bit-perfect passthrough branch and never resamples audio it
@@ -1142,6 +1155,7 @@ final class CaptureController: @unchecked Sendable {
         lpSlow = 0; lpMid = 0; levelPrimed = false
         _level = 0; _bass = 0; _treble = 0; _mid = 0
         peakSinceRead = (0, 0, 0, 0)
+        speakerTest = nil
         for i in _spectrum.indices { _spectrum[i] = 0; peakSpectrum[i] = 0 }
         spectrumAnalyzer.reset()
         lastLevelAt = nil; lastBeatWallAt = nil

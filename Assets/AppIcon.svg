@@ -1,0 +1,117 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <!-- DALI app icon: 860x860 rounded square on a 1024 transparent canvas.
+       Atmospheric glow = radial gradient centred on the planet circle, so it follows the arc.
+       No stroke, rim or highlight anywhere on the outline. -->
+  <defs>
+    <clipPath id="shape"><rect x="82" y="82" width="860" height="860" rx="196" ry="196"/></clipPath>
+
+    <!-- glow: stops are distance above the planet arc (R=761) -->
+    <radialGradient id="glow" gradientUnits="userSpaceOnUse" cx="616" cy="1304" r="1161">
+      <stop offset="0" stop-color="#fffdf2"/>
+      <stop offset="0.6555" stop-color="#fffdf2"/>
+      <stop offset="0.6598" stop-color="#fcfbea"/>
+      <stop offset="0.6684" stop-color="#cdedfd"/>
+      <stop offset="0.6839" stop-color="#7ccfff"/>
+      <stop offset="0.7054" stop-color="#2f9bff"/>
+      <stop offset="0.7373" stop-color="#0f6cff"/>
+      <stop offset="0.7933" stop-color="#0b58f8"/>
+      <stop offset="0.8579" stop-color="#1140de"/>
+      <stop offset="0.9182" stop-color="#142aa2"/>
+      <stop offset="0.9742" stop-color="#0a1558"/>
+      <stop offset="1.0215" stop-color="#00000a"/>
+    </radialGradient>
+    <!-- the dome: the light is strongest over the middle and gone by the upper corners -->
+    <radialGradient id="dome" gradientUnits="userSpaceOnUse" cx="0" cy="0" r="1" gradientTransform="translate(590 790) scale(830 700)">
+      <stop offset="0.66" stop-color="#00000a" stop-opacity="0"/>
+      <stop offset="0.8" stop-color="#00000a" stop-opacity="0.4"/>
+      <stop offset="0.92" stop-color="#00000a" stop-opacity="0.86"/>
+      <stop offset="1" stop-color="#00000a" stop-opacity="1"/>
+    </radialGradient>
+
+    <!-- grain strength follows the glow: none at the arc and far out, strongest mid-glow -->
+    <radialGradient id="grainFade" gradientUnits="userSpaceOnUse" cx="616" cy="1304" r="1161">
+      <stop offset="0.69" stop-color="#fff" stop-opacity="0"/>
+      <stop offset="0.76" stop-color="#fff" stop-opacity="0.55"/>
+      <stop offset="0.82" stop-color="#fff" stop-opacity="1"/>
+      <stop offset="0.89" stop-color="#fff" stop-opacity="0.7"/>
+      <stop offset="0.96" stop-color="#fff" stop-opacity="0"/>
+    </radialGradient>
+    <mask id="grainMask" maskUnits="userSpaceOnUse" x="0" y="0" width="1024" height="1024">
+      <rect width="1024" height="1024" fill="url(#grainFade)"/>
+    </mask>
+
+    <!-- fine blue speckle -->
+    <filter id="grain" x="0" y="0" width="100%" height="100%" color-interpolation-filters="sRGB">
+      <feTurbulence type="fractalNoise" baseFrequency="2.7" numOctaves="2" seed="11" result="n"/>
+      <feColorMatrix in="n" type="matrix"
+        values="0 0 0 0 0.45
+                0 0 0 0 0.75
+                0 0 0 0 1
+                0 0 0 3.2 -1.55"/>
+    </filter>
+
+    <!-- bloom: wide soft light spilling from the bright band, fades long before the top -->
+    <radialGradient id="bloom" gradientUnits="userSpaceOnUse" cx="616" cy="1304" r="1161">
+      <stop offset="0.600" stop-color="#bfeaff" stop-opacity="0.10"/>
+      <stop offset="0.655" stop-color="#d8f3ff" stop-opacity="0.22"/>
+      <stop offset="0.690" stop-color="#8fd4ff" stop-opacity="0.17"/>
+      <stop offset="0.730" stop-color="#4aa6ff" stop-opacity="0.10"/>
+      <stop offset="0.790" stop-color="#1f6bff" stop-opacity="0.04"/>
+      <stop offset="0.850" stop-color="#1f6bff" stop-opacity="0"/>
+    </radialGradient>
+    <!-- planet depth: faint atmospheric lift just inside the limb -->
+    <radialGradient id="planetLift" gradientUnits="userSpaceOnUse" cx="616" cy="1304" r="761">
+      <stop offset="0.86" stop-color="#0a1a52" stop-opacity="0"/>
+      <stop offset="0.95" stop-color="#0a1a52" stop-opacity="0.10"/>
+      <stop offset="0.99" stop-color="#16327f" stop-opacity="0.22"/>
+      <stop offset="1" stop-color="#1c4aa8" stop-opacity="0.26"/>
+    </radialGradient>
+    <radialGradient id="limbSpill" gradientUnits="userSpaceOnUse" cx="616" cy="1304" r="761">
+      <stop offset="0.93" stop-color="#9fd8ff" stop-opacity="0"/>
+      <stop offset="1" stop-color="#9fd8ff" stop-opacity="0.10"/>
+    </radialGradient>
+    <filter id="spark" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="1.2"/>
+    </filter>
+    <filter id="sparkGlow" x="-100%" y="-100%" width="300%" height="300%">
+      <feGaussianBlur stdDeviation="7"/>
+    </filter>
+    <!-- blue light pooling along the bottom of the planet: no edge, it fades out both ways -->
+    <radialGradient id="floorLight">
+      <stop offset="0" stop-color="#1c5cff" stop-opacity="0.55"/>
+      <stop offset="0.55" stop-color="#1242c8" stop-opacity="0.2"/>
+      <stop offset="1" stop-color="#0a2a90" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="flare">
+      <stop offset="0" stop-color="#3f9dff" stop-opacity="0.5"/>
+      <stop offset="0.5" stop-color="#1c63ff" stop-opacity="0.16"/>
+      <stop offset="1" stop-color="#0b3bd0" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+
+  <g clip-path="url(#shape)">
+    <rect width="1024" height="1024" fill="#00010a"/>
+    <rect width="1024" height="1024" fill="url(#glow)"/>
+    <rect width="1024" height="1024" fill="url(#dome)"/>
+    <g mask="url(#grainMask)"><rect width="1024" height="1024" filter="url(#grain)" opacity="0.5"/></g>
+
+    <rect width="1024" height="1024" fill="url(#bloom)" style="mix-blend-mode:screen"/>
+    <circle cx="100" cy="740" r="190" fill="url(#flare)" style="mix-blend-mode:screen"/>
+    <circle cx="930" cy="610" r="170" fill="url(#flare)" style="mix-blend-mode:screen"/>
+    <!-- planet -->
+    <circle cx="616" cy="1304" r="761" fill="#050508"/>
+    <circle cx="616" cy="1304" r="761" fill="url(#planetLift)"/>
+    <circle cx="616" cy="1304" r="761" fill="url(#limbSpill)" style="mix-blend-mode:screen"/>
+    <ellipse cx="512" cy="1010" rx="520" ry="150" fill="url(#floorLight)" style="mix-blend-mode:screen"/>
+    <!-- the limb: a hair of deep blue where the light meets the planet -->
+    <circle cx="616" cy="1304" r="760" fill="none" stroke="#0b2f8a" stroke-width="3.5" opacity="0.9"/>
+
+    <!-- sparkle where the arc meets the right edge -->
+    <g transform="translate(908 597)">
+      <circle r="26" fill="#bfe6ff" opacity="0.30" filter="url(#sparkGlow)"/>
+      <circle r="8" fill="#e6f6ff" opacity="0.6" filter="url(#sparkGlow)"/>
+      <path d="M0 -24 L1.4 -1.4 L27 0 L1.4 1.4 L0 24 L-1.4 1.4 L-27 0 L-1.4 -1.4 Z" fill="#fff" filter="url(#spark)" transform="rotate(-38)"/>
+      <path d="M0 -9 L1.1 -1.1 L9 0 L1.1 1.1 L0 9 L-1.1 1.1 L-9 0 L-1.1 -1.1 Z" fill="#fff" transform="rotate(-38)"/>
+    </g>
+  </g>
+</svg>

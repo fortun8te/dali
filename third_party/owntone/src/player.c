@@ -172,6 +172,8 @@ struct speaker_attr_param
   struct media_quality quality;
   enum media_format format;
   int offset_ms;
+  int channel_mix;
+  bool rear_direct;
 
   int audio_fd;
   int metadata_fd;
@@ -2946,6 +2948,8 @@ device_to_speaker_info(struct player_speaker_info *spk, struct output_device *de
   spk->relvol = device->relvol;
   spk->absvol = device->volume;
   spk->offset_ms = device->offset_ms;
+  spk->channel_mix = device->channel_mix;
+  spk->rear_direct = outputs_rear_direct;
 
   spk->supported_formats = device->supported_formats;
   // Devices supporting more than one format should at least have default_format set
@@ -3314,6 +3318,50 @@ speaker_format_set(void *arg, int *retval)
 
  error:
   DPRINTF(E_LOG, L_PLAYER, "Error setting format '%s', device unknown or format unsupported\n", media_format_to_string(param->format));
+  *retval = -1;
+  return COMMAND_END;
+}
+
+// Runs on the player thread, the same thread that mixes the rear streams.
+static enum command_state
+rear_direct_set(void *arg, int *retval)
+{
+  struct speaker_attr_param *param = arg;
+
+  outputs_rear_direct = param->rear_direct;
+  *retval = 0;
+  return COMMAND_END;
+}
+
+static enum command_state
+speaker_channel_mix_set(void *arg, int *retval)
+{
+  struct speaker_attr_param *param = arg;
+  struct output_device *device;
+
+  if (param->channel_mix < 0 || param->channel_mix > 2)
+    goto error;
+
+  device = outputs_device_get(param->spk_id);
+  if (!device)
+    goto error;
+
+  // Read when the speaker's AirPlay session is set up, so a running session
+  // keeps its mix until it is restarted (same rule as offset_ms).
+  device->channel_mix = param->channel_mix;
+
+  if (player_state == PLAY_PAUSED)
+    *retval = outputs_device_stop(device, device_shutdown_cb);
+  else
+    *retval = 0;
+
+  if (*retval > 0)
+    return COMMAND_PENDING; // async
+
+  return COMMAND_END;
+
+ error:
+  DPRINTF(E_LOG, L_PLAYER, "Error setting channel_mix %d\n", param->channel_mix);
   *retval = -1;
   return COMMAND_END;
 }
@@ -4059,6 +4107,27 @@ player_speaker_format_set(uint64_t id, enum media_format format)
   param.format = format;
 
   return commands_exec_sync(cmdbase, speaker_format_set, speaker_generic_bh, &param);
+}
+
+int
+player_rear_direct_set(bool direct)
+{
+  struct speaker_attr_param param;
+
+  param.rear_direct = direct;
+
+  return commands_exec_sync(cmdbase, rear_direct_set, NULL, &param);
+}
+
+int
+player_speaker_channel_mix_set(uint64_t id, int channel_mix)
+{
+  struct speaker_attr_param param;
+
+  param.spk_id = id;
+  param.channel_mix = channel_mix;
+
+  return commands_exec_sync(cmdbase, speaker_channel_mix_set, speaker_generic_bh, &param);
 }
 
 int

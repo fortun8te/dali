@@ -241,10 +241,61 @@ struct airplay_extra
   bool use_ptp;
 };
 
+// DALI: rear surround state (see channel_mix_apply())
+#define REAR_HISTORY_FRAMES 2048
+#define REAR_ALLPASS_FRAMES 1024
+#define REAR_FFT_FRAMES 512
+#define REAR_FFT_HOP 128
+#define REAR_FFT_BINS (REAR_FFT_FRAMES / 2 + 1)
+#define REAR_DELAY_MS 12
+#define REAR_ALLPASS_GAIN 0.5f
+
+struct rear_state
+{
+  float history[2][REAR_HISTORY_FRAMES];
+  unsigned pos;
+  unsigned delay;
+  float allpass[2][2][REAR_ALLPASS_FRAMES];
+  unsigned allpass_len[2][2];
+  unsigned allpass_pos[2][2];
+  float wet;
+  float wet_step;
+  float input[2][REAR_FFT_FRAMES];
+  float output[2][REAR_FFT_FRAMES];
+  unsigned input_pos;
+  unsigned output_pos;
+  unsigned hop_count;
+  float window[REAR_FFT_FRAMES];
+  float twiddle_re[REAR_FFT_FRAMES / 2];
+  float twiddle_im[REAR_FFT_FRAMES / 2];
+  uint16_t reversed[REAR_FFT_FRAMES];
+  float power_left[REAR_FFT_BINS];
+  float power_right[REAR_FFT_BINS];
+  float cross_re[REAR_FFT_BINS];
+  float cross_im[REAR_FFT_BINS];
+  float ambience[REAR_FFT_BINS];
+  float surround[REAR_FFT_BINS];
+  float bass_weight[REAR_FFT_BINS];
+  float opposed_pan[REAR_FFT_BINS];
+  float spec_re[REAR_FFT_FRAMES];
+  float spec_im[REAR_FFT_FRAMES];
+  float measure_step;
+  float mask_step;
+  float rear_peak_gain;
+  float rear_peak_release;
+};
+
 struct airplay_master_session
 {
   struct evbuffer *input_buffer;
   uint32_t input_buffer_samples;
+
+  // DALI: which channel mix this timeline sends (see channel_mix_apply())
+  int channel_mix;
+  struct rear_state rear;
+  uint64_t mix_frames;
+  double mix_in[2];
+  double mix_out[2];
 
   // ALAC encoder and buffer for encoded data
   struct encode_ctx *encode_ctx;
@@ -1218,8 +1269,398 @@ master_session_cleanup(struct airplay_master_session *ams)
   master_session_free(ams);
 }
 
+// Front and rear use the same short-time analysis and overlap-add latency.
+// The rear adds a short, symmetric delay and decorrelates the two channels.
+static void
+rear_state_init(struct rear_state *state, int sample_rate)
+{
+  static const float allpass_ms[2][2] = { { 2.3f, 5.9f }, { 3.1f, 7.3f } };
+  int rate = sample_rate > 0 ? sample_rate : 44100;
+  unsigned delay = (unsigned)((float)rate * REAR_DELAY_MS / 1000.0f);
+  int c;
+  int k;
+  int bits = 0;
+
+  memset(state, 0, sizeof(*state));
+  state->wet = 1.0f;
+  state->wet_step = 1.0f / (0.04f * (float)rate);
+  state->measure_step = 1.0f - expf(-(float)REAR_FFT_HOP / (0.030f * (float)rate));
+  state->mask_step = 1.0f - expf(-(float)REAR_FFT_HOP / (0.025f * (float)rate));
+  state->rear_peak_gain = 1.0f;
+  state->rear_peak_release = 1.0f - expf(-1.0f / (0.080f * (float)rate));
+  state->delay = delay < REAR_HISTORY_FRAMES ? delay : REAR_HISTORY_FRAMES - 1;
+  for (c = 0; c < 2; c++)
+    {
+      for (k = 0; k < 2; k++)
+	{
+	  unsigned len = (unsigned)((float)rate * allpass_ms[c][k] / 1000.0f);
+	  state->allpass_len[c][k] = len < 1 ? 1 : (len < REAR_ALLPASS_FRAMES ? len : REAR_ALLPASS_FRAMES - 1);
+	}
+    }
+
+  while ((1 << bits) < REAR_FFT_FRAMES)
+    bits++;
+  for (k = 0; k < REAR_FFT_FRAMES; k++)
+    {
+      unsigned reversed = 0;
+      for (c = 0; c < bits; c++)
+	if (k & (1 << c))
+	  reversed |= 1u << (bits - 1 - c);
+      state->reversed[k] = (uint16_t)reversed;
+      state->window[k] = sinf((float)M_PI * ((float)k + 0.5f) / (float)REAR_FFT_FRAMES);
+    }
+  for (k = 0; k < REAR_FFT_FRAMES / 2; k++)
+    {
+      state->twiddle_re[k] = cosf(2.0f * (float)M_PI * (float)k / (float)REAR_FFT_FRAMES);
+      state->twiddle_im[k] = -sinf(2.0f * (float)M_PI * (float)k / (float)REAR_FFT_FRAMES);
+    }
+  for (k = 0; k < REAR_FFT_BINS; k++)
+    {
+      float hz = (float)k * (float)rate / (float)REAR_FFT_FRAMES;
+      float weight = fminf(1.0f, hz / 250.0f);
+      state->bass_weight[k] = weight * weight * (3.0f - 2.0f * weight);
+    }
+}
+
+static inline float
+flush_tiny(float value)
+{
+  return (value > -1e-12f && value < 1e-12f) ? 0.0f : value;
+}
+
+// In-place complex FFT of the state's spectrum buffer; `inverse` conjugates the twiddles.
+static void
+rear_fft(struct rear_state *state, bool inverse)
+{
+  float *re = state->spec_re;
+  float *im = state->spec_im;
+  unsigned n = REAR_FFT_FRAMES;
+  unsigned i;
+  unsigned size;
+
+  for (i = 0; i < n; i++)
+    {
+      unsigned j = state->reversed[i];
+      if (j > i)
+	{
+	  float t = re[i]; re[i] = re[j]; re[j] = t;
+	  t = im[i]; im[i] = im[j]; im[j] = t;
+	}
+    }
+  for (size = 2; size <= n; size <<= 1)
+    {
+      unsigned half = size / 2;
+      unsigned step = n / size;
+      unsigned start;
+      for (start = 0; start < n; start += size)
+	{
+	  unsigned k;
+	  for (k = 0; k < half; k++)
+	    {
+	      float wr = state->twiddle_re[k * step];
+	      float wi = inverse ? -state->twiddle_im[k * step] : state->twiddle_im[k * step];
+	      unsigned a = start + k;
+	      unsigned b = a + half;
+	      float tr = wr * re[b] - wi * im[b];
+	      float ti = wr * im[b] + wi * re[b];
+	      re[b] = re[a] - tr;
+	      im[b] = im[a] - ti;
+	      re[a] += tr;
+	      im[a] += ti;
+	    }
+	}
+    }
+}
+
+static inline float
+rear_smoothstep(float x)
+{
+  x = fminf(1.0f, fmaxf(0.0f, x));
+  return x * x * (3.0f - 2.0f * x);
+}
+
+static inline float
+rear_smooth_mask(const float *mask, unsigned bin)
+{
+  float below = mask[bin > 0 ? bin - 1 : bin];
+  float above = mask[bin + 1 < REAR_FFT_BINS ? bin + 1 : bin];
+
+  return 0.25f * below + 0.5f * mask[bin] + 0.25f * above;
+}
+
+// Estimate diffuse energy from complex coherence and phase-encoded surround
+// from negative correlation. A stable interchannel delay stays coherent, even
+// when the real correlation alone would mistake it for ambience.
+static void
+rear_process_hop(struct rear_state *state, int mode)
+{
+  const unsigned n = REAR_FFT_FRAMES;
+  unsigned i;
+  unsigned k;
+
+  for (i = 0; i < n; i++)
+    {
+      unsigned at = (state->input_pos + i) % n;
+      state->spec_re[i] = state->input[0][at] * state->window[i];
+      state->spec_im[i] = state->input[1][at] * state->window[i];
+    }
+  rear_fft(state, false);
+
+  for (k = 0; k < REAR_FFT_BINS; k++)
+    {
+      unsigned m = (n - k) % n;
+      float lr = 0.5f * (state->spec_re[k] + state->spec_re[m]);
+      float li = 0.5f * (state->spec_im[k] - state->spec_im[m]);
+      float rr = 0.5f * (state->spec_im[k] + state->spec_im[m]);
+      float ri = 0.5f * (state->spec_re[m] - state->spec_re[k]);
+      float step = state->measure_step;
+      float l;
+      float r;
+      float normalizer;
+      float real;
+      float imag;
+      float coherence;
+      float balance;
+      float ambience;
+      float surround;
+
+      state->power_left[k] = l = flush_tiny(state->power_left[k] + step * (lr * lr + li * li - state->power_left[k]));
+      state->power_right[k] = r = flush_tiny(state->power_right[k] + step * (rr * rr + ri * ri - state->power_right[k]));
+      state->cross_re[k] = flush_tiny(state->cross_re[k] + step * (lr * rr + li * ri - state->cross_re[k]));
+      state->cross_im[k] = flush_tiny(state->cross_im[k] + step * (li * rr - lr * ri - state->cross_im[k]));
+      normalizer = sqrtf(l * r + 1.0f);
+      real = state->cross_re[k] / normalizer;
+      imag = state->cross_im[k] / normalizer;
+      coherence = sqrtf(real * real + imag * imag);
+      balance = 2.0f * normalizer / (l + r + 2.0f);
+      ambience = rear_smoothstep((l + r) / 8.0f) * rear_smoothstep((0.85f - coherence) / 0.70f)
+	* rear_smoothstep((balance - 0.35f) / 0.55f);
+      // Require both channels and a phase near opposition. Direct panning and
+      // mild stereo phase differences leave the front alone.
+      surround = rear_smoothstep((-real - 0.64f) / 0.22f)
+	* rear_smoothstep((balance - 0.21f) / 0.22f);
+      // A strongly panned, phase-encoded effect has unequal amplitudes.
+      // Remove it in that ratio so it does not leave a phantom centre.
+      state->opposed_pan[k] = flush_tiny(state->opposed_pan[k] + step *
+	  (((l - r) / (l + r + 2.0f)) * rear_smoothstep((0.72f - balance) / 0.27f) - state->opposed_pan[k]));
+      state->ambience[k] = flush_tiny(state->ambience[k] + state->mask_step * (ambience - state->ambience[k]));
+      state->surround[k] = flush_tiny(state->surround[k] + state->mask_step * (surround - state->surround[k]));
+    }
+
+  for (k = 0; k < REAR_FFT_BINS; k++)
+    {
+      unsigned m = (n - k) % n;
+      float lr = 0.5f * (state->spec_re[k] + state->spec_re[m]);
+      float li = 0.5f * (state->spec_im[k] - state->spec_im[m]);
+      float rr = 0.5f * (state->spec_im[k] + state->spec_im[m]);
+      float ri = 0.5f * (state->spec_re[m] - state->spec_re[k]);
+      float bass = state->bass_weight[k];
+      float surround = rear_smooth_mask(state->surround, k);
+      float direct;
+      float side;
+      float pan = 0.0f;
+
+      if (mode == 2)
+	{
+	  // Only subtract side energy. The original mid (dialogue, lead vocal,
+	  // kick) survives even in a bin that also contains a surround effect.
+	  direct = 1.0f;
+	  side = -0.94f * surround * bass;
+	  pan = rear_smooth_mask(state->opposed_pan, k);
+	  // Convert power pan to amplitude pan for the subtraction.
+	  pan /= 1.0f + sqrtf(fmaxf(0.0f, 1.0f - pan * pan));
+	}
+      else
+	{
+	  float ambience = rear_smooth_mask(state->ambience, k);
+	  float width = fmaxf(surround, ambience);
+
+	  // Leave a quiet fill for mono and panned sources. On wide material,
+	  // give the difference signal more room and keep the bass up front.
+	  direct = 0.16f + bass * (0.04f + 0.70f * width);
+	  side = bass * (0.23f * ambience + 0.20f * surround * (1.0f - surround));
+	}
+
+      {
+	float sr = 0.5f * side * (lr - rr);
+	float si = 0.5f * side * (li - ri);
+	lr = direct * lr + (1.0f + pan) * sr;
+	li = direct * li + (1.0f + pan) * si;
+	rr = direct * rr - (1.0f - pan) * sr;
+	ri = direct * ri - (1.0f - pan) * si;
+      }
+
+      // Pack the two real spectra back into one complex inverse transform.
+      state->spec_re[k] = lr - ri;
+      state->spec_im[k] = li + rr;
+      if (m != k)
+	{
+	  state->spec_re[m] = lr + ri;
+	  state->spec_im[m] = rr - li;
+	}
+    }
+  rear_fft(state, true);
+
+  for (i = 0; i < n; i++)
+    {
+      unsigned at = (state->output_pos + i) % n;
+      float scale = state->window[i] * 0.5f / (float)n;
+      state->output[0][at] = flush_tiny(state->output[0][at] + state->spec_re[i] * scale);
+      state->output[1][at] = flush_tiny(state->output[1][at] + state->spec_im[i] * scale);
+    }
+}
+
+static inline float
+rear_allpass(struct rear_state *state, int channel, int stage, float input)
+{
+  unsigned pos = state->allpass_pos[channel][stage];
+  float delayed = state->allpass[channel][stage][pos];
+  float output = -REAR_ALLPASS_GAIN * input + delayed;
+
+  state->allpass[channel][stage][pos] = flush_tiny(input + REAR_ALLPASS_GAIN * output);
+  state->allpass_pos[channel][stage] = (pos + 1) % state->allpass_len[channel][stage];
+  return output;
+}
+
+static inline int
+surround_pcm16(float value)
+{
+  return (int)lrintf(fmaxf(-32768.0f, fminf(32767.0f, value)));
+}
+
+static void
+channel_mix_apply(uint8_t *buf, size_t size, int channels, int bits_per_sample, int mode, struct rear_state *state, bool direct)
+{
+  size_t i;
+
+  if ((mode != 1 && mode != 2) || !state || channels != 2 || bits_per_sample != 16)
+    return;
+
+  for (i = 0; i + 3 < size; i += 4)
+    {
+      float left = (float)(int16_t)(buf[i] | (buf[i + 1] << 8));
+      float right = (float)(int16_t)(buf[i + 2] | (buf[i + 3] << 8));
+      unsigned pos = state->pos;
+      unsigned out_at = state->output_pos;
+      float rear_left;
+      float rear_right;
+      int out_left;
+      int out_right;
+
+      state->input[0][state->input_pos] = left;
+      state->input[1][state->input_pos] = right;
+      state->input_pos = (state->input_pos + 1) % REAR_FFT_FRAMES;
+
+      rear_left = state->output[0][out_at];
+      rear_right = state->output[1][out_at];
+      state->output[0][out_at] = 0.0f;
+      state->output[1][out_at] = 0.0f;
+      state->output_pos = (out_at + 1) % REAR_FFT_FRAMES;
+
+      if (++state->hop_count >= REAR_FFT_HOP)
+	{
+	  state->hop_count = 0;
+	  rear_process_hop(state, mode);
+	}
+
+      if (mode == 1)
+	{
+	  float peak;
+	  float gain;
+
+	  rear_left = rear_allpass(state, 0, 1, rear_allpass(state, 0, 0, rear_left));
+	  rear_right = rear_allpass(state, 1, 1, rear_allpass(state, 1, 0, rear_right));
+	  state->history[0][pos] = rear_left;
+	  state->history[1][pos] = rear_right;
+	  rear_left = state->history[0][(pos + REAR_HISTORY_FRAMES - state->delay) % REAR_HISTORY_FRAMES];
+	  rear_right = state->history[1][(pos + REAR_HISTORY_FRAMES - state->delay) % REAR_HISTORY_FRAMES];
+	  state->pos = (pos + 1) % REAR_HISTORY_FRAMES;
+
+	  // Link the channels so peak protection does not pull the image to one side.
+	  peak = fmaxf(fabsf(rear_left), fabsf(rear_right));
+	  gain = 1.0f + (state->rear_peak_gain - 1.0f) * (1.0f - state->rear_peak_release);
+	  state->rear_peak_gain = fminf(gain, 32000.0f / fmaxf(32000.0f, peak));
+	  rear_left *= state->rear_peak_gain;
+	  rear_right *= state->rear_peak_gain;
+	}
+
+      // Keep the analysis warm while off, with exact PCM bypass once the fade ends.
+      state->wet += direct ? -state->wet_step : state->wet_step;
+      state->wet = fmaxf(0.0f, fminf(1.0f, state->wet));
+      if (state->wet == 0.0f)
+	continue;
+      out_left = surround_pcm16(left + state->wet * (rear_left - left));
+      out_right = surround_pcm16(right + state->wet * (rear_right - right));
+
+      buf[i] = (uint8_t)((uint16_t)(int16_t)out_left & 0xff);
+      buf[i + 1] = (uint8_t)((uint16_t)(int16_t)out_left >> 8);
+      buf[i + 2] = (uint8_t)((uint16_t)(int16_t)out_right & 0xff);
+      buf[i + 3] = (uint8_t)((uint16_t)(int16_t)out_right >> 8);
+    }
+}
+
+static void
+channel_levels_add(double sums[2], const uint8_t *buf, size_t size, int channels, int bits_per_sample)
+{
+  size_t i;
+
+  if (channels != 2 || bits_per_sample != 16)
+    return;
+
+  for (i = 0; i + 3 < size; i += 4)
+    {
+      double left = (int16_t)(buf[i] | (buf[i + 1] << 8));
+      double right = (int16_t)(buf[i + 2] | (buf[i + 3] << 8));
+
+      sums[0] += left * left;
+      sums[1] += right * right;
+    }
+}
+
+static double
+level_dbfs(double sum, uint64_t frames)
+{
+  double mean;
+
+  if (frames == 0)
+    return -120.0;
+
+  mean = sum / (double)frames / (32768.0 * 32768.0);
+  if (mean < 1e-12)
+    return -120.0;
+
+  return 10.0 * log10(mean);
+}
+
+// Mixes one packet and, every five seconds of audio, logs what this timeline
+// actually sends next to what the player gave it, so the log proves what each
+// speaker pair is receiving.
+static void
+channel_mix_process(struct airplay_master_session *ams)
+{
+  uint64_t window = (uint64_t)ams->quality.sample_rate * 5;
+
+  channel_levels_add(ams->mix_in, ams->rawbuf, ams->rawbuf_size, ams->quality.channels, ams->quality.bits_per_sample);
+  channel_mix_apply(ams->rawbuf, ams->rawbuf_size, ams->quality.channels, ams->quality.bits_per_sample, ams->channel_mix, &ams->rear, outputs_rear_direct);
+  channel_levels_add(ams->mix_out, ams->rawbuf, ams->rawbuf_size, ams->quality.channels, ams->quality.bits_per_sample);
+  ams->mix_frames += ams->samples_per_packet;
+
+  if (ams->mix_frames < window)
+    return;
+
+  DPRINTF(E_LOG, L_AIRPLAY,
+    "AI event=channel_mix_level mix=%s in_l_dbfs=%.1f in_r_dbfs=%.1f out_l_dbfs=%.1f out_r_dbfs=%.1f\n",
+    ams->channel_mix == 1 ? "rear" : ams->channel_mix == 2 ? "front" : "stereo",
+    level_dbfs(ams->mix_in[0], ams->mix_frames), level_dbfs(ams->mix_in[1], ams->mix_frames),
+    level_dbfs(ams->mix_out[0], ams->mix_frames), level_dbfs(ams->mix_out[1], ams->mix_frames));
+
+  ams->mix_frames = 0;
+  ams->mix_in[0] = ams->mix_in[1] = 0;
+  ams->mix_out[0] = ams->mix_out[1] = 0;
+}
+
 static struct airplay_master_session *
-master_session_make(struct media_quality *quality, bool use_ptp)
+master_session_make(struct media_quality *quality, bool use_ptp, int channel_mix)
 {
   struct airplay_master_session *ams;
   uint64_t buffer_duration_ms;
@@ -1230,7 +1671,8 @@ master_session_make(struct media_quality *quality, bool use_ptp)
   // First check if we already have a suitable session
   for (ams = airplay_master_sessions; ams; ams = ams->next)
     {
-      if (quality_is_equal(quality, &ams->rtp_session->quality) && use_ptp == ams->use_ptp)
+      if (quality_is_equal(quality, &ams->rtp_session->quality) && use_ptp == ams->use_ptp
+	  && channel_mix == ams->channel_mix)
 	return ams;
     }
 
@@ -1276,6 +1718,9 @@ master_session_make(struct media_quality *quality, bool use_ptp)
 
   ams->quality = *quality;
   ams->use_ptp = use_ptp;
+  ams->channel_mix = channel_mix;
+  rear_state_init(&ams->rear, quality->sample_rate);
+  ams->rear.wet = outputs_rear_direct ? 0.0f : 1.0f;
   ams->samples_per_packet = AIRPLAY_SAMPLES_PER_PACKET;
   ams->rawbuf_size = STOB(ams->samples_per_packet, quality->bits_per_sample, quality->channels);
   // See AIRPLAY_SCHED_LATENCY_MS — keep advertised latencyMin at 250 ms but
@@ -1774,7 +2219,7 @@ session_make(struct output_device *device, int callback_id)
 	goto error;
     }
 
-  session->master_session = master_session_make(&device->quality, extra->use_ptp);
+  session->master_session = master_session_make(&device->quality, extra->use_ptp, device->channel_mix);
   if (!session->master_session)
     {
       DPRINTF(E_LOG, L_AIRPLAY, "Could not attach a master session for device '%s'\n", device->name);
@@ -4652,6 +5097,7 @@ airplay_write(struct output_buffer *obuf)
 	  while (evbuffer_get_length(ams->input_buffer) >= ams->rawbuf_size)
 	    {
 	      evbuffer_remove(ams->input_buffer, ams->rawbuf, ams->rawbuf_size);
+	      channel_mix_process(ams);
 	      ams->input_buffer_samples -= ams->samples_per_packet;
 
 	      packets_send(ams);

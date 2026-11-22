@@ -41,6 +41,11 @@ public struct SpeakerPreferences {
         return SpeakerLevelCurve.builtIn(forSpeakerNamed: name)
     }
 
+    public func masterCurve(name: String) -> SpeakerLevelCurve? {
+        guard let values = defaults.array(forKey: "dali.masterCurve.\(name)") as? [Double] else { return nil }
+        return SpeakerLevelCurve(percentPerStep: values)
+    }
+
     /// The single balance trim for a speaker with a curve, in percent, -30...30,
     /// whole numbers, 0 when unset. Older `dali.curveOn.*` and `dali.gain.*` values
     /// are not read here and never deleted.

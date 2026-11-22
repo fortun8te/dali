@@ -174,6 +174,46 @@ struct AppControllerRegression {
         let store = DALIStore(defaults: defaults, backendEnabled: false,
                               volumeWrite: { id, value in await transport.send(id: id, value: value) })
         try expect(store.phase == .idle, "isolated controller starts idle")
+        try expect(store.surround, "Surround is on by default")
+        func roomSpeaker(_ kind: RoomSpeaker.Kind, _ health: RoomSpeaker.Health, enabled: Bool = true) -> RoomSpeaker {
+            RoomSpeaker(id: "\(kind)", name: "\(kind)", type: "AirPlay 2", kind: kind, enabled: enabled, relVolume: 100, health: health)
+        }
+        func plainSong(_ room: [RoomSpeaker], surround: Bool = true, streaming: Bool = true, circle: Bool = false, testing: Bool = false) -> Bool {
+            DALIStore.surroundPlaysPlainSong(speakers: room, surround: surround, streaming: streaming, circleRunning: circle, testingPair: testing)
+        }
+        let bothPairs = [roomSpeaker(.front, .live), roomSpeaker(.back, .live)]
+        try expect(!plainSong(bothPairs), "two live pairs run Surround")
+        try expect(plainSong(bothPairs, surround: false), "the switch turns Surround off")
+        try expect(plainSong(bothPairs, testing: true), "the corner test plays the plain signal")
+        try expect(!plainSong([roomSpeaker(.front, .live)], surround: false, circle: true), "the circle always uses the decoder")
+        try expect(plainSong([roomSpeaker(.front, .live)]), "a front pair alone gets the whole song")
+        try expect(plainSong([roomSpeaker(.back, .live)]), "a back pair alone gets the whole song")
+        try expect(plainSong([roomSpeaker(.front, .live), roomSpeaker(.back, .off)]), "a pair that dropped out hands the whole song to the other")
+        try expect(plainSong([roomSpeaker(.front, .live), roomSpeaker(.back, .live, enabled: false)]), "a deselected pair hands the whole song to the other")
+        try expect(!plainSong([roomSpeaker(.front, .live), roomSpeaker(.back, .trouble)]), "a pair in trouble still plays, so Surround stays on")
+        try expect(!plainSong([roomSpeaker(.front, .off)], streaming: false), "nothing changes while not streaming")
+        store.surround = false
+        try expect(defaults.object(forKey: "dali.surround") as? Bool == false, "turning Surround off is saved")
+        let surroundReload = DALIStore(defaults: defaults, backendEnabled: false,
+                                       volumeWrite: { id, value in await transport.send(id: id, value: value) })
+        try expect(!surroundReload.surround, "a restarted app keeps Surround off")
+        store.surround = true
+        try expect(defaults.object(forKey: "dali.surround") as? Bool == true, "turning Surround back on is saved")
+        // The mix follows placement: swapping front and back changes both speakers'
+        // mix (they need a restart); a move that leaves the back where it was does not.
+        let names = ["A", "B", "C"]
+        try expect(DALIStore.placementChangesMix(names: names,
+                                                 before: ("A", "B"), after: ("B", "A")),
+                   "swapping front and back changes the mix")
+        try expect(DALIStore.placementChangesMix(names: names,
+                                                 before: ("A", "B"), after: ("A", "C")),
+                   "moving the back to another speaker changes the mix")
+        try expect(DALIStore.placementChangesMix(names: names,
+                                                 before: ("A", "B"), after: ("A", "")),
+                   "clearing the back changes the mix")
+        try expect(!DALIStore.placementChangesMix(names: names,
+                                                  before: ("A", "B"), after: ("C", "B")),
+                   "changing only the front leaves every mix alone")
         try expect(store.frontName == "Front fixture" && store.backName == "Back fixture",
                "controller reads injected speaker preferences")
         try expect(defaults.double(forKey: "dali.vol.Front fixture") == 80 &&
@@ -196,11 +236,12 @@ struct AppControllerRegression {
         try await waitUntil({ await transport.snapshot().count == 2 }, "initial receiver references are applied")
         try await Task.sleep(for: .milliseconds(150))
         let hardware = store.roomVolumePlan.hardware
-        try expect(hardware["front"] == 10 && hardware["back"] == 5,
-                   "half Mac master restores V1 receiver commands")
+        // Half Mac volume under the 20% room limit: slider x 0.5 x 0.20, linear master.
+        try expect(hardware["front"] == 8 && hardware["back"] == 4,
+                   "half Mac master gives the linear receiver command under the 20% limit")
         // Independent expected values from V1 effectiveVolume, not the V2 policy.
-        for (master, front, back, pcm) in [(0.01, 1, 0, 0.018176), (0.0625, 2, 1, 0.5),
-                                         (0.125, 4, 2, 1.0), (0.5, 10, 5, 1.0), (1.0, 16, 8, 1.0)] {
+        for (master, front, back, pcm) in [(0.01, 0, 0, 1.0), (0.0625, 1, 1, 1.0),
+                                         (0.125, 2, 1, 1.0), (0.5, 8, 4, 1.0), (1.0, 16, 8, 1.0)] {
             store.systemVolume = master
             try expect(store.roomVolumePlan.hardware == ["front": front, "back": back],
                        "Mac master changes receiver commands as V1 did")
@@ -217,10 +258,10 @@ struct AppControllerRegression {
         store.systemVolume = 1.0 / 16
         try await waitUntil({
             let writes = await transport.snapshot()
-            return writes.last(where: { $0.id == "front" })?.value == 2 &&
+            return writes.last(where: { $0.id == "front" })?.value == 1 &&
                 writes.last(where: { $0.id == "back" })?.value == 1
         }, "first step preserves both calibrated receiver commands")
-        try expect(store.captureMasterGain == 0.5, "first step lowers the whole captured room by half amplitude")
+        try expect(store.captureMasterGain == 1, "linear master keeps the captured room at unity on the first step")
 
         let beforeMute = await transport.snapshot().count
         store.systemVolume = 0
@@ -232,12 +273,12 @@ struct AppControllerRegression {
                    "zero master must not tell the user the room is playing")
         store.systemVolume = 1.0 / 16
         try await waitUntil({ await transport.snapshot().count == beforeMute + 4 }, "unmute restores V1 receiver commands for the current master")
-        try expect(store.captureMasterGain == 0.5, "unmute restores the quieter first step")
+        try expect(store.captureMasterGain == 1, "unmute restores unity PCM")
         store.systemVolume = 0.5
         try await waitUntil({
             let writes = await transport.snapshot()
-            return writes.last(where: { $0.id == "front" })?.value == 10 &&
-                writes.last(where: { $0.id == "back" })?.value == 5
+            return writes.last(where: { $0.id == "front" })?.value == 8 &&
+                writes.last(where: { $0.id == "back" })?.value == 4
         }, "normal volume restores unity and the original receiver response")
         let gainBeforeDisable = store.captureMasterGain
         let backBeforeDisable = store.effectiveVolume(store.back!)
@@ -249,22 +290,22 @@ struct AppControllerRegression {
                "disabling front cannot turn up the remaining back speaker")
         try expect(defaults.bool(forKey: "dali.on.Front fixture") == false, "speaker toggle uses injected preferences")
         store.toggle(store.front!)
-        try await waitUntil({ await transport.snapshot().last == RecordedVolumes.Write(id: "front", value: 10) },
+        try await waitUntil({ await transport.snapshot().last == RecordedVolumes.Write(id: "front", value: 8) },
                             "re-enabled front restores its current master volume")
 
         let sliderIntentAt = ContinuousClock.now
         store.setRelVolume(65, for: store.back!)
-        try await waitUntil({ await transport.snapshot().last == RecordedVolumes.Write(id: "back", value: 8) },
+        try await waitUntil({ await transport.snapshot().last == RecordedVolumes.Write(id: "back", value: 7) },
                             "speaker slider routes through the real volume coordinator")
         let sliderReceivedAt = await transport.times().last!
         try expect(defaults.double(forKey: "dali.vol.Back fixture") == 65, "speaker slider persists into the injected suite")
         let frontBeforeAdjustmentReset = store.effectiveVolume(store.front!)
         let masterBeforeAdjustmentReset = store.systemVolume
         store.setGain(0.84, for: store.back!)
-        try await waitUntil({ await transport.snapshot().last(where: { $0.id == "back" })?.value == 7 },
+        try await waitUntil({ await transport.snapshot().last(where: { $0.id == "back" })?.value == 5 },
                             "saved back attenuation reaches its actual receiver command")
         store.setGain(1, for: store.back!)
-        try await waitUntil({ await transport.snapshot().last(where: { $0.id == "back" })?.value == 8 },
+        try await waitUntil({ await transport.snapshot().last(where: { $0.id == "back" })?.value == 7 },
                             "reset back adjustment restores its unattenuated receiver command")
         try expect(store.back!.relVolume == 65 && store.back!.gain == 1 &&
                    defaults.double(forKey: "dali.gain.Back fixture") == 1,
@@ -287,7 +328,7 @@ struct AppControllerRegression {
         }, "selected-app source immediately submits its receiver reference plan")
         try expect(store.captureMasterGain == 1, "selected-app source switches the shared PCM gain to unity")
         store.source = .system
-        try await waitUntil({ await transport.snapshot().last(where: { $0.id == "front" })?.value == 10 },
+        try await waitUntil({ await transport.snapshot().last(where: { $0.id == "front" })?.value == 8 },
                             "system source immediately submits its receiver reference plan")
         try expect(store.captureMasterGain == 1, "system source restores hardware master control without double attenuation")
         store.volumeLimit = 150
@@ -417,8 +458,8 @@ struct AppControllerRegression {
             try expect(dali.levelCurve != nil && dali.balanceTrim == 0 && other.levelCurve == nil,
                        "discovery attaches the leveling curve (trim 0) to the DALI speaker only, whatever the retired switch says")
             let targets: [(step: Int, percent: Double, d: Int, s: Int)] = [
-                (1, 250, 36, 14), (2, 205, 48, 23), (3, 182, 56, 31), (4, 156, 59, 38),
-                (5, 143, 63, 44), (6, 136, 68, 50), (7, 136, 76, 56), (8, 136, 84, 62), (16, 136, 100, 100),
+                (1, 250, 16, 6), (2, 205, 26, 13), (3, 182, 34, 19), (4, 156, 39, 25),
+                (5, 143, 45, 31), (6, 136, 51, 38), (7, 136, 60, 44), (8, 136, 68, 50), (16, 136, 100, 100),
             ]
             for target in targets {
                 curveStore.systemVolume = Double(target.step) / 16
@@ -433,8 +474,8 @@ struct AppControllerRegression {
             let neutral = curveStore.roomVolumePlan.hardware
             curveStore.setBalanceTrim(10, for: dali)
             let boosted = curveStore.roomVolumePlan.hardware
-            try expect(neutral["d"] == 56 && boosted["d"] == 62 && boosted["s"] == neutral["s"],
-                       "Balance +10% raises only the DALI speaker, by 10% of its curve value (56 to 62)")
+            try expect(neutral["d"] == 34 && boosted["d"] == 38 && boosted["s"] == neutral["s"],
+                       "Balance +10% raises only the DALI speaker, by 10% of its curve value (34 to 38)")
             try expect(abs(curveStore.effectiveGain(curveStore.speakers.first { $0.name == "MICHAEL D" }!) - 1.82 * 1.1) < 1e-9,
                        "effective adjustment includes the trim")
             curveStore.setBalanceTrim(500, for: dali)

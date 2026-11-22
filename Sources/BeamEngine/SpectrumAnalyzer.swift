@@ -13,7 +13,9 @@ import Foundation
 /// Called from the capture analysis queue, never from the audio thread.
 public final class SpectrumAnalyzer: @unchecked Sendable {
     public static let bandCount = 32
-    static let size = 2048
+    /// 23 ms: short enough that a hit shows in the bars when it happens, long enough
+    /// to tell the bass bands apart.
+    static let size = 1024
     /// dB below the loudest band that still shows.
     static let rangeDb: Float = 40
     /// A band below this (about a 60 dB-down sine) is silence, whatever else is playing.
@@ -22,7 +24,7 @@ public final class SpectrumAnalyzer: @unchecked Sendable {
     static let referenceFallDb: Float = 0.06
 
     private let sampleRate: Double
-    private let log2n = vDSP_Length(11)
+    private let log2n = vDSP_Length(10)
     private let setup: FFTSetup
     private let window: [Float]
     /// Bin edges of every band: `edges[k]..<edges[k + 1]`.
@@ -40,7 +42,7 @@ public final class SpectrumAnalyzer: @unchecked Sendable {
 
     public init(sampleRate: Double = 44_100) {
         self.sampleRate = sampleRate
-        setup = vDSP_create_fftsetup(vDSP_Length(11), FFTRadix(kFFTRadix2))!
+        setup = vDSP_create_fftsetup(vDSP_Length(10), FFTRadix(kFFTRadix2))!
         var hann = [Float](repeating: 0, count: Self.size)
         vDSP_hann_window(&hann, vDSP_Length(Self.size), Int32(vDSP_HANN_NORM))
         window = hann
@@ -114,7 +116,8 @@ public final class SpectrumAnalyzer: @unchecked Sendable {
             for bin in edges[k]..<min(edges[k + 1], n / 2) { sum += power[bin] }
             let centre = Float(centerFrequency(band: k))
             let tilt = 2 * log2(max(centre, 1) / 1000)
-            db[k] = 10 * log10(sum + 1e-12) + tilt
+            // +6 dB keeps `floorDb` where it was at the longer 2048-point window.
+            db[k] = 10 * log10(sum + 1e-12) + tilt + 6.02
             loudest = max(loudest, db[k])
         }
         guard loudest > Self.floorDb else { return [Float](repeating: 0, count: Self.bandCount) }

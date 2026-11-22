@@ -147,7 +147,7 @@ struct RoomSettings: View {
     var body: some View {
         @Bindable var store = store
         VStack(alignment: .leading, spacing: Space.xl) {
-            SettingsGroup(title: "Speakers", footer: "Switch on the speakers you want to play through. Front and Back below only place them in the room picture.") {
+            SettingsGroup(title: "Speakers", footer: "Front and Back set the room picture.") {
                 if store.speakers.isEmpty {
                     Text("No speakers found yet. Check their power and Wi-Fi.")
                         .font(.body13).foregroundStyle(Color.paper62)
@@ -167,6 +167,23 @@ struct RoomSettings: View {
             SettingsGroup(title: "Room plan") {
                 SettingLine(title: "Front") { placementPicker(.front, excluding: store.backName) }
                 SettingLine(title: "Back") { placementPicker(.back, excluding: store.frontName) }
+                SettingLine(title: "Test each corner", detail: store.speakerTestCorner?.title) {
+                    Button(store.isSpeakerTesting ? "Stop" : "Play") {
+                        store.toggleSpeakerTest()
+                    }
+                    .buttonStyle(SecondaryButtonStyle(accent: true))
+                    .disabled(!store.canTestSpeakers && !store.isSpeakerTesting)
+                    .help(store.canTestSpeakers
+                          ? "Play a sound from each corner in turn."
+                          : "Press Play in the DALI window first.")
+                }
+                SettingLine(title: "Send a sound around the room") {
+                    Button(store.circleStartedAt != nil ? "Stop" : "Play") {
+                        store.toggleCircleTest()
+                    }
+                    .buttonStyle(SecondaryButtonStyle(accent: true))
+                    .disabled(!store.canTestSpeakers && !store.isSpeakerTesting)
+                }
             }
 
             VStack(alignment: .leading, spacing: Space.s) {
@@ -188,11 +205,10 @@ struct RoomSettings: View {
                         SliderRow(value: $store.volumeLimit, readout: "\(safeInt(store.volumeLimit))%", labelWidth: 96) {
                             Text("Volume limit").font(.body13).foregroundStyle(Color.paper)
                         }
-                        Text("Speaker loudness adjustment. 100% applies no adjustment.")
+                        Text("100% leaves speaker loudness unchanged.")
                             .font(.caption).foregroundStyle(Color.paper62)
-                            .padding(.horizontal, Space.m)
                         ForEach(store.speakers.filter { $0.kind != .extra || $0.enabled }) { sp in
-                            if let curve = sp.levelCurve {
+                            if sp.levelCurve != nil {
                                 VStack(alignment: .leading, spacing: 2) {
                                     HStack(spacing: Space.s) {
                                         Text(sp.name).font(.body13).foregroundStyle(Color.paper).lineLimit(1)
@@ -201,18 +217,28 @@ struct RoomSettings: View {
                                             .font(.readout).foregroundStyle(Color.paper62)
                                     }
                                     BalanceTrimControl(speaker: sp)
-                                    Text("Evens out this speaker against the other one as the Mac volume changes. Use − and + only if it sounds too loud or quiet next to the other speaker.")
+                                    Text("Use − and + to match the other speaker.")
                                         .font(.caption).foregroundStyle(Color.paper62)
                                 }
-                                .padding(.horizontal, Space.m)
                             } else {
-                                SliderRow(value: Binding(get: { (sp.gain - 0.25) / 3.75 * 100 },
-                                                         set: { store.setGain(0.25 + $0 / 100 * 3.75, for: sp) }),
-                                          readout: "\(safeInt((sp.gain * 100).rounded()))%", labelWidth: 96) {
-                                    Text(sp.name).font(.body13).foregroundStyle(Color.paper)
-                                        .lineLimit(1).help("\(sp.name) loudness adjustment")
+                                HStack(spacing: Space.s) {
+                                    SliderRow(value: Binding(get: { (sp.gain - 0.25) / 3.75 * 100 },
+                                                             set: { store.setGain(0.25 + $0 / 100 * 3.75, for: sp) }),
+                                              readout: "\(safeInt((sp.gain * 100).rounded()))%", labelWidth: 96) {
+                                        Text(sp.name).font(.body13).foregroundStyle(Color.paper)
+                                            .lineLimit(1).help("\(sp.name) loudness adjustment")
+                                    }
+                                    .accessibilityLabel("\(sp.name) loudness")
+                                    if sp.gain != 1 {
+                                        Button("Reset") { store.setGain(1, for: sp) }
+                                            .buttonStyle(SecondaryButtonStyle())
+                                            .accessibilityLabel("Reset \(sp.name) loudness")
+                                    }
                                 }
                             }
+                        }
+                        ForEach(store.speakers.filter { $0.kind != .extra || $0.enabled }) { sp in
+                            SpeakerCurveEditor(speaker: sp)
                         }
                     }
                 }
@@ -248,6 +274,109 @@ struct RoomSettings: View {
     private func placementBinding(_ kind: RoomSpeaker.Kind) -> Binding<String> {
         Binding(get: { kind == .front ? store.frontName : store.backName },
                 set: { name in store.setPlacement(kind, for: store.speakers.first { $0.name == name }) })
+    }
+}
+
+/// One group row per speaker: a disclosure line that opens a 16-step curve.
+/// Step picks the Mac volume point; − and + move that point's speaker level.
+private struct SpeakerCurveEditor: View {
+    @Environment(DALIStore.self) private var store
+    let speaker: RoomSpeaker
+    @State private var expanded = false
+    @State private var step = 1
+    @State private var rejected = false
+
+    private static let range: ClosedRange<Double> = 25...400
+    private static let stepSize = 5.0
+
+    private var values: [Double] { store.masterCurveValues(for: speaker) }
+    private var current: Double { values[step - 1] }
+    private var limited: Bool {
+        speaker.relVolume * (Double(step) / 16) * (store.volumeLimit / 100) * (current / 100) >= store.volumeLimit
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: Space.s) {
+            Button {
+                withAnimation(Motion.spring) { expanded.toggle() }
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 9, weight: .semibold))
+                        .rotationEffect(.degrees(expanded ? 90 : 0))
+                    Text("\(speaker.name) · Mac volume")
+                        .lineLimit(1)
+                    Spacer(minLength: 0)
+                }
+            }
+            .buttonStyle(SecondaryButtonStyle())
+            .accessibilityHint(expanded ? "Hides the curve" : "Shows the curve")
+
+            if expanded {
+                SettingLine(title: "Mac volume") {
+                    HStack(spacing: Space.s) {
+                        Text("Step \(step) of 16")
+                            .font(.readout).foregroundStyle(Color.paper62)
+                        Stepper("Mac volume step", value: $step, in: 1...16)
+                            .labelsHidden()
+                            .accessibilityValue("Step \(step) of 16")
+                    }
+                }
+
+                SettingLine(title: "Speaker level") {
+                    levelControl
+                }
+
+                HStack(alignment: .firstTextBaseline, spacing: Space.s) {
+                    Text(rejected
+                         ? "Adjust a nearby step first to keep volume rising evenly."
+                         : limited ? "Volume limit reached at this step." : "Applies to Mac audio. The volume limit still applies.")
+                        .font(.caption).foregroundStyle(Color.paper62)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Spacer(minLength: Space.s)
+                    if speaker.masterCurve != nil {
+                        Button("Reset") { store.resetMasterCurve(for: speaker); rejected = false }
+                            .buttonStyle(SecondaryButtonStyle(accent: true))
+                            .accessibilityLabel("Reset \(speaker.name) Mac volume curve")
+                    }
+                }
+            }
+        }
+    }
+
+    /// Readout plus a capsule − | + pair, the same control as the loudness match row.
+    private var levelControl: some View {
+        let low = current <= Self.range.lowerBound
+        let high = current >= Self.range.upperBound
+        return HStack(spacing: Space.s) {
+            Text("\(safeInt(current))%")
+                .font(.readout).foregroundStyle(Color.paper62)
+                .contentTransition(.numericText())
+                .animation(Motion.fade, value: current)
+            HStack(spacing: 0) {
+                Button("\u{2212}") { adjust(-Self.stepSize) }
+                    .buttonStyle(.plain).font(.captionMedium)
+                    .foregroundStyle(low ? Color.paper38 : Color.paper)
+                    .disabled(low)
+                    .accessibilityLabel("Lower \(speaker.name) level at step \(step)")
+                    .frame(width: 24, height: 18).contentShape(Rectangle())
+                Rectangle().fill(Color.white.opacity(0.12)).frame(width: 0.5, height: 10)
+                Button("+") { adjust(Self.stepSize) }
+                    .buttonStyle(.plain).font(.captionMedium)
+                    .foregroundStyle(high ? Color.paper38 : Color.paper)
+                    .disabled(high)
+                    .accessibilityLabel("Raise \(speaker.name) level at step \(step)")
+                    .frame(width: 24, height: 18).contentShape(Rectangle())
+            }
+            .background(Capsule().fill(Color.white.opacity(0.08)))
+            .frame(height: 20)
+        }
+    }
+
+    private func adjust(_ amount: Double) {
+        var next = values
+        next[step - 1] = min(Self.range.upperBound, max(Self.range.lowerBound, next[step - 1] + amount))
+        rejected = !store.setMasterCurve(next, for: speaker)
     }
 }
 
@@ -291,8 +420,8 @@ struct EngineSettings: View {
 
     private var senderFooter: String {
         apple.isSelected
-            ? "Beta. Plays through Apple's AirPlay: about 2 seconds behind and slower to connect. DALI's own engine is off while this is selected."
-            : "DALI's own engine. Short delay, so video stays in sync."
+            ? "Beta. About two seconds behind. Replaces the DALI sound engine."
+            : "Short delay with automatic video sync."
     }
 
     var body: some View {

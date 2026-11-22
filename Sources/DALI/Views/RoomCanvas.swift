@@ -1,7 +1,7 @@
 // DALI — the room, live.
 //
 // Four layers, bottom to top:
-//   1. furniture  — floor glow, desk, monitor, listener. Rendered ONCE per size.
+//   1. furniture  — floor glow, listener. Rendered ONCE per size.
 //   2. light      — pools, waves, pulses, room glow. The only per-frame layer,
 //                   and it only exists while the room is starting, streaming or
 //                   fading out.
@@ -38,7 +38,7 @@ struct RoomCanvas: View {
                     Image(nsImage: layers.furniture).resizable()
                 }
                 if lightLayerNeeded {
-                    TimelineView(.animation(minimumInterval: 1.0 / 20.0, paused: paused)) { tl in
+                    TimelineView(.animation(minimumInterval: store.phase == .starting ? 1.0 / 60.0 : 1.0 / 20.0, paused: paused)) { tl in
                         Canvas { ctx, size in drawLight(ctx, size: size, now: tl.date) }
                     }
                 }
@@ -160,11 +160,15 @@ struct RoomCanvas: View {
         }
 
         RoomArt.drawRoomGlow(ctx, size: size, light: roomLight, level: level, bass: bass)
+        if connecting && motion { RoomArt.drawSearch(ctx, from: me, size: size, time: t) }
 
         for (cabinet, light, energy, speaker) in resolved {
             for p in RoomLayout.positions(cabinet, in: size) {
                 let aim = atan2(me.y - p.y, me.x - p.x)
-                RoomArt.drawPool(ctx, at: p, aim: aim, cabinet: cabinet, light: light, energy: energy)
+                // While connecting, a speaker flares as a ring from the listener reaches it.
+                let flare = connecting && motion && speaker.enabled
+                    ? RoomArt.searchFlare(distance: hypot(p.x - me.x, p.y - me.y), size: size, time: t) : 0
+                RoomArt.drawPool(ctx, at: p, aim: aim, cabinet: cabinet, light: max(light, flare), energy: energy)
                 guard motion, store.isLit(speaker) else { continue }
                 if let a = shot(since: cabinet == .opticon2 ? frontChangedAt : backChangedAt,
                                 now: now, duration: 0.9, delay: cabinet.delay) {

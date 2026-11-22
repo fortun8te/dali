@@ -33,7 +33,7 @@ To check the active version, open the extension's **service worker** console
 from `chrome://extensions`. This release prints:
 
 ```
-[DALI Video Sync] v1.2.5  build 2026-10-17.d
+[DALI Video Sync] v1.2.6  build 2026-11-08.a
 ```
 
 ## Video support

@@ -2,7 +2,7 @@
   "schema": 1,
   "upstream_repository": "https://github.com/owntone/owntone-server",
   "upstream_commit": "84e3755198c44c36ddf91e9919634807d68f69f9",
-  "patch_sha256": "dd8599d117a71501e17eb54f54c497bea3fcdc754274036b0825ada609fe367d",
+  "patch_sha256": "69db6ab96cfe3e43f0312ec5c32b8234637d16d5214b6dd0a9cd3308634f46f6",
   "files": {
     ".clang-format": {
       "sha256": "3163969118efe7fdb50355d2797ecc0a37b211c9bb5f0c51186e579ce2a0af64",
@@ -629,7 +629,7 @@
       "executable": false
     },
     "src/httpd_jsonapi.c": {
-      "sha256": "abb0d8c908a889571a0c2baa1e6048491130dc5297b5adfe14fbcc7dd427307e",
+      "sha256": "b7b0cfef94a30489ffa8216f95ea2c3d99d1cdb515abb6a93240a4bc3a754fa7",
       "executable": false
     },
     "src/httpd_libevhttp.c": {
@@ -1245,7 +1245,7 @@
       "executable": false
     },
     "src/outputs/airplay.c": {
-      "sha256": "2c4603bee5a6e234758acb6ad797799f14e1f6eb654b5acc163d2d0e8fe8a0bd",
+      "sha256": "8bc47bfcebd9d6d7b0f2f5efdd8181d3812f976ce4579f8cf0c79b4cbec384f2",
       "executable": false
     },
     "src/outputs/airplay_events.c": {
@@ -1317,11 +1317,11 @@
       "executable": false
     },
     "src/outputs.c": {
-      "sha256": "beb47cdf9f11aec3396f5749327df3681a5314ed2e438f5f2d389904a86cece8",
+      "sha256": "7ae16b1db326b49bdc0e88f67efc029775f83238b2930ee9c1c410519a73f3a4",
       "executable": false
     },
     "src/outputs.h": {
-      "sha256": "65ebb629131d06207dcea9016b3f4ba145401cd671f8fed8a85f64f69e7284d3",
+      "sha256": "470efc8d0450969959dab6abba8f11139912d203244ba7b5080b3215725a5788",
       "executable": false
     },
     "src/pair_ap/pair-internal.h": {
@@ -1389,11 +1389,11 @@
       "executable": false
     },
     "src/player.c": {
-      "sha256": "3561e625413527ee1083f29d72a1e7639c2e896bc7a2c64524eadc3e408417ae",
+      "sha256": "bbfcbc71d60ec97c9e6597676fc2f9d98f3e8aefe837fb0fcb2f4e1b52ecb351",
       "executable": false
     },
     "src/player.h": {
-      "sha256": "99f05f08839a01d1771065330b76c25e1f96b458ac49657095dd52b87ccceff0",
+      "sha256": "7a712ac332d1a5b135df451de5f1e080c7dbf33391cb326d23c2fa52c13ac157",
       "executable": false
     },
     "src/ptpd.c": {

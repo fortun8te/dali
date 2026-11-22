@@ -17,6 +17,10 @@ public struct Output: Codable, Identifiable, Equatable, Sendable {
     /// Per-speaker playback offset (ms, positive = plays later). Optional so
     /// engines/responses without the field keep decoding.
     public var offset_ms: Int?
+    /// 0 = the plain song; 1 = the back of Surround; 2 = the front of Surround.
+    public var channel_mix: Int?
+    /// True while rear streams play the plain song (Surround off, speaker test).
+    public var rear_direct: Bool?
 }
 
 public struct PlayerState: Codable, Equatable, Sendable {
@@ -81,7 +85,7 @@ private struct Lossy<T: Decodable>: Decodable {
 
 extension Output {
     private enum DecodeKeys: String, CodingKey {
-        case id, name, type, selected, connected, streaming, volume, offset_ms
+        case id, name, type, selected, connected, streaming, volume, offset_ms, channel_mix, rear_direct
     }
     /// Only `id` is essential; OwnTone omits or nulls the rest for some devices.
     public init(from decoder: Decoder) throws {
@@ -94,6 +98,8 @@ extension Output {
         streaming = try? c.decodeIfPresent(Bool.self, forKey: .streaming)
         volume = (try? c.decodeIfPresent(Int.self, forKey: .volume)) ?? 0
         offset_ms = try? c.decodeIfPresent(Int.self, forKey: .offset_ms)
+        channel_mix = try? c.decodeIfPresent(Int.self, forKey: .channel_mix)
+        rear_direct = try? c.decodeIfPresent(Bool.self, forKey: .rear_direct)
     }
 }
 
@@ -225,6 +231,22 @@ public struct BeamAPI: Sendable {
         let body = try JSONSerialization.data(withJSONObject: ["offset_ms": max(-250, min(250, offsetMs))])
         _ = try await request("PUT", "/api/outputs/\(outputID)", body: body,
                               coalesceKey: "offset:\(outputID)")
+    }
+
+    /// Which mix this speaker's AirPlay timeline sends: 0 plain, 1 Surround back, 2
+    /// Surround front. The engine reads it when the speaker's session is set up.
+    public func setChannelMix(outputID: String, mix: Int) async throws {
+        let body = try JSONSerialization.data(withJSONObject: ["channel_mix": (0...2).contains(mix) ? mix : 0])
+        _ = try await request("PUT", "/api/outputs/\(outputID)", body: body,
+                              coalesceKey: "channelmix:\(outputID)")
+    }
+
+    /// While on, rear streams play the plain song: Surround off, and the speaker test,
+    /// which uses it to reach one back speaker. It applies to the whole engine, takes
+    /// effect at once on the running stream, and any listed output can carry it.
+    public func setRearDirect(_ on: Bool, outputID: String) async throws {
+        let body = try JSONSerialization.data(withJSONObject: ["rear_direct": on])
+        _ = try await request("PUT", "/api/outputs/\(outputID)", body: body)
     }
 
     public func setMasterVolume(_ volume: Int) async throws {

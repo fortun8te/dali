@@ -1213,3 +1213,31 @@ test('high playback speed does not turn a manual rewind into a natural loop', as
   assert.equal(p.armed, false);
   assert.equal(p.buffer.length, 0);
 });
+
+test('a large delay reduction retains the frames needed throughout the glide', async () => {
+  const c = content();
+  await settle();
+  let delayMs = 2000;
+  c.runtime.sendMessage = async () => ({ running: true, streaming: true, delayMs });
+  c.api.applyStatus({ running: true, streaming: true, delayMs });
+  c.media('play');
+  const p = c.api.S.pipeline;
+  await runFrames(c, 3000);
+  delayMs = 300;
+  c.api.applyStatus({ running: true, streaming: true, delayMs });
+  for (let i = 0; i < 100; i++) {
+    await runFrames(c, 34);
+    assert.ok(Math.abs(c.clock.now - p.current.t - p.eff) <= 40,
+      `glide needs ${p.eff}ms history, presented ${c.clock.now - p.current.t}ms`);
+  }
+});
+
+test('a play event with slow first decode still starts with the full picture delay', async () => {
+  const c = content();
+  await settle();
+  c.media('play');
+  await c.clock.advance(2000);
+  await c.capture();
+  assert.equal(c.api.S.pipeline.eff, 900);
+  assert.equal(c.api.S.pipeline.ramped, false);
+});

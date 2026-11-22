@@ -1,11 +1,10 @@
 // DALI — the glow that listens.
 //
 // A smooth swell of light rising out of the room card's glow, with many fine lines of
-// light standing in it. The music moulds the swell's upper edge: the bass lifts the left, the mids
-// the middle, the treble the right (three real bands, not one level reshaped), a kick
-// pushes the low end and a beat sends a gentle ripple out from the middle. The glow
-// near the pointer lifts toward it; while the room connects it breathes; when nothing
-// plays it rests low.
+// light standing in it. Each line is one frequency of the real spectrum, low on the left,
+// high on the right, and nothing else moves them. The glow near the pointer lifts toward
+// it; while the room connects a crest of light sweeps along it; when nothing plays it
+// rests low.
 //
 // Sync: it reads only the store's delayed level path (`audioLevel`, `bassLevel`,
 // `midLevel`, `trebleLevel`, `beatPlayedAt`), the sample the speakers are playing now,
@@ -13,8 +12,8 @@
 // Smoothing is kept short on purpose: every extra millisecond of easing is a millisecond
 // the bars trail the sound.
 //
-// Budget: one Canvas, 56 thin lines and three blurred layers, 30 fps, only while the room is
-// live, connecting or the pointer is over it; static otherwise; static for Reduce Motion.
+// Budget: one Canvas, 56 thin lines and three blurred layers, 60 fps while the room is live
+// or connecting, 30 under the pointer; static otherwise; static for Reduce Motion.
 
 import SwiftUI
 import Observation
@@ -26,17 +25,11 @@ struct LivingBloom: View {
     @State private var smoother = SpectrumSmoother()
 
     private static let barCount = 56
-    /// A fixed, uneven lean per bar, so neighbours are not copies of each other.
-    private static let voices: [Double] = (0..<barCount).map { i in
-        let v = sin(Double(i + 1) * 12.9898) * 43758.5453
-        return 0.94 + 0.12 * (v - floor(v))
-    }
-
     private var active: Bool { store.phase == .streaming || store.phase == .starting }
     private var paused: Bool { reduceMotion || (!active && pointer == nil) }
 
     var body: some View {
-        TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: paused)) { timeline in
+        TimelineView(.animation(minimumInterval: active ? 1.0 / 60.0 : 1.0 / 30.0, paused: paused)) { timeline in
             Canvas { ctx, size in draw(ctx, size: size, now: timeline.date) }
         }
         .allowsHitTesting(false)
@@ -57,7 +50,6 @@ struct LivingBloom: View {
         let connecting = store.phase == .starting
         let presence = live ? 1.0 : connecting ? 0.75 : 0.42
         let beat = beatEnvelope(now: now)
-        let kick = beatEnvelope(now: now, span: 0.30)
 
         let w = size.width, h = size.height
         let region = h * 0.26
@@ -70,27 +62,24 @@ struct LivingBloom: View {
             let xn = (Double(i) + 0.5) / Double(n)
             var e: Double
             if live {
-                let wb = exp(-pow((xn - 0.10) / 0.22, 2))
-                let wm = exp(-pow((xn - 0.50) / 0.26, 2))
-                let wt = exp(-pow((xn - 0.90) / 0.22, 2))
-                let total = wb + wm + wt
                 if spectrum.count == SpectrumAnalyzer.bandCount {
-                    // Each bar is its own frequency: the real spectrum, read between its two nearest bands.
+                    // Each bar is exactly its own frequency, low on the left and high on the
+                    // right: the real spectrum, read between its two nearest bands, nothing added.
                     let pos = xn * Double(spectrum.count - 1)
                     let lo = Int(pos), hi = min(lo + 1, spectrum.count - 1), f = pos - Double(lo)
                     let v = Double(spectrum[lo]) * (1 - f) + Double(spectrum[hi]) * f
-                    e = pow(v, 1.5) * 0.9 * Self.voices[i] + 0.02 * level
+                    e = pow(v, 1.4) * 0.92
                 } else {
-                    e = (wb * bass + wm * mid + wt * treble) / total
-                    e *= Self.voices[i]
-                    e += 0.04 * level
+                    let wb = exp(-pow((xn - 0.10) / 0.22, 2))
+                    let wm = exp(-pow((xn - 0.50) / 0.26, 2))
+                    let wt = exp(-pow((xn - 0.90) / 0.22, 2))
+                    e = (wb * bass + wm * mid + wt * treble) / (wb + wm + wt)
                 }
-                e *= 1 + 0.12 * kick * (wb / total)                                    // a kick lifts the low end, gently
-                e *= 1 + 0.06 * beatRipple(now: now, distance: abs(xn - 0.5) * 2)       // a beat runs out from the middle, barely
-                e = tanh(1.1 * pow(max(e, 0), 0.9))                                      // a soft ceiling: peaks round off
             } else if connecting {
-                // Connecting: the bars just breathe, calmly, all together.
-                e = 0.11 + 0.07 * sin(t * 1.7 + xn * 2.5)
+                // Connecting: a soft crest of light travels back and forth along the bars.
+                let sweep = 0.5 + 0.5 * sin(t * 1.9)
+                let d = (xn - sweep) / 0.13
+                e = 0.05 + 0.03 * sin(t * 1.3 + xn * 3) + 0.42 * exp(-d * d)
             } else {
                 e = 0.04 + 0.025 * sin(xn * 6.0 + t * 0.7) + 0.015 * sin(xn * 17.0 - t * 1.1)   // resting, drifting
             }
@@ -101,10 +90,10 @@ struct LivingBloom: View {
             targets[i] = min(max(e, 0), 1)
         }
         let rough = smoother.stepBars(targets, at: now).map { $0 * region + 1.5 }
-        // The swell is smoothed across neighbours so the glow flows; the fine lines only a little,
-        // so they stay lively.
+        // The swell is smoothed across neighbours so the glow flows; the fine lines are the
+        // bars themselves, each showing its own frequency.
         let heights = Self.blurred(rough, weights: [1, 2, 3, 2, 1])
-        let lineHeights = Self.blurred(rough, weights: [1, 2, 1])
+        let lineHeights = rough
 
         // 2. The glow itself: a smooth swell whose upper edge the music moves. It is only
         // ever drawn blurred, so there is no hard edge anywhere on it.
@@ -212,16 +201,6 @@ struct LivingBloom: View {
         return path
     }
 
-    /// 1 at the moment a beat reaches `distance` (0 centre, 1 edge) from the middle,
-    /// travelling outward and fading, so a beat is a ripple and not a flash.
-    private func beatRipple(now: Date, distance: Double) -> Double {
-        guard let at = store.beatPlayedAt else { return 0 }
-        let e = now.timeIntervalSince(at) - distance * 0.28
-        guard e >= 0, e < 0.55 else { return 0 }
-        let v = 1 - e / 0.55
-        return v * v
-    }
-
     private func smooth(_ x: Double, _ lo: Double, _ hi: Double) -> Double {
         let v = min(max((x - lo) / (hi - lo), 0), 1)
         return v * v * (3 - 2 * v)
@@ -245,14 +224,14 @@ final class SpectrumSmoother {
     private var last: Date?
     private var barsLast: Date?
 
-    /// Each bar rises almost at once and falls back over a tenth of a second or so.
+    /// Each bar rises at once and falls back in well under a tenth of a second.
     func stepBars(_ targets: [Double], at now: Date) -> [Double] {
         if bars.count != targets.count { bars = [Double](repeating: 0, count: targets.count) }
         let dt = min(max(barsLast.map { now.timeIntervalSince($0) } ?? 1.0 / 60, 0), 0.1)
         barsLast = now
         for i in targets.indices {
             let target = targets[i].isFinite ? min(max(targets[i], 0), 1) : 0
-            let tau = target > bars[i] ? 0.014 : 0.095
+            let tau = target > bars[i] ? 0.008 : 0.075
             bars[i] += (target - bars[i]) * (1 - exp(-dt / tau))
         }
         return bars

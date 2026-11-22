@@ -118,6 +118,7 @@ static int outputs_master_volume;
 static uint64_t outputs_buffer_duration_ms;
 
 static bool outputs_exclusive_mode;
+bool outputs_rear_direct;
 
 static struct outputs_callback_register outputs_cb_register[OUTPUTS_MAX_CALLBACKS];
 static struct event *outputs_deferredev;
@@ -125,6 +126,57 @@ static struct timeval outputs_stop_timeout = { OUTPUTS_STOP_TIMEOUT, 0 };
 
 // Last element is a zero terminator
 static struct output_quality_subscription output_quality_subscriptions[OUTPUTS_MAX_QUALITY_SUBSCRIPTIONS + 1];
+
+// DALI: channel_mix is not stored in the speakers table, so a device that goes
+// away (mDNS expiry) or is replaced by a higher priority type (AirPlay 1 ->
+// AirPlay 2) would come back with mix 0 and a rear speaker would play the
+// front stereo. Remember the last mix per device id for the life of the process.
+#define OUTPUTS_CHANNEL_MIX_MEMORY 64
+static struct
+{
+  uint64_t id;
+  int channel_mix;
+  bool used;
+} outputs_channel_mix_memory[OUTPUTS_CHANNEL_MIX_MEMORY];
+static int outputs_channel_mix_memory_next;
+
+static void
+channel_mix_remember(uint64_t id, int channel_mix)
+{
+  int i;
+
+  for (i = 0; i < OUTPUTS_CHANNEL_MIX_MEMORY; i++)
+    {
+      if (outputs_channel_mix_memory[i].used && outputs_channel_mix_memory[i].id == id)
+	{
+	  outputs_channel_mix_memory[i].channel_mix = channel_mix;
+	  return;
+	}
+    }
+
+  if (channel_mix == 0)
+    return; // Nothing to remember, 0 is the default
+
+  i = outputs_channel_mix_memory_next;
+  outputs_channel_mix_memory_next = (i + 1) % OUTPUTS_CHANNEL_MIX_MEMORY;
+  outputs_channel_mix_memory[i].used = true;
+  outputs_channel_mix_memory[i].id = id;
+  outputs_channel_mix_memory[i].channel_mix = channel_mix;
+}
+
+static int
+channel_mix_recall(uint64_t id)
+{
+  int i;
+
+  for (i = 0; i < OUTPUTS_CHANNEL_MIX_MEMORY; i++)
+    {
+      if (outputs_channel_mix_memory[i].used && outputs_channel_mix_memory[i].id == id)
+	return outputs_channel_mix_memory[i].channel_mix;
+    }
+
+  return 0;
+}
 static bool outputs_got_new_subscription;
 
 
@@ -779,6 +831,7 @@ outputs_device_add(struct output_device *add, bool new_deselect)
   struct output_device *device;
   char *keep_name;
   int keep_offset_ms;
+  int keep_channel_mix;
   int ret;
 
   for (device = outputs_device_list; device; device = device->next)
@@ -811,6 +864,7 @@ outputs_device_add(struct output_device *add, bool new_deselect)
 
       keep_name = strdup(device->name);
       keep_offset_ms = device->offset_ms; // For legacy local audio and Chromecast where offset could come from config file
+      keep_channel_mix = device->channel_mix;
 
       ret = db_speaker_get(device, device->id);
       if (ret < 0)
@@ -824,6 +878,11 @@ outputs_device_add(struct output_device *add, bool new_deselect)
 
       if (keep_offset_ms != 0)
 	device->offset_ms = keep_offset_ms;
+
+      if (keep_channel_mix != 0)
+	device->channel_mix = keep_channel_mix;
+      else
+	device->channel_mix = channel_mix_recall(device->id);
 
       if (new_deselect)
 	device->selected = 0;
@@ -899,6 +958,8 @@ outputs_device_remove(struct output_device *remove)
 
   if (!device)
     return;
+
+  channel_mix_remember(remove->id, remove->channel_mix);
 
   // Save device volume
   ret = db_speaker_save(remove);

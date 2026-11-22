@@ -15,7 +15,6 @@ enum RoomLayout {
     static let backL  = CGPoint(x: 0.12, y: 0.85)
     static let backR  = CGPoint(x: 0.88, y: 0.85)
     static let listener = CGPoint(x: 0.5, y: 0.60)
-    static let desk = CGRect(x: 0.29, y: 0.06, width: 0.42, height: 0.19)
 
     static func positions(_ cabinet: Cabinet, in size: CGSize) -> [CGPoint] {
         let unit = cabinet == .opticon2 ? [frontL, frontR] : [backL, backR]
@@ -45,7 +44,7 @@ enum Cabinet: CaseIterable {
     /// ~8° back — what people actually do). The waves always leave on the
     /// true aim, so the sound still reaches the chair.
     var toeIn: Double { self == .opticon2 ? 0.30 : 0.12 }
-    /// The back wall wakes a beat after the desk, so light sweeps the room.
+    /// The back wall wakes a beat after the front, so light sweeps the room.
     var delay: Double { self == .opticon2 ? 0 : 0.08 }
 }
 
@@ -55,7 +54,7 @@ enum RoomArt {
 
     // MARK: static furniture (cached)
 
-    /// Desk, monitor and the listener's mark: everything that never
+    /// The floor light and the listener's mark: everything that never
     /// changes. Drawn once per canvas size into an image.
     static func drawFurniture(_ ctx: GraphicsContext, size: CGSize) {
         // A trace of neutral light near the floor; keep the room itself near-black.
@@ -71,40 +70,7 @@ enum RoomArt {
             startPoint: CGPoint(x: size.width / 2, y: size.height),
             endPoint: CGPoint(x: size.width / 2, y: 0)))
 
-        let d = RoomLayout.desk
-        let desk = CGRect(x: d.minX * size.width, y: d.minY * size.height,
-                          width: d.width * size.width, height: d.height * size.height)
-        let shape = Path(roundedRect: desk, cornerRadius: 5, style: .continuous)
-        ctx.fill(shape, with: .color(.white.opacity(0.012)))
-        // The near edge catches the room light; the far edge dissolves.
-        ctx.stroke(shape, with: .linearGradient(Gradient(stops: [
-            .init(color: .warmWhite.opacity(0.10), location: 0),
-            .init(color: .warmWhite.opacity(0.03), location: 0.5),
-            .init(color: .warmWhite.opacity(0), location: 1),
-        ]), startPoint: CGPoint(x: desk.midX, y: desk.maxY),
-            endPoint: CGPoint(x: desk.midX, y: desk.minY)), lineWidth: 0.75)
-
-        // Monitor: a thin lit bar, with its light spilling toward the room.
-        let monitor = CGRect(x: desk.midX - desk.width * 0.30, y: desk.minY + desk.height * 0.28,
-                             width: desk.width * 0.60, height: 2.5)
-        let spillR = monitor.width * 0.62
-        let squash = 8.0 / spillR
-        var spill = ctx
-        spill.scaleBy(x: 1, y: squash)
-        let sc = CGPoint(x: monitor.midX, y: (monitor.midY + 3) / squash)
-        spill.fill(Path(ellipseIn: CGRect(x: sc.x - spillR, y: sc.y - spillR,
-                                          width: spillR * 2, height: spillR * 2)),
-                   with: .radialGradient(Gradient(stops: [
-                    .init(color: .warmWhite.opacity(0.08), location: 0),
-                    .init(color: .warmWhite.opacity(0.03), location: 0.45),
-                    .init(color: .warmWhite.opacity(0), location: 1),
-                   ]), center: sc, startRadius: 0, endRadius: spillR))
-        ctx.fill(Path(roundedRect: monitor, cornerRadius: 1.25), with: .linearGradient(
-            Gradient(colors: [.warmWhite.opacity(0.34), .warmWhite.opacity(0.16)]),
-            startPoint: CGPoint(x: monitor.minX, y: monitor.midY),
-            endPoint: CGPoint(x: monitor.maxX, y: monitor.midY)))
-
-        // The listener: an open arc facing the desk and a still point.
+        // The listener: an open arc and a still point.
         let me = RoomLayout.listener.scaled(to: size)
         var seat = Path()
         seat.addArc(center: me, radius: 10, startAngle: .degrees(22), endAngle: .degrees(158),
@@ -189,6 +155,23 @@ enum RoomArt {
                     .init(color: .warmWhite.opacity(0), location: 1),
                    ]), startPoint: CGPoint(x: 0, y: -d * 0.10), endPoint: CGPoint(x: 0, y: d * 0.12)))
 
+        // A second, narrower sheen, and the chamfer running round the top's edge.
+        var glint = top
+        glint.rotate(by: .degrees(-24))
+        glint.fill(Path(CGRect(x: -hw * 1.1, y: d * 0.16, width: hw * 2.2, height: d * 0.05)),
+                   with: .linearGradient(Gradient(stops: [
+                    .init(color: .warmWhite.opacity(0), location: 0),
+                    .init(color: .warmWhite.opacity(0.022 + 0.022 * lit), location: 0.5),
+                    .init(color: .warmWhite.opacity(0), location: 1),
+                   ]), startPoint: CGPoint(x: 0, y: d * 0.16), endPoint: CGPoint(x: 0, y: d * 0.21)))
+        let chamfer = Path(roundedRect: CGRect(x: -hw + 0.9, y: by + 0.9, width: 2 * hw - 1.8, height: d - 1.8),
+                           cornerRadius: 1.0)
+        top.stroke(chamfer, with: .linearGradient(Gradient(stops: [
+            .init(color: .warmWhite.opacity(0.05 + 0.04 * lit), location: 0),
+            .init(color: .warmWhite.opacity(0.012), location: 0.6),
+            .init(color: .warmWhite.opacity(0.03), location: 1),
+        ]), startPoint: CGPoint(x: -hw, y: fy), endPoint: CGPoint(x: hw, y: by)), lineWidth: 0.3)
+
         if lit > 0.01 {
             ctx.stroke(body, with: .linearGradient(Gradient(stops: [
                 .init(color: .warmWhite.opacity(0.10 * lit), location: 0),
@@ -202,12 +185,18 @@ enum RoomArt {
                           cornerRadius: 0.8)
         ctx.fill(grille, with: .color(shadow.opacity(0.9)))
         var weave = Path()
-        for i in 0..<9 {
-            let x = -fx + 2.3 + CGFloat(i) * (2 * fx - 4.6) / 8
-            weave.move(to: CGPoint(x: x, y: fy - 3.3))
-            weave.addLine(to: CGPoint(x: x, y: fy - 1.5))
+        for i in 0..<21 {
+            let x = -fx + 2.0 + CGFloat(i) * (2 * fx - 4.0) / 20
+            weave.move(to: CGPoint(x: x, y: fy - 3.45))
+            weave.addLine(to: CGPoint(x: x, y: fy - 1.3))
         }
-        ctx.stroke(weave, with: .color(.paper.opacity(0.10 + 0.07 * lit)), lineWidth: 0.45)
+        ctx.stroke(weave, with: .color(.paper.opacity(0.08 + 0.06 * lit)), lineWidth: 0.22)
+        var thread = Path()
+        for y in [fy - 2.9, fy - 2.4, fy - 1.9] {
+            thread.move(to: CGPoint(x: -fx + 1.7, y: y))
+            thread.addLine(to: CGPoint(x: fx - 1.7, y: y))
+        }
+        ctx.stroke(thread, with: .color(.paper.opacity(0.035 + 0.03 * lit)), lineWidth: 0.16)
         var seam = Path()
         seam.move(to: CGPoint(x: -fx + 1.5, y: fy - 4.4))
         seam.addLine(to: CGPoint(x: fx - 1.5, y: fy - 4.4))
@@ -261,12 +250,20 @@ enum RoomArt {
                         .init(color: .paper.opacity(0.06 + 0.03 * lit), location: 1),
                     ]), startPoint: CGPoint(x: 0, y: fy * 0.30), endPoint: CGPoint(x: 0, y: fy)))
         var weave = Path()
-        for i in -5...5 {
-            let x = CGFloat(i) * w * 0.085
+        for i in -12...12 {
+            let x = CGFloat(i) * w * 0.039
             weave.move(to: CGPoint(x: x, y: fy * 0.40))
             weave.addLine(to: CGPoint(x: x * 1.18, y: fy))
         }
-        grille.stroke(weave, with: .color(.paper.opacity(0.04 + 0.025 * lit)), lineWidth: 0.3)
+        grille.stroke(weave, with: .color(.paper.opacity(0.035 + 0.022 * lit)), lineWidth: 0.18)
+        // The edge of the top, where it meets the grille: a soft lip all the way round.
+        let plate = Path(roundedRect: CGRect(x: -w / 2 + 1.5, y: -d / 2 + 1.5, width: w - 3, height: d - 3),
+                         cornerRadius: w / 2 - 1.5, style: .continuous)
+        top.stroke(plate, with: .linearGradient(Gradient(stops: [
+            .init(color: .warmWhite.opacity(0.10 + 0.06 * lit), location: 0),
+            .init(color: .warmWhite.opacity(0.025), location: 0.55),
+            .init(color: .warmWhite.opacity(0.05), location: 1),
+        ]), startPoint: CGPoint(x: 0, y: fy), endPoint: CGPoint(x: 0, y: by)), lineWidth: 0.3)
 
         let trough = CGRect(x: -w * 0.30, y: -d * 0.21, width: w * 0.60, height: 2.0)
         ctx.fill(Path(roundedRect: trough, cornerRadius: 1), with: .color(shadow.opacity(0.92)))
@@ -274,17 +271,29 @@ enum RoomArt {
         var lip = Path()
         lip.move(to: CGPoint(x: trough.minX + 1, y: trough.maxY))
         lip.addLine(to: CGPoint(x: trough.maxX - 1, y: trough.maxY))
-        ctx.stroke(lip, with: .color(.paper.opacity(detail * 0.52)), lineWidth: 0.45)
+        ctx.stroke(lip, with: .color(.paper.opacity(detail * 0.52)), lineWidth: 0.32)
+        var shade = Path()
+        shade.move(to: CGPoint(x: trough.minX + 1, y: trough.minY + 0.25))
+        shade.addLine(to: CGPoint(x: trough.maxX - 1, y: trough.minY + 0.25))
+        ctx.stroke(shade, with: .color(.black.opacity(0.7)), lineWidth: 0.4)
         var play = Path()
         play.move(to: CGPoint(x: -0.6, y: 1.0))
         play.addLine(to: CGPoint(x: 0.9, y: 1.9))
         play.addLine(to: CGPoint(x: -0.6, y: 2.8))
         play.closeSubpath()
         ctx.fill(play, with: .color(.paper.opacity(detail)))
-        for x: CGFloat in [-4.2, 4.2] {
-            ctx.fill(Path(ellipseIn: CGRect(x: x - 0.35, y: 1.6, width: 0.7, height: 0.7)),
-                     with: .color(.paper.opacity(detail * 0.7)))
+        // Previous and next: the small chevrons either side of play.
+        var chevrons = Path()
+        for side: CGFloat in [-1, 1] {
+            chevrons.move(to: CGPoint(x: side * 4.0, y: 1.25))
+            chevrons.addLine(to: CGPoint(x: side * 4.6, y: 1.9))
+            chevrons.addLine(to: CGPoint(x: side * 4.0, y: 2.55))
         }
+        ctx.stroke(chevrons, with: .color(.paper.opacity(detail * 0.7)),
+                   style: StrokeStyle(lineWidth: 0.28, lineCap: .round, lineJoin: .round))
+        // The status light.
+        ctx.fill(Path(ellipseIn: CGRect(x: -w * 0.36, y: -d * 0.31, width: 0.55, height: 0.55)),
+                 with: .color(.warmWhite.opacity(0.35 + 0.45 * lit)))
     }
 
     /// A rim, not an outline: bright on the room-facing edge, gone by the back.
@@ -321,6 +330,39 @@ enum RoomArt {
     }
 
     /// A one-shot wake leaving a cabinet: a pair going live, or a beat.
+    /// Connecting: rings of light leave the listener one after another and travel out
+    /// across the room until they have passed every speaker.
+    private static let searchPeriod = 2.1
+    private static let searchRings = 3
+
+    private static func searchReach(_ size: CGSize) -> Double { hypot(size.width, size.height) * 0.62 }
+
+    static func drawSearch(_ ctx: GraphicsContext, from me: CGPoint, size: CGSize, time: Double) {
+        let reach = searchReach(size)
+        for ring in 0..<searchRings {
+            let phase = (time / searchPeriod + Double(ring) / Double(searchRings)).truncatingRemainder(dividingBy: 1)
+            let radius = 12 + reach * easeOutCubic(phase)
+            let alpha = smoothstep(phase / 0.10) * pow(1 - phase, 1.6)
+            guard alpha > 0.004 else { continue }
+            let circle = Path(ellipseIn: CGRect(x: me.x - radius, y: me.y - radius, width: radius * 2, height: radius * 2))
+            ctx.stroke(circle, with: .color(Color.bloomPeriwinkle.opacity(0.10 * alpha)), lineWidth: 5)
+            ctx.stroke(circle, with: .color(Color.bloomHighlight.opacity(0.34 * alpha)), lineWidth: 0.9)
+        }
+    }
+
+    /// 0...1: how much a ring is passing this distance from the listener right now.
+    static func searchFlare(distance: Double, size: CGSize, time: Double) -> Double {
+        let reach = searchReach(size)
+        var flare = 0.0
+        for ring in 0..<searchRings {
+            let phase = (time / searchPeriod + Double(ring) / Double(searchRings)).truncatingRemainder(dividingBy: 1)
+            let radius = 12 + reach * easeOutCubic(phase)
+            let gap = (radius - distance) / 34
+            flare = max(flare, exp(-gap * gap) * pow(1 - phase, 0.6))
+        }
+        return flare * 0.9
+    }
+
     static func drawPulse(_ ctx: GraphicsContext, at p: CGPoint, aim: Double, progress: Double,
                           from r0: CGFloat, to r1: CGFloat, alpha: Double) {
         let e = easeOutCubic(progress)

@@ -11,8 +11,8 @@ struct PanelFooter: View {
         HStack(spacing: Space.xs) {
             if store.mode == .mirror { SourcePicker() }
             Spacer(minLength: 0)
-            if store.hasRoomPlan { ExtrasButton() }
             DelayLabel()
+            if store.hasRoomPlan { ExtrasButton() }
             Button { openSettings() } label: {
                 Image(systemName: "gearshape").symbolRenderingMode(.hierarchical)
                     .font(.system(size: 13, weight: .regular))
@@ -51,7 +51,7 @@ struct SourcePicker: View {
             }
         } label: {
             HStack(spacing: 5) {
-                Text(store.source.label).font(.body13)
+                Text(store.source.label).font(.body13).lineLimit(1).truncationMode(.tail)
                 Image(systemName: "chevron.up.chevron.down").font(.system(size: 8, weight: .medium))
             }
             .foregroundStyle(hovering ? Color.paper : Color.paper62)
@@ -62,8 +62,8 @@ struct SourcePicker: View {
         .menuStyle(.button)
         .buttonStyle(.plain)
         .menuIndicator(.hidden)
-        .fixedSize()
-        .help("What goes to the room: everything the Mac plays, or one app")
+        .help("Choose all audio or one app")
+        .accessibilityLabel("Audio source")
         // Rebuilt as the pointer arrives, so an app launched after the window
         // opened is in the list by the time the menu opens.
         .onHover { over in
@@ -83,8 +83,8 @@ struct SourcePicker: View {
     }
 }
 
-/// "540 ms delay", or "540 ms · in sync" while the browser companion is
-/// checking in and matching the picture to the room. Click for the why.
+/// Only says something when it matters: "Video in sync" while the browser companion
+/// is matching the picture to the room, or Apple's longer delay. Click for the why.
 struct DelayLabel: View {
     @Environment(DALIStore.self) private var store
     @State private var showing = false
@@ -94,33 +94,28 @@ struct DelayLabel: View {
         let apple = AppleSender.shared.isSelected
         let synced = store.videoInSync && !apple
         Button { showing.toggle() } label: {
-            HStack(spacing: 3) {
-                Text(apple ? "≈2 s" : store.roomDelayLabel)
-                    .contentTransition(.numericText())
-                Text(synced ? "· in sync" : "delay")
-                    .foregroundStyle(synced ? Color.accentBlue.opacity(hovering ? 0.9 : 0.65)
-                                            : (hovering || showing ? Color.paper62 : Color.paper38))
-            }
-            .font(.caption.monospacedDigit())
-            .lineLimit(1)
-            .fixedSize(horizontal: true, vertical: false)
-            .layoutPriority(1)
-            .foregroundStyle(hovering || showing ? Color.paper62 : Color.paper38)
-            .padding(.horizontal, 6)
-            .frame(height: 28)
-            .contentShape(RoundedRectangle(cornerRadius: Radius.control, style: .continuous))
+            Text(apple ? "About 2 s behind" : "Video in sync")
+                .font(.caption)
+                .lineLimit(1)
+                .fixedSize(horizontal: true, vertical: false)
+                .foregroundStyle(apple ? (hovering || showing ? Color.paper62 : Color.paper38)
+                                       : Color.accentBlue.opacity(hovering || showing ? 0.95 : 0.7))
+                .padding(.horizontal, 6)
+                .frame(height: 28)
+                .contentShape(RoundedRectangle(cornerRadius: Radius.control, style: .continuous))
         }
+        .opacity(apple || synced ? 1 : 0)
+        .allowsHitTesting(apple || synced)
+        .accessibilityHidden(!apple && !synced)
         .buttonStyle(.plain)
         .onHover { hovering = $0 }
         .animation(Motion.fade, value: hovering)
         .animation(Motion.fade, value: synced)
-        .help("Why the room plays a moment behind the Mac")
+        .help("About video sync")
         .popover(isPresented: $showing, arrowEdge: .bottom) {
             Text(apple
-                 ? "Apple's AirPlay plays about two seconds behind the Mac. That suits music, not video."
-                 : synced
-                 ? "Every speaker waits \(store.roomDelayLabel) before playing, and the browser companion\(store.browserExtensionVersion.map { " (\($0))" } ?? "") holds the picture back by the same amount — so what you see and hear line up."
-                 : "Every speaker waits \(store.roomDelayLabel) before playing, so they all start on the same beat. For browser video, the DALI companion matches the picture automatically.")
+                 ? "Apple AirPlay plays about two seconds behind the Mac."
+                 : "The browser companion delays the picture to match the speakers.")
                 .font(.body13)
                 .foregroundStyle(Color.paper62)
                 .fixedSize(horizontal: false, vertical: true)
@@ -139,15 +134,15 @@ struct ExtrasButton: View {
         let extras = store.extras
         let enabledCount = extras.filter(\.enabled).count
         Button { showing.toggle() } label: {
-            HStack(spacing: 4) {
-                Image(systemName: "plus.circle").symbolRenderingMode(.hierarchical)
-                    .font(.system(size: 12, weight: .regular))
-                Text(enabledCount > 0 ? "+\(enabledCount)" : "Add").font(.caption.monospacedDigit())
+            HStack(spacing: 3) {
+                Image(systemName: "plus").symbolRenderingMode(.hierarchical)
+                    .font(.system(size: 13, weight: .regular))
+                if enabledCount > 0 { Text("\(enabledCount)").font(.caption.monospacedDigit()) }
             }
         }
         .buttonStyle(IconButtonStyle(glass: false))
-        .help("Add or manage more speakers")
-        .accessibilityLabel("Add or manage more speakers")
+        .help("More speakers")
+        .accessibilityLabel("More speakers")
         .popover(isPresented: $showing, arrowEdge: .bottom) {
             ScrollView {
                 VStack(spacing: Space.l) {

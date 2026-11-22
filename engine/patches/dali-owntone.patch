@@ -182,10 +182,10 @@ index 3645f55..8a7c255 100644
    modules_deinit();
  
 diff --git a/src/httpd_jsonapi.c b/src/httpd_jsonapi.c
-index 619dfee..c3b4c8c 100644
+index 619dfee..6a744db 100644
 --- a/src/httpd_jsonapi.c
 +++ b/src/httpd_jsonapi.c
-@@ -1629,6 +1629,8 @@ speaker_to_json(struct player_speaker_info *spk)
+@@ -1629,11 +1629,15 @@ speaker_to_json(struct player_speaker_info *spk)
    json_object_object_add(output, "name", json_object_new_string(spk->name));
    json_object_object_add(output, "type", json_object_new_string(spk->output_type));
    json_object_object_add(output, "selected", json_object_new_boolean(spk->selected));
@@ -194,6 +194,35 @@ index 619dfee..c3b4c8c 100644
    json_object_object_add(output, "has_password", json_object_new_boolean(spk->has_password));
    json_object_object_add(output, "requires_auth", json_object_new_boolean(spk->requires_auth));
    json_object_object_add(output, "needs_auth_key", json_object_new_boolean(spk->needs_auth_key));
+   json_object_object_add(output, "volume", json_object_new_int(spk->absvol));
+   json_object_object_add(output, "offset_ms", json_object_new_int(spk->offset_ms));
++  json_object_object_add(output, "channel_mix", json_object_new_int(spk->channel_mix));
++  json_object_object_add(output, "rear_direct", json_object_new_boolean(spk->rear_direct));
+   json_object_object_add(output, "format", json_object_new_string(media_format_to_string(spk->format)));
+   json_object_object_add(output, "supported_formats", supported_formats);
+ 
+@@ -1750,6 +1754,21 @@ jsonapi_reply_outputs_put_byid(struct httpd_request *hreq)
+ 	goto error;
+     }
+ 
++  if (jparse_contains_key(request, "rear_direct", json_type_boolean))
++    {
++      ret = player_rear_direct_set(jparse_bool_from_obj(request, "rear_direct"));
++      if (ret < 0)
++	goto error;
++    }
++
++  if (jparse_contains_key(request, "channel_mix", json_type_int))
++    {
++      int channel_mix = jparse_int_from_obj(request, "channel_mix");
++      ret = player_speaker_channel_mix_set(output_id, channel_mix);
++      if (ret < 0)
++	goto error;
++    }
++
+   if (jparse_contains_key(request, "offset_ms", json_type_int))
+     {
+       offset_ms = jparse_int_from_obj(request, "offset_ms");
 diff --git a/src/inputs/pipe.c b/src/inputs/pipe.c
 index 83a0300..eb01c50 100644
 --- a/src/inputs/pipe.c
@@ -313,10 +342,113 @@ index 83a0300..eb01c50 100644
    .deinit = deinit,
  };
 diff --git a/src/outputs.c b/src/outputs.c
-index ffa2cb1..0ea55e3 100644
+index ffa2cb1..199e834 100644
 --- a/src/outputs.c
 +++ b/src/outputs.c
-@@ -1035,6 +1035,7 @@ outputs_device_volume_set(struct output_device *device, output_status_cb cb)
+@@ -118,6 +118,7 @@ static int outputs_master_volume;
+ static uint64_t outputs_buffer_duration_ms;
+ 
+ static bool outputs_exclusive_mode;
++bool outputs_rear_direct;
+ 
+ static struct outputs_callback_register outputs_cb_register[OUTPUTS_MAX_CALLBACKS];
+ static struct event *outputs_deferredev;
+@@ -125,6 +126,57 @@ static struct timeval outputs_stop_timeout = { OUTPUTS_STOP_TIMEOUT, 0 };
+ 
+ // Last element is a zero terminator
+ static struct output_quality_subscription output_quality_subscriptions[OUTPUTS_MAX_QUALITY_SUBSCRIPTIONS + 1];
++
++// DALI: channel_mix is not stored in the speakers table, so a device that goes
++// away (mDNS expiry) or is replaced by a higher priority type (AirPlay 1 ->
++// AirPlay 2) would come back with mix 0 and a rear speaker would play the
++// front stereo. Remember the last mix per device id for the life of the process.
++#define OUTPUTS_CHANNEL_MIX_MEMORY 64
++static struct
++{
++  uint64_t id;
++  int channel_mix;
++  bool used;
++} outputs_channel_mix_memory[OUTPUTS_CHANNEL_MIX_MEMORY];
++static int outputs_channel_mix_memory_next;
++
++static void
++channel_mix_remember(uint64_t id, int channel_mix)
++{
++  int i;
++
++  for (i = 0; i < OUTPUTS_CHANNEL_MIX_MEMORY; i++)
++    {
++      if (outputs_channel_mix_memory[i].used && outputs_channel_mix_memory[i].id == id)
++	{
++	  outputs_channel_mix_memory[i].channel_mix = channel_mix;
++	  return;
++	}
++    }
++
++  if (channel_mix == 0)
++    return; // Nothing to remember, 0 is the default
++
++  i = outputs_channel_mix_memory_next;
++  outputs_channel_mix_memory_next = (i + 1) % OUTPUTS_CHANNEL_MIX_MEMORY;
++  outputs_channel_mix_memory[i].used = true;
++  outputs_channel_mix_memory[i].id = id;
++  outputs_channel_mix_memory[i].channel_mix = channel_mix;
++}
++
++static int
++channel_mix_recall(uint64_t id)
++{
++  int i;
++
++  for (i = 0; i < OUTPUTS_CHANNEL_MIX_MEMORY; i++)
++    {
++      if (outputs_channel_mix_memory[i].used && outputs_channel_mix_memory[i].id == id)
++	return outputs_channel_mix_memory[i].channel_mix;
++    }
++
++  return 0;
++}
+ static bool outputs_got_new_subscription;
+ 
+ 
+@@ -779,6 +831,7 @@ outputs_device_add(struct output_device *add, bool new_deselect)
+   struct output_device *device;
+   char *keep_name;
+   int keep_offset_ms;
++  int keep_channel_mix;
+   int ret;
+ 
+   for (device = outputs_device_list; device; device = device->next)
+@@ -811,6 +864,7 @@ outputs_device_add(struct output_device *add, bool new_deselect)
+ 
+       keep_name = strdup(device->name);
+       keep_offset_ms = device->offset_ms; // For legacy local audio and Chromecast where offset could come from config file
++      keep_channel_mix = device->channel_mix;
+ 
+       ret = db_speaker_get(device, device->id);
+       if (ret < 0)
+@@ -825,6 +879,11 @@ outputs_device_add(struct output_device *add, bool new_deselect)
+       if (keep_offset_ms != 0)
+ 	device->offset_ms = keep_offset_ms;
+ 
++      if (keep_channel_mix != 0)
++	device->channel_mix = keep_channel_mix;
++      else
++	device->channel_mix = channel_mix_recall(device->id);
++
+       if (new_deselect)
+ 	device->selected = 0;
+ 
+@@ -900,6 +959,8 @@ outputs_device_remove(struct output_device *remove)
+   if (!device)
+     return;
+ 
++  channel_mix_remember(remove->id, remove->channel_mix);
++
+   // Save device volume
+   ret = db_speaker_save(remove);
+   if (ret < 0)
+@@ -1035,6 +1096,7 @@ outputs_device_volume_set(struct output_device *device, output_status_cb cb)
    if (!device->session)
      return 0; // Device isn't active
  
@@ -325,7 +457,7 @@ index ffa2cb1..0ea55e3 100644
  
    return ret; // We don't change device state just because of a failed volume change
 diff --git a/src/outputs.h b/src/outputs.h
-index e8474c9..adfc3dc 100644
+index e8474c9..fcd37c4 100644
 --- a/src/outputs.h
 +++ b/src/outputs.h
 @@ -125,6 +125,8 @@ struct output_device
@@ -337,8 +469,27 @@ index e8474c9..adfc3dc 100644
  
    // Quality of audio output
    struct media_quality quality;
+@@ -136,6 +138,8 @@ struct output_device
+ 
+   // For user config of speaker start
+   int offset_ms;
++  // DALI: 0 = the stereo program as is, 1 = the back of Surround, 2 = the front.
++  int channel_mix;
+ 
+   // Address
+   char *v4_address;
+@@ -194,6 +198,9 @@ struct output_buffer
+   struct output_data data[OUTPUTS_MAX_QUALITY_SUBSCRIPTIONS + 2];
+ };
+ 
++// DALI: while true, rear streams play the input straight through (Surround off, speaker test).
++extern bool outputs_rear_direct;
++
+ struct output_definition
+ {
+   // Name of the output
 diff --git a/src/outputs/airplay.c b/src/outputs/airplay.c
-index 4290b75..d9591c4 100644
+index 4290b75..86d514e 100644
 --- a/src/outputs/airplay.c
 +++ b/src/outputs/airplay.c
 @@ -24,6 +24,7 @@
@@ -392,7 +543,70 @@ index 4290b75..d9591c4 100644
  
  #define AIRPLAY_MD_DELAY_STARTUP      15360
  #define AIRPLAY_MD_DELAY_SWITCH       (AIRPLAY_MD_DELAY_STARTUP * 2)
-@@ -257,6 +290,7 @@ struct airplay_session
+@@ -208,11 +241,62 @@ struct airplay_extra
+   bool use_ptp;
+ };
+ 
++// DALI: rear surround state (see channel_mix_apply())
++#define REAR_HISTORY_FRAMES 2048
++#define REAR_ALLPASS_FRAMES 1024
++#define REAR_FFT_FRAMES 512
++#define REAR_FFT_HOP 128
++#define REAR_FFT_BINS (REAR_FFT_FRAMES / 2 + 1)
++#define REAR_DELAY_MS 12
++#define REAR_ALLPASS_GAIN 0.5f
++
++struct rear_state
++{
++  float history[2][REAR_HISTORY_FRAMES];
++  unsigned pos;
++  unsigned delay;
++  float allpass[2][2][REAR_ALLPASS_FRAMES];
++  unsigned allpass_len[2][2];
++  unsigned allpass_pos[2][2];
++  float wet;
++  float wet_step;
++  float input[2][REAR_FFT_FRAMES];
++  float output[2][REAR_FFT_FRAMES];
++  unsigned input_pos;
++  unsigned output_pos;
++  unsigned hop_count;
++  float window[REAR_FFT_FRAMES];
++  float twiddle_re[REAR_FFT_FRAMES / 2];
++  float twiddle_im[REAR_FFT_FRAMES / 2];
++  uint16_t reversed[REAR_FFT_FRAMES];
++  float power_left[REAR_FFT_BINS];
++  float power_right[REAR_FFT_BINS];
++  float cross_re[REAR_FFT_BINS];
++  float cross_im[REAR_FFT_BINS];
++  float ambience[REAR_FFT_BINS];
++  float surround[REAR_FFT_BINS];
++  float bass_weight[REAR_FFT_BINS];
++  float opposed_pan[REAR_FFT_BINS];
++  float spec_re[REAR_FFT_FRAMES];
++  float spec_im[REAR_FFT_FRAMES];
++  float measure_step;
++  float mask_step;
++  float rear_peak_gain;
++  float rear_peak_release;
++};
++
+ struct airplay_master_session
+ {
+   struct evbuffer *input_buffer;
+   uint32_t input_buffer_samples;
+ 
++  // DALI: which channel mix this timeline sends (see channel_mix_apply())
++  int channel_mix;
++  struct rear_state rear;
++  uint64_t mix_frames;
++  double mix_in[2];
++  double mix_out[2];
++
+   // ALAC encoder and buffer for encoded data
+   struct encode_ctx *encode_ctx;
+   struct evbuffer *encoded_buffer;
+@@ -257,6 +341,7 @@ struct airplay_session
    bool supports_encryption;
  
    struct event *deferredev;
@@ -400,7 +614,7 @@ index 4290b75..d9591c4 100644
  
    int reqs_in_flight;
    int cseq;
-@@ -283,6 +317,33 @@ struct airplay_session
+@@ -283,6 +368,33 @@ struct airplay_session
    // amplifier or DSP delays)
    int offset_samples;
  
@@ -434,7 +648,7 @@ index 4290b75..d9591c4 100644
    char *local_v4_address;
    char *local_v6_address;
    char local_mac_address[18];
-@@ -492,6 +553,9 @@ sequence_start(enum airplay_seq_type seq_type, struct airplay_session *session,
+@@ -492,6 +604,9 @@ sequence_start(enum airplay_seq_type seq_type, struct airplay_session *session,
  static void
  sequence_continue(struct airplay_seq_ctx *seq_ctx);
  
@@ -444,7 +658,7 @@ index 4290b75..d9591c4 100644
  
  /* ------------------------------- MISC HELPERS ----------------------------- */
  
-@@ -1136,7 +1200,17 @@ master_session_cleanup(struct airplay_master_session *ams)
+@@ -1136,7 +1251,17 @@ master_session_cleanup(struct airplay_master_session *ams)
  	; /* EMPTY */
  
        if (!s)
@@ -463,8 +677,423 @@ index 4290b75..d9591c4 100644
        else
  	s->next = ams->next;
      }
-@@ -1204,7 +1278,14 @@ master_session_make(struct media_quality *quality, bool use_ptp)
+@@ -1144,8 +1269,398 @@ master_session_cleanup(struct airplay_master_session *ams)
+   master_session_free(ams);
+ }
+ 
++// Front and rear use the same short-time analysis and overlap-add latency.
++// The rear adds a short, symmetric delay and decorrelates the two channels.
++static void
++rear_state_init(struct rear_state *state, int sample_rate)
++{
++  static const float allpass_ms[2][2] = { { 2.3f, 5.9f }, { 3.1f, 7.3f } };
++  int rate = sample_rate > 0 ? sample_rate : 44100;
++  unsigned delay = (unsigned)((float)rate * REAR_DELAY_MS / 1000.0f);
++  int c;
++  int k;
++  int bits = 0;
++
++  memset(state, 0, sizeof(*state));
++  state->wet = 1.0f;
++  state->wet_step = 1.0f / (0.04f * (float)rate);
++  state->measure_step = 1.0f - expf(-(float)REAR_FFT_HOP / (0.030f * (float)rate));
++  state->mask_step = 1.0f - expf(-(float)REAR_FFT_HOP / (0.025f * (float)rate));
++  state->rear_peak_gain = 1.0f;
++  state->rear_peak_release = 1.0f - expf(-1.0f / (0.080f * (float)rate));
++  state->delay = delay < REAR_HISTORY_FRAMES ? delay : REAR_HISTORY_FRAMES - 1;
++  for (c = 0; c < 2; c++)
++    {
++      for (k = 0; k < 2; k++)
++	{
++	  unsigned len = (unsigned)((float)rate * allpass_ms[c][k] / 1000.0f);
++	  state->allpass_len[c][k] = len < 1 ? 1 : (len < REAR_ALLPASS_FRAMES ? len : REAR_ALLPASS_FRAMES - 1);
++	}
++    }
++
++  while ((1 << bits) < REAR_FFT_FRAMES)
++    bits++;
++  for (k = 0; k < REAR_FFT_FRAMES; k++)
++    {
++      unsigned reversed = 0;
++      for (c = 0; c < bits; c++)
++	if (k & (1 << c))
++	  reversed |= 1u << (bits - 1 - c);
++      state->reversed[k] = (uint16_t)reversed;
++      state->window[k] = sinf((float)M_PI * ((float)k + 0.5f) / (float)REAR_FFT_FRAMES);
++    }
++  for (k = 0; k < REAR_FFT_FRAMES / 2; k++)
++    {
++      state->twiddle_re[k] = cosf(2.0f * (float)M_PI * (float)k / (float)REAR_FFT_FRAMES);
++      state->twiddle_im[k] = -sinf(2.0f * (float)M_PI * (float)k / (float)REAR_FFT_FRAMES);
++    }
++  for (k = 0; k < REAR_FFT_BINS; k++)
++    {
++      float hz = (float)k * (float)rate / (float)REAR_FFT_FRAMES;
++      float weight = fminf(1.0f, hz / 250.0f);
++      state->bass_weight[k] = weight * weight * (3.0f - 2.0f * weight);
++    }
++}
++
++static inline float
++flush_tiny(float value)
++{
++  return (value > -1e-12f && value < 1e-12f) ? 0.0f : value;
++}
++
++// In-place complex FFT of the state's spectrum buffer; `inverse` conjugates the twiddles.
++static void
++rear_fft(struct rear_state *state, bool inverse)
++{
++  float *re = state->spec_re;
++  float *im = state->spec_im;
++  unsigned n = REAR_FFT_FRAMES;
++  unsigned i;
++  unsigned size;
++
++  for (i = 0; i < n; i++)
++    {
++      unsigned j = state->reversed[i];
++      if (j > i)
++	{
++	  float t = re[i]; re[i] = re[j]; re[j] = t;
++	  t = im[i]; im[i] = im[j]; im[j] = t;
++	}
++    }
++  for (size = 2; size <= n; size <<= 1)
++    {
++      unsigned half = size / 2;
++      unsigned step = n / size;
++      unsigned start;
++      for (start = 0; start < n; start += size)
++	{
++	  unsigned k;
++	  for (k = 0; k < half; k++)
++	    {
++	      float wr = state->twiddle_re[k * step];
++	      float wi = inverse ? -state->twiddle_im[k * step] : state->twiddle_im[k * step];
++	      unsigned a = start + k;
++	      unsigned b = a + half;
++	      float tr = wr * re[b] - wi * im[b];
++	      float ti = wr * im[b] + wi * re[b];
++	      re[b] = re[a] - tr;
++	      im[b] = im[a] - ti;
++	      re[a] += tr;
++	      im[a] += ti;
++	    }
++	}
++    }
++}
++
++static inline float
++rear_smoothstep(float x)
++{
++  x = fminf(1.0f, fmaxf(0.0f, x));
++  return x * x * (3.0f - 2.0f * x);
++}
++
++static inline float
++rear_smooth_mask(const float *mask, unsigned bin)
++{
++  float below = mask[bin > 0 ? bin - 1 : bin];
++  float above = mask[bin + 1 < REAR_FFT_BINS ? bin + 1 : bin];
++
++  return 0.25f * below + 0.5f * mask[bin] + 0.25f * above;
++}
++
++// Estimate diffuse energy from complex coherence and phase-encoded surround
++// from negative correlation. A stable interchannel delay stays coherent, even
++// when the real correlation alone would mistake it for ambience.
++static void
++rear_process_hop(struct rear_state *state, int mode)
++{
++  const unsigned n = REAR_FFT_FRAMES;
++  unsigned i;
++  unsigned k;
++
++  for (i = 0; i < n; i++)
++    {
++      unsigned at = (state->input_pos + i) % n;
++      state->spec_re[i] = state->input[0][at] * state->window[i];
++      state->spec_im[i] = state->input[1][at] * state->window[i];
++    }
++  rear_fft(state, false);
++
++  for (k = 0; k < REAR_FFT_BINS; k++)
++    {
++      unsigned m = (n - k) % n;
++      float lr = 0.5f * (state->spec_re[k] + state->spec_re[m]);
++      float li = 0.5f * (state->spec_im[k] - state->spec_im[m]);
++      float rr = 0.5f * (state->spec_im[k] + state->spec_im[m]);
++      float ri = 0.5f * (state->spec_re[m] - state->spec_re[k]);
++      float step = state->measure_step;
++      float l;
++      float r;
++      float normalizer;
++      float real;
++      float imag;
++      float coherence;
++      float balance;
++      float ambience;
++      float surround;
++
++      state->power_left[k] = l = flush_tiny(state->power_left[k] + step * (lr * lr + li * li - state->power_left[k]));
++      state->power_right[k] = r = flush_tiny(state->power_right[k] + step * (rr * rr + ri * ri - state->power_right[k]));
++      state->cross_re[k] = flush_tiny(state->cross_re[k] + step * (lr * rr + li * ri - state->cross_re[k]));
++      state->cross_im[k] = flush_tiny(state->cross_im[k] + step * (li * rr - lr * ri - state->cross_im[k]));
++      normalizer = sqrtf(l * r + 1.0f);
++      real = state->cross_re[k] / normalizer;
++      imag = state->cross_im[k] / normalizer;
++      coherence = sqrtf(real * real + imag * imag);
++      balance = 2.0f * normalizer / (l + r + 2.0f);
++      ambience = rear_smoothstep((l + r) / 8.0f) * rear_smoothstep((0.85f - coherence) / 0.70f)
++	* rear_smoothstep((balance - 0.35f) / 0.55f);
++      // Require both channels and a phase near opposition. Direct panning and
++      // mild stereo phase differences leave the front alone.
++      surround = rear_smoothstep((-real - 0.64f) / 0.22f)
++	* rear_smoothstep((balance - 0.21f) / 0.22f);
++      // A strongly panned, phase-encoded effect has unequal amplitudes.
++      // Remove it in that ratio so it does not leave a phantom centre.
++      state->opposed_pan[k] = flush_tiny(state->opposed_pan[k] + step *
++	  (((l - r) / (l + r + 2.0f)) * rear_smoothstep((0.72f - balance) / 0.27f) - state->opposed_pan[k]));
++      state->ambience[k] = flush_tiny(state->ambience[k] + state->mask_step * (ambience - state->ambience[k]));
++      state->surround[k] = flush_tiny(state->surround[k] + state->mask_step * (surround - state->surround[k]));
++    }
++
++  for (k = 0; k < REAR_FFT_BINS; k++)
++    {
++      unsigned m = (n - k) % n;
++      float lr = 0.5f * (state->spec_re[k] + state->spec_re[m]);
++      float li = 0.5f * (state->spec_im[k] - state->spec_im[m]);
++      float rr = 0.5f * (state->spec_im[k] + state->spec_im[m]);
++      float ri = 0.5f * (state->spec_re[m] - state->spec_re[k]);
++      float bass = state->bass_weight[k];
++      float surround = rear_smooth_mask(state->surround, k);
++      float direct;
++      float side;
++      float pan = 0.0f;
++
++      if (mode == 2)
++	{
++	  // Only subtract side energy. The original mid (dialogue, lead vocal,
++	  // kick) survives even in a bin that also contains a surround effect.
++	  direct = 1.0f;
++	  side = -0.94f * surround * bass;
++	  pan = rear_smooth_mask(state->opposed_pan, k);
++	  // Convert power pan to amplitude pan for the subtraction.
++	  pan /= 1.0f + sqrtf(fmaxf(0.0f, 1.0f - pan * pan));
++	}
++      else
++	{
++	  float ambience = rear_smooth_mask(state->ambience, k);
++	  float width = fmaxf(surround, ambience);
++
++	  // Leave a quiet fill for mono and panned sources. On wide material,
++	  // give the difference signal more room and keep the bass up front.
++	  direct = 0.16f + bass * (0.04f + 0.70f * width);
++	  side = bass * (0.23f * ambience + 0.20f * surround * (1.0f - surround));
++	}
++
++      {
++	float sr = 0.5f * side * (lr - rr);
++	float si = 0.5f * side * (li - ri);
++	lr = direct * lr + (1.0f + pan) * sr;
++	li = direct * li + (1.0f + pan) * si;
++	rr = direct * rr - (1.0f - pan) * sr;
++	ri = direct * ri - (1.0f - pan) * si;
++      }
++
++      // Pack the two real spectra back into one complex inverse transform.
++      state->spec_re[k] = lr - ri;
++      state->spec_im[k] = li + rr;
++      if (m != k)
++	{
++	  state->spec_re[m] = lr + ri;
++	  state->spec_im[m] = rr - li;
++	}
++    }
++  rear_fft(state, true);
++
++  for (i = 0; i < n; i++)
++    {
++      unsigned at = (state->output_pos + i) % n;
++      float scale = state->window[i] * 0.5f / (float)n;
++      state->output[0][at] = flush_tiny(state->output[0][at] + state->spec_re[i] * scale);
++      state->output[1][at] = flush_tiny(state->output[1][at] + state->spec_im[i] * scale);
++    }
++}
++
++static inline float
++rear_allpass(struct rear_state *state, int channel, int stage, float input)
++{
++  unsigned pos = state->allpass_pos[channel][stage];
++  float delayed = state->allpass[channel][stage][pos];
++  float output = -REAR_ALLPASS_GAIN * input + delayed;
++
++  state->allpass[channel][stage][pos] = flush_tiny(input + REAR_ALLPASS_GAIN * output);
++  state->allpass_pos[channel][stage] = (pos + 1) % state->allpass_len[channel][stage];
++  return output;
++}
++
++static inline int
++surround_pcm16(float value)
++{
++  return (int)lrintf(fmaxf(-32768.0f, fminf(32767.0f, value)));
++}
++
++static void
++channel_mix_apply(uint8_t *buf, size_t size, int channels, int bits_per_sample, int mode, struct rear_state *state, bool direct)
++{
++  size_t i;
++
++  if ((mode != 1 && mode != 2) || !state || channels != 2 || bits_per_sample != 16)
++    return;
++
++  for (i = 0; i + 3 < size; i += 4)
++    {
++      float left = (float)(int16_t)(buf[i] | (buf[i + 1] << 8));
++      float right = (float)(int16_t)(buf[i + 2] | (buf[i + 3] << 8));
++      unsigned pos = state->pos;
++      unsigned out_at = state->output_pos;
++      float rear_left;
++      float rear_right;
++      int out_left;
++      int out_right;
++
++      state->input[0][state->input_pos] = left;
++      state->input[1][state->input_pos] = right;
++      state->input_pos = (state->input_pos + 1) % REAR_FFT_FRAMES;
++
++      rear_left = state->output[0][out_at];
++      rear_right = state->output[1][out_at];
++      state->output[0][out_at] = 0.0f;
++      state->output[1][out_at] = 0.0f;
++      state->output_pos = (out_at + 1) % REAR_FFT_FRAMES;
++
++      if (++state->hop_count >= REAR_FFT_HOP)
++	{
++	  state->hop_count = 0;
++	  rear_process_hop(state, mode);
++	}
++
++      if (mode == 1)
++	{
++	  float peak;
++	  float gain;
++
++	  rear_left = rear_allpass(state, 0, 1, rear_allpass(state, 0, 0, rear_left));
++	  rear_right = rear_allpass(state, 1, 1, rear_allpass(state, 1, 0, rear_right));
++	  state->history[0][pos] = rear_left;
++	  state->history[1][pos] = rear_right;
++	  rear_left = state->history[0][(pos + REAR_HISTORY_FRAMES - state->delay) % REAR_HISTORY_FRAMES];
++	  rear_right = state->history[1][(pos + REAR_HISTORY_FRAMES - state->delay) % REAR_HISTORY_FRAMES];
++	  state->pos = (pos + 1) % REAR_HISTORY_FRAMES;
++
++	  // Link the channels so peak protection does not pull the image to one side.
++	  peak = fmaxf(fabsf(rear_left), fabsf(rear_right));
++	  gain = 1.0f + (state->rear_peak_gain - 1.0f) * (1.0f - state->rear_peak_release);
++	  state->rear_peak_gain = fminf(gain, 32000.0f / fmaxf(32000.0f, peak));
++	  rear_left *= state->rear_peak_gain;
++	  rear_right *= state->rear_peak_gain;
++	}
++
++      // Keep the analysis warm while off, with exact PCM bypass once the fade ends.
++      state->wet += direct ? -state->wet_step : state->wet_step;
++      state->wet = fmaxf(0.0f, fminf(1.0f, state->wet));
++      if (state->wet == 0.0f)
++	continue;
++      out_left = surround_pcm16(left + state->wet * (rear_left - left));
++      out_right = surround_pcm16(right + state->wet * (rear_right - right));
++
++      buf[i] = (uint8_t)((uint16_t)(int16_t)out_left & 0xff);
++      buf[i + 1] = (uint8_t)((uint16_t)(int16_t)out_left >> 8);
++      buf[i + 2] = (uint8_t)((uint16_t)(int16_t)out_right & 0xff);
++      buf[i + 3] = (uint8_t)((uint16_t)(int16_t)out_right >> 8);
++    }
++}
++
++static void
++channel_levels_add(double sums[2], const uint8_t *buf, size_t size, int channels, int bits_per_sample)
++{
++  size_t i;
++
++  if (channels != 2 || bits_per_sample != 16)
++    return;
++
++  for (i = 0; i + 3 < size; i += 4)
++    {
++      double left = (int16_t)(buf[i] | (buf[i + 1] << 8));
++      double right = (int16_t)(buf[i + 2] | (buf[i + 3] << 8));
++
++      sums[0] += left * left;
++      sums[1] += right * right;
++    }
++}
++
++static double
++level_dbfs(double sum, uint64_t frames)
++{
++  double mean;
++
++  if (frames == 0)
++    return -120.0;
++
++  mean = sum / (double)frames / (32768.0 * 32768.0);
++  if (mean < 1e-12)
++    return -120.0;
++
++  return 10.0 * log10(mean);
++}
++
++// Mixes one packet and, every five seconds of audio, logs what this timeline
++// actually sends next to what the player gave it, so the log proves what each
++// speaker pair is receiving.
++static void
++channel_mix_process(struct airplay_master_session *ams)
++{
++  uint64_t window = (uint64_t)ams->quality.sample_rate * 5;
++
++  channel_levels_add(ams->mix_in, ams->rawbuf, ams->rawbuf_size, ams->quality.channels, ams->quality.bits_per_sample);
++  channel_mix_apply(ams->rawbuf, ams->rawbuf_size, ams->quality.channels, ams->quality.bits_per_sample, ams->channel_mix, &ams->rear, outputs_rear_direct);
++  channel_levels_add(ams->mix_out, ams->rawbuf, ams->rawbuf_size, ams->quality.channels, ams->quality.bits_per_sample);
++  ams->mix_frames += ams->samples_per_packet;
++
++  if (ams->mix_frames < window)
++    return;
++
++  DPRINTF(E_LOG, L_AIRPLAY,
++    "AI event=channel_mix_level mix=%s in_l_dbfs=%.1f in_r_dbfs=%.1f out_l_dbfs=%.1f out_r_dbfs=%.1f\n",
++    ams->channel_mix == 1 ? "rear" : ams->channel_mix == 2 ? "front" : "stereo",
++    level_dbfs(ams->mix_in[0], ams->mix_frames), level_dbfs(ams->mix_in[1], ams->mix_frames),
++    level_dbfs(ams->mix_out[0], ams->mix_frames), level_dbfs(ams->mix_out[1], ams->mix_frames));
++
++  ams->mix_frames = 0;
++  ams->mix_in[0] = ams->mix_in[1] = 0;
++  ams->mix_out[0] = ams->mix_out[1] = 0;
++}
++
+ static struct airplay_master_session *
+-master_session_make(struct media_quality *quality, bool use_ptp)
++master_session_make(struct media_quality *quality, bool use_ptp, int channel_mix)
+ {
+   struct airplay_master_session *ams;
+   uint64_t buffer_duration_ms;
+@@ -1156,7 +1671,8 @@ master_session_make(struct media_quality *quality, bool use_ptp)
+   // First check if we already have a suitable session
+   for (ams = airplay_master_sessions; ams; ams = ams->next)
+     {
+-      if (quality_is_equal(quality, &ams->rtp_session->quality) && use_ptp == ams->use_ptp)
++      if (quality_is_equal(quality, &ams->rtp_session->quality) && use_ptp == ams->use_ptp
++	  && channel_mix == ams->channel_mix)
+ 	return ams;
+     }
+ 
+@@ -1202,9 +1718,19 @@ master_session_make(struct media_quality *quality, bool use_ptp)
+ 
+   ams->quality = *quality;
    ams->use_ptp = use_ptp;
++  ams->channel_mix = channel_mix;
++  rear_state_init(&ams->rear, quality->sample_rate);
++  ams->rear.wet = outputs_rear_direct ? 0.0f : 1.0f;
    ams->samples_per_packet = AIRPLAY_SAMPLES_PER_PACKET;
    ams->rawbuf_size = STOB(ams->samples_per_packet, quality->bits_per_sample, quality->channels);
 -  ams->output_buffer_samples = (buffer_duration_ms - AIRPLAY_AUDIO_LATENCY_MS) * quality->sample_rate / 1000;
@@ -479,7 +1108,7 @@ index 4290b75..d9591c4 100644
  
    CHECK_NULL(L_AIRPLAY, ams->rawbuf = malloc(ams->rawbuf_size));
    CHECK_NULL(L_AIRPLAY, ams->input_buffer = evbuffer_new());
-@@ -1273,7 +1354,32 @@ session_cleanup(struct airplay_session *session)
+@@ -1273,7 +1799,32 @@ session_cleanup(struct airplay_session *session)
  	; /* EMPTY */
  
        if (!s)
@@ -513,7 +1142,7 @@ index 4290b75..d9591c4 100644
        else
  	s->next = session->next;
      }
-@@ -1295,11 +1401,37 @@ session_failure(struct airplay_session *session)
+@@ -1295,11 +1846,37 @@ session_failure(struct airplay_session *session)
    session_cleanup(session);
  }
  
@@ -551,7 +1180,7 @@ index 4290b75..d9591c4 100644
    DPRINTF(E_DBG, L_AIRPLAY, "Cleaning up failed session (deferred) on device '%s'\n", session->devname);
    session_failure(session);
  }
-@@ -1309,6 +1441,7 @@ deferred_session_failure(struct airplay_session *session)
+@@ -1309,6 +1886,7 @@ deferred_session_failure(struct airplay_session *session)
  {
    struct timeval tv;
  
@@ -559,7 +1188,7 @@ index 4290b75..d9591c4 100644
    if (session->state != AIRPLAY_STATE_AUTH)
      session->state = AIRPLAY_STATE_FAILED;
  
-@@ -1316,6 +1449,23 @@ deferred_session_failure(struct airplay_session *session)
+@@ -1316,6 +1894,23 @@ deferred_session_failure(struct airplay_session *session)
    evtimer_add(session->deferredev, &tv);
  }
  
@@ -583,7 +1212,16 @@ index 4290b75..d9591c4 100644
  static void
  rtsp_close_cb(struct evrtsp_connection *evcon, void *arg)
  {
-@@ -1752,6 +1902,12 @@ airplay_metadata_keep_alive_send(struct airplay_session *session)
+@@ -1624,7 +2219,7 @@ session_make(struct output_device *device, int callback_id)
+ 	goto error;
+     }
+ 
+-  session->master_session = master_session_make(&device->quality, extra->use_ptp);
++  session->master_session = master_session_make(&device->quality, extra->use_ptp, device->channel_mix);
+   if (!session->master_session)
+     {
+       DPRINTF(E_LOG, L_AIRPLAY, "Could not attach a master session for device '%s'\n", device->name);
+@@ -1752,6 +2347,12 @@ airplay_metadata_keep_alive_send(struct airplay_session *session)
    sequence_start(AIRPLAY_SEQ_FEEDBACK, session, NULL, "keep_alive");
  }
  
@@ -596,7 +1234,7 @@ index 4290b75..d9591c4 100644
  static void
  airplay_metadata_send(struct output_metadata *metadata)
  {
-@@ -1810,10 +1966,10 @@ airplay_volume_from_pct(int volume, const char *name)
+@@ -1810,10 +2411,10 @@ airplay_volume_from_pct(int volume, const char *name)
    max_volume = volume_max_get(name);
  
    /* RAOP volume
@@ -610,7 +1248,7 @@ index 4290b75..d9591c4 100644
      airplay_volume = -30.0 + ((float)max_volume * (float)volume * 30.0) / (100.0 * AIRPLAY_CONFIG_MAX_VOLUME);
    else
      airplay_volume = -144.0;
-@@ -1824,50 +1980,30 @@ airplay_volume_from_pct(int volume, const char *name)
+@@ -1824,50 +2425,30 @@ airplay_volume_from_pct(int volume, const char *name)
  static int
  airplay_volume_to_pct(struct output_device *device, const char *volstr)
  {
@@ -680,7 +1318,7 @@ index 4290b75..d9591c4 100644
  }
  
  /* Volume in [0 - 100] */
-@@ -1957,6 +2093,7 @@ packet_send(struct airplay_session *session, struct rtp_packet *pkt)
+@@ -1957,6 +2538,7 @@ packet_send(struct airplay_session *session, struct rtp_packet *pkt)
    size_t buf_len;
    ssize_t sent;
    int ret;
@@ -688,7 +1326,7 @@ index 4290b75..d9591c4 100644
  
    if (!session)
      return -1;
-@@ -1968,6 +2105,8 @@ packet_send(struct airplay_session *session, struct rtp_packet *pkt)
+@@ -1968,6 +2550,8 @@ packet_send(struct airplay_session *session, struct rtp_packet *pkt)
  	return -1;
  
        sent = send(session->server_fd, buf, buf_len, 0);
@@ -697,7 +1335,7 @@ index 4290b75..d9591c4 100644
        free(buf);
      }
    else
-@@ -1975,11 +2114,42 @@ packet_send(struct airplay_session *session, struct rtp_packet *pkt)
+@@ -1975,11 +2559,42 @@ packet_send(struct airplay_session *session, struct rtp_packet *pkt)
        buf = pkt->data;
        buf_len = pkt->data_len;
        sent = send(session->server_fd, buf, buf_len, 0);
@@ -741,7 +1379,7 @@ index 4290b75..d9591c4 100644
  
        // Can't free it right away, it would make the ->next in the calling
        // master_session and session loops invalid
-@@ -1988,10 +2158,46 @@ packet_send(struct airplay_session *session, struct rtp_packet *pkt)
+@@ -1988,10 +2603,46 @@ packet_send(struct airplay_session *session, struct rtp_packet *pkt)
      }
    else if (sent != buf_len)
      {
@@ -788,7 +1426,7 @@ index 4290b75..d9591c4 100644
  /*
    DPRINTF(E_DBG, L_AIRPLAY, "RTP PACKET seqnum %u, rtptime %u, payload 0x%x, pktbuf_s %zu\n",
      session->master_session->rtp_session->seqnum,
-@@ -2038,43 +2244,142 @@ control_packet_send(struct airplay_session *session, struct rtp_packet *pkt)
+@@ -2038,43 +2689,142 @@ control_packet_send(struct airplay_session *session, struct rtp_packet *pkt)
  static void
  packets_resend(struct airplay_session *session, uint16_t seqnum, int len)
  {
@@ -811,8 +1449,7 @@ index 4290b75..d9591c4 100644
 +  ams = session->master_session;
 +  rtp_session = ams->rtp_session;
 +  session->retransmit_requests_window++;
- 
--  rtp_session = session->master_session->rtp_session;
++
 +  if (len <= 0)
 +    return;
 +  if (len > AIRPLAY_RESEND_MAX_LEN)
@@ -838,7 +1475,8 @@ index 4290b75..d9591c4 100644
 +	  session->resend_tokens_ts = now;
 +	}
 +    }
-+
+ 
+-  rtp_session = session->master_session->rtp_session;
 +  // Duplicate / overlapping request within the dedup window — Bluesound will
 +  // re-ask when a resend is still in flight; honouring every copy doubles
 +  // UDP load on the live audio path.
@@ -949,7 +1587,7 @@ index 4290b75..d9591c4 100644
  }
  
  static int
-@@ -2162,6 +2467,10 @@ packets_sync_send(struct airplay_master_session *ams)
+@@ -2162,6 +2912,10 @@ packets_sync_send(struct airplay_master_session *ams)
    struct airplay_session *session;
    struct timespec ts;
    bool is_sync_time;
@@ -960,7 +1598,7 @@ index 4290b75..d9591c4 100644
  
    // Check if it is time send a sync packet to sessions that are already running
    is_sync_time = rtp_sync_is_time(ams->rtp_session);
-@@ -2177,6 +2486,24 @@ packets_sync_send(struct airplay_master_session *ams)
+@@ -2177,6 +2931,24 @@ packets_sync_send(struct airplay_master_session *ams)
        cur_stamp = ams->cur_stamp;
  
        // Apply user configured offset
@@ -985,7 +1623,7 @@ index 4290b75..d9591c4 100644
        cur_stamp.pos -= session->offset_samples;
  
        // A device has joined and should get an init sync packet
-@@ -2193,6 +2520,43 @@ packets_sync_send(struct airplay_master_session *ams)
+@@ -2193,6 +2965,43 @@ packets_sync_send(struct airplay_master_session *ams)
  	{
  	  sync_pkt = rtp_sync_packet_next(ams->rtp_session, cur_stamp, 0x80);
  	  control_packet_send(session, sync_pkt);
@@ -1029,7 +1667,7 @@ index 4290b75..d9591c4 100644
  	}
      }
  }
-@@ -3035,6 +3399,26 @@ response_handler_record(struct evrtsp_request *req, struct airplay_session *sess
+@@ -3035,6 +3844,26 @@ response_handler_record(struct evrtsp_request *req, struct airplay_session *sess
    return AIRPLAY_SEQ_CONTINUE;
  }
  
@@ -1056,7 +1694,7 @@ index 4290b75..d9591c4 100644
  static enum airplay_seq_type
  response_handler_setup_stream(struct evrtsp_request *req, struct airplay_session *session)
  {
-@@ -3097,6 +3481,9 @@ response_handler_setup_stream(struct evrtsp_request *req, struct airplay_session
+@@ -3097,6 +3926,9 @@ response_handler_setup_stream(struct evrtsp_request *req, struct airplay_session
        goto error;
      }
  
@@ -1066,7 +1704,7 @@ index 4290b75..d9591c4 100644
    session->state = AIRPLAY_STATE_SETUP;
  
    plist_free(response);
-@@ -3623,14 +4010,14 @@ static struct airplay_seq_definition airplay_seq_definition[] =
+@@ -3623,14 +4455,14 @@ static struct airplay_seq_definition airplay_seq_definition[] =
    { AIRPLAY_SEQ_STOP, session_success, session_failure },
    { AIRPLAY_SEQ_FAILURE, session_success, session_failure},
    { AIRPLAY_SEQ_PIN_START, session_success, session_failure },
@@ -1083,7 +1721,7 @@ index 4290b75..d9591c4 100644
  };
  
  // The size of the second array dimension MUST at least be the size of largest
-@@ -3669,7 +4056,7 @@ static struct airplay_seq_request airplay_seq_request[][7] =
+@@ -3669,7 +4501,7 @@ static struct airplay_seq_request airplay_seq_request[][7] =
      { AIRPLAY_SEQ_PIN_START, "PIN start", EVRTSP_REQ_POST, payload_make_pin_start, response_handler_pin_start, NULL, "/pair-pin-start", false },
    },
    {
@@ -1092,7 +1730,7 @@ index 4290b75..d9591c4 100644
    },
    {
      { AIRPLAY_SEQ_SEND_TEXT, "SET_PARAMETER (text)", EVRTSP_REQ_SET_PARAMETER, payload_make_send_text, NULL, "application/x-dmap-tagged", NULL, true },
-@@ -3816,7 +4203,13 @@ sequence_continue(struct airplay_seq_ctx *seq_ctx)
+@@ -3816,7 +4648,13 @@ sequence_continue(struct airplay_seq_ctx *seq_ctx)
  
    ret = evrtsp_make_request(session->ctrl, req, cur_request->rtsp_type, uri);
    if (ret < 0)
@@ -1107,7 +1745,7 @@ index 4290b75..d9591c4 100644
  
    evrtsp_connection_set_closecb(session->ctrl, NULL, NULL);
  
-@@ -3830,11 +4223,13 @@ sequence_continue(struct airplay_seq_ctx *seq_ctx)
+@@ -3830,11 +4668,13 @@ sequence_continue(struct airplay_seq_ctx *seq_ctx)
    if (req)
      evrtsp_request_free(req);
  
@@ -1126,7 +1764,15 @@ index 4290b75..d9591c4 100644
  
    free(seq_ctx);
  }
-@@ -4276,6 +4671,7 @@ airplay_write(struct output_buffer *obuf)
+@@ -4257,6 +5097,7 @@ airplay_write(struct output_buffer *obuf)
+ 	  while (evbuffer_get_length(ams->input_buffer) >= ams->rawbuf_size)
+ 	    {
+ 	      evbuffer_remove(ams->input_buffer, ams->rawbuf, ams->rawbuf_size);
++	      channel_mix_process(ams);
+ 	      ams->input_buffer_samples -= ams->samples_per_packet;
+ 
+ 	      packets_send(ams);
+@@ -4276,6 +5117,7 @@ airplay_write(struct output_buffer *obuf)
  	evtimer_add(keep_alive_timer, &keep_alive_tv);
  
        session->state = AIRPLAY_STATE_STREAMING;
@@ -1280,7 +1926,7 @@ index 5b3d418..b1b05ea 100644
    return session;
  }
 diff --git a/src/player.c b/src/player.c
-index f9ce616..3c4c9b3 100644
+index f9ce616..038bdfe 100644
 --- a/src/player.c
 +++ b/src/player.c
 @@ -58,6 +58,12 @@
@@ -1319,7 +1965,16 @@ index f9ce616..3c4c9b3 100644
  
  // Shorthand condition for outputs_start and outputs_device_start, both need to
  // know if they should only probe the device, or fully start it.
-@@ -239,6 +256,10 @@ struct player_source
+@@ -155,6 +172,8 @@ struct speaker_attr_param
+   struct media_quality quality;
+   enum media_format format;
+   int offset_ms;
++  int channel_mix;
++  bool rear_direct;
+ 
+   int audio_fd;
+   int metadata_fd;
+@@ -239,6 +258,10 @@ struct player_source
    // This should at any time match the millisecond position of the media that is
    // coming out of your device. Will be 0 during initial buffering.
    uint32_t pos_ms;
@@ -1330,7 +1985,7 @@ index f9ce616..3c4c9b3 100644
  
    // How many samples the outputs buffer before playing (=delay)
    int output_buffer_samples;
-@@ -261,6 +282,9 @@ struct player_session
+@@ -261,6 +284,9 @@ struct player_session
    // It will be equal to:
    // pts = start_ts + ticks_elapsed * player_tick_interval
    struct timespec pts;
@@ -1340,7 +1995,7 @@ index f9ce616..3c4c9b3 100644
  
    // Equals current number of samples written to outputs
    uint32_t pos;
-@@ -313,6 +337,10 @@ static int clear_queue_on_stop_disabled;
+@@ -313,6 +339,10 @@ static int clear_queue_on_stop_disabled;
  
  // Player status
  static enum play_status player_state;
@@ -1351,7 +2006,7 @@ index f9ce616..3c4c9b3 100644
  static enum repeat_mode repeat;
  static char shuffle;
  static char consume;
-@@ -327,6 +355,17 @@ static struct event *pb_timer_ev;
+@@ -327,6 +357,17 @@ static struct event *pb_timer_ev;
  
  // Time between ticks, i.e. time between when playback_cb() is invoked
  static struct timespec player_tick_interval;
@@ -1369,7 +2024,7 @@ index f9ce616..3c4c9b3 100644
  // Timer resolution
  static struct timespec player_timer_res;
  
-@@ -855,6 +894,7 @@ session_update_read_start(uint32_t seek_ms)
+@@ -855,6 +896,7 @@ session_update_read_start(uint32_t seek_ms)
      return;
  
    pb_session.reading_now->pos_ms     = seek_ms;
@@ -1377,7 +2032,7 @@ index f9ce616..3c4c9b3 100644
    pb_session.reading_now->seek_ms    = seek_ms;
    pb_session.reading_now->read_start = pb_session.pos;
  
-@@ -864,7 +904,7 @@ session_update_read_start(uint32_t seek_ms)
+@@ -864,7 +906,7 @@ session_update_read_start(uint32_t seek_ms)
  static inline void
  session_update_read(int nsamples)
  {
@@ -1386,7 +2041,7 @@ index f9ce616..3c4c9b3 100644
  
    // Did we just complete our first read? Then set the start timestamp
    if (pb_session.start_ts.tv_sec == 0)
-@@ -881,11 +921,13 @@ session_update_read(int nsamples)
+@@ -881,11 +923,13 @@ session_update_read(int nsamples)
    if (!pb_session.playing_now->quality.sample_rate)
      return;
  
@@ -1403,7 +2058,7 @@ index f9ce616..3c4c9b3 100644
  }
  
  static void
-@@ -928,9 +970,94 @@ session_update_read_quality(struct media_quality *quality)
+@@ -928,9 +972,94 @@ session_update_read_quality(struct media_quality *quality)
  static void
  session_update_read_ts(struct timespec *ts)
  {
@@ -1482,12 +2137,12 @@ index f9ce616..3c4c9b3 100644
 +	pb_session.last_pts_slew_ts = now_ts;
 +      goto out;
 +    }
- 
++
 +  diff = timespec_sub(pb_session.pts, now_ts);
 +  diff_ms = (int64_t)diff.tv_sec * 1000 + diff.tv_nsec / 1000000;
 +  if (diff_ms < PTS_AHEAD_DEADBAND_MS)
 +    goto out;
-+
+ 
 +  DPRINTF(E_LOG, L_PLAYER,
 +    "AI event=pts_clamp_ahead diff_ms=%" PRIi64 "\n",
 +    diff_ms);
@@ -1499,7 +2154,7 @@ index f9ce616..3c4c9b3 100644
  }
  
  static void
-@@ -947,7 +1074,10 @@ static void
+@@ -947,7 +1076,10 @@ static void
  session_update_play_metadata(struct input_metadata *metadata)
  {
    if (metadata->pos_is_updated)
@@ -1511,7 +2166,7 @@ index f9ce616..3c4c9b3 100644
    if (metadata->len_ms)
      pb_session.playing_now->len_ms = metadata->len_ms;
  }
-@@ -961,6 +1091,17 @@ session_restart(void)
+@@ -961,6 +1093,17 @@ session_restart(void)
    pb_session.pts.tv_nsec = 0;
    pb_session.read_deficit = 0;
    pb_session.metadata_sent = 0;
@@ -1529,7 +2184,7 @@ index f9ce616..3c4c9b3 100644
  }
  
  static void
-@@ -1272,7 +1413,10 @@ static void
+@@ -1272,7 +1415,10 @@ static void
  playback_cb(int fd, short what, void *arg)
  {
    struct timespec ts;
@@ -1540,7 +2195,7 @@ index f9ce616..3c4c9b3 100644
    int nbytes;
    int nsamples;
    int i;
-@@ -1280,20 +1424,161 @@ playback_cb(int fd, short what, void *arg)
+@@ -1280,20 +1426,161 @@ playback_cb(int fd, short what, void *arg)
  
    // Check if we missed any timer expirations
    overrun = 0;
@@ -1708,7 +2363,7 @@ index f9ce616..3c4c9b3 100644
    // We are too delayed, probably some output blocked: reset if first overrun or abort if second overrun
    if (overrun > pb_write_deficit_max)
      {
-@@ -1317,7 +1602,7 @@ playback_cb(int fd, short what, void *arg)
+@@ -1317,7 +1604,7 @@ playback_cb(int fd, short what, void *arg)
    else
      {
        if (overrun > 1) // An overrun of 1 is no big deal
@@ -1717,7 +2372,7 @@ index f9ce616..3c4c9b3 100644
  
        pb_write_recovery = false;
      }
-@@ -1344,6 +1629,11 @@ playback_cb(int fd, short what, void *arg)
+@@ -1344,6 +1631,11 @@ playback_cb(int fd, short what, void *arg)
  	}
        if (nbytes == 0)
  	{
@@ -1729,7 +2384,7 @@ index f9ce616..3c4c9b3 100644
  	  break;
  	}
  
-@@ -1372,6 +1662,17 @@ playback_cb(int fd, short what, void *arg)
+@@ -1372,6 +1664,17 @@ playback_cb(int fd, short what, void *arg)
  	}
      }
  
@@ -1747,7 +2402,7 @@ index f9ce616..3c4c9b3 100644
    if (pb_session.read_deficit_max && pb_session.read_deficit > pb_session.read_deficit_max)
      {
        DPRINTF(E_LOG, L_PLAYER, "Source is not providing sufficient data, temporarily suspending playback (deficit=%zu/%zu bytes)\n",
-@@ -1507,13 +1808,23 @@ device_streaming_cb(struct output_device *device, enum output_device_state statu
+@@ -1507,13 +1810,23 @@ device_streaming_cb(struct output_device *device, enum output_device_state statu
  
        // The device can fail outside of playback, e.g. if it disconnects after a
        // flush command
@@ -1776,7 +2431,7 @@ index f9ce616..3c4c9b3 100644
  	goto out;
  
        DPRINTF(E_LOG, L_PLAYER, "Attempting reconnection in %d sec to the %s device '%s'\n", PLAYER_SPEAKER_RESURRECT_TIME, device->type_name, device->name);
-@@ -1524,6 +1835,58 @@ device_streaming_cb(struct output_device *device, enum output_device_state statu
+@@ -1524,6 +1837,58 @@ device_streaming_cb(struct output_device *device, enum output_device_state statu
    else if (status == OUTPUT_STATE_STOPPED)
      {
        DPRINTF(E_INFO, L_PLAYER, "The %s device '%s' stopped\n", device->type_name, device->name);
@@ -1835,7 +2490,7 @@ index f9ce616..3c4c9b3 100644
      }
    else
      {
-@@ -1541,19 +1904,27 @@ device_streaming_cb(struct output_device *device, enum output_device_state statu
+@@ -1541,19 +1906,27 @@ device_streaming_cb(struct output_device *device, enum output_device_state statu
  static void
  device_volume_cb(struct output_device *device, enum output_device_state status)
  {
@@ -1863,7 +2518,7 @@ index f9ce616..3c4c9b3 100644
    outputs_device_cb_set(device, device_streaming_cb);
  
   out:
-@@ -1562,7 +1933,7 @@ device_volume_cb(struct output_device *device, enum output_device_state status)
+@@ -1562,7 +1935,7 @@ device_volume_cb(struct output_device *device, enum output_device_state status)
    if (outputs_sessions_count() == 0)
      pb_suspend();
  
@@ -1872,7 +2527,7 @@ index f9ce616..3c4c9b3 100644
  }
  
  static void
-@@ -1691,7 +2062,25 @@ pb_timer_start(void)
+@@ -1691,7 +2064,25 @@ pb_timer_start(void)
    // playback loop has been kicked off, we deactivate them
    outputs_stop_delayed_cancel();
  
@@ -1898,7 +2553,7 @@ index f9ce616..3c4c9b3 100644
    if (ret < 0)
      {
        DPRINTF(E_LOG, L_PLAYER, "Could not add playback timer\n");
-@@ -1705,7 +2094,8 @@ pb_timer_start(void)
+@@ -1705,7 +2096,8 @@ pb_timer_start(void)
  #ifdef HAVE_TIMERFD
    ret = timerfd_settime(pb_timer_fd, 0, &tick, NULL);
  #else
@@ -1908,7 +2563,7 @@ index f9ce616..3c4c9b3 100644
  #endif
    if (ret < 0)
      {
-@@ -1730,7 +2120,7 @@ pb_timer_stop(void)
+@@ -1730,7 +2122,7 @@ pb_timer_stop(void)
  #ifdef HAVE_TIMERFD
    ret = timerfd_settime(pb_timer_fd, 0, &tick, NULL);
  #else
@@ -1917,7 +2572,7 @@ index f9ce616..3c4c9b3 100644
  #endif
    if (ret < 0)
      {
-@@ -1803,6 +2193,7 @@ pb_session_stop(void)
+@@ -1803,6 +2195,7 @@ pb_session_stop(void)
  static void
  pb_abort(void)
  {
@@ -1925,7 +2580,7 @@ index f9ce616..3c4c9b3 100644
    // Immediate stop of all outputs
    outputs_stop(device_streaming_cb);
    outputs_metadata_purge();
-@@ -1984,6 +2375,7 @@ playing_now(void *arg, int *retval)
+@@ -1984,6 +2377,7 @@ playing_now(void *arg, int *retval)
  static enum command_state
  playback_stop(void *arg, int *retval)
  {
@@ -1933,7 +2588,7 @@ index f9ce616..3c4c9b3 100644
    if (player_state == PLAY_STOPPED)
      {
        *retval = 0;
-@@ -2030,6 +2422,7 @@ playback_start_bh(void *arg, int *retval)
+@@ -2030,6 +2424,7 @@ playback_start_bh(void *arg, int *retval)
  
    // We also ask listeners to update speaker/volume state, since it is possible
    // some of the speakers we tried to start responded with failure
@@ -1941,7 +2596,7 @@ index f9ce616..3c4c9b3 100644
    status_update(PLAY_PLAYING, LISTENER_PLAYER | LISTENER_SPEAKER | LISTENER_VOLUME);
  
    *retval = 0;
-@@ -2470,6 +2863,7 @@ playback_pause_bh(void *arg, int *retval)
+@@ -2470,6 +2865,7 @@ playback_pause_bh(void *arg, int *retval)
  static enum command_state
  playback_pause(void *arg, int *retval)
  {
@@ -1949,7 +2604,7 @@ index f9ce616..3c4c9b3 100644
    if (player_state == PLAY_STOPPED)
      {
        *retval = -1;
-@@ -2498,6 +2892,7 @@ playback_pause(void *arg, int *retval)
+@@ -2498,6 +2894,7 @@ playback_pause(void *arg, int *retval)
  static enum command_state
  playback_flush(void *arg, int *retval)
  {
@@ -1957,7 +2612,16 @@ index f9ce616..3c4c9b3 100644
    if (player_state == PLAY_STOPPED)
      {
        *retval = -1;
-@@ -2562,6 +2957,8 @@ device_to_speaker_info(struct player_speaker_info *spk, struct output_device *de
+@@ -2551,6 +2948,8 @@ device_to_speaker_info(struct player_speaker_info *spk, struct output_device *de
+   spk->relvol = device->relvol;
+   spk->absvol = device->volume;
+   spk->offset_ms = device->offset_ms;
++  spk->channel_mix = device->channel_mix;
++  spk->rear_direct = outputs_rear_direct;
+ 
+   spk->supported_formats = device->supported_formats;
+   // Devices supporting more than one format should at least have default_format set
+@@ -2562,6 +2961,8 @@ device_to_speaker_info(struct player_speaker_info *spk, struct output_device *de
      spk->format = device->supported_formats;
  
    spk->selected = OUTPUTS_DEVICE_DISPLAY_SELECTED(device);
@@ -1966,7 +2630,58 @@ index f9ce616..3c4c9b3 100644
  
    spk->has_password = device->has_password;
    spk->has_video = device->has_video;
-@@ -2978,6 +3375,9 @@ speaker_resurrect(void *arg, int *retval)
+@@ -2921,6 +3322,50 @@ speaker_format_set(void *arg, int *retval)
+   return COMMAND_END;
+ }
+ 
++// Runs on the player thread, the same thread that mixes the rear streams.
++static enum command_state
++rear_direct_set(void *arg, int *retval)
++{
++  struct speaker_attr_param *param = arg;
++
++  outputs_rear_direct = param->rear_direct;
++  *retval = 0;
++  return COMMAND_END;
++}
++
++static enum command_state
++speaker_channel_mix_set(void *arg, int *retval)
++{
++  struct speaker_attr_param *param = arg;
++  struct output_device *device;
++
++  if (param->channel_mix < 0 || param->channel_mix > 2)
++    goto error;
++
++  device = outputs_device_get(param->spk_id);
++  if (!device)
++    goto error;
++
++  // Read when the speaker's AirPlay session is set up, so a running session
++  // keeps its mix until it is restarted (same rule as offset_ms).
++  device->channel_mix = param->channel_mix;
++
++  if (player_state == PLAY_PAUSED)
++    *retval = outputs_device_stop(device, device_shutdown_cb);
++  else
++    *retval = 0;
++
++  if (*retval > 0)
++    return COMMAND_PENDING; // async
++
++  return COMMAND_END;
++
++ error:
++  DPRINTF(E_LOG, L_PLAYER, "Error setting channel_mix %d\n", param->channel_mix);
++  *retval = -1;
++  return COMMAND_END;
++}
++
+ static enum command_state
+ speaker_offset_ms_set(void *arg, int *retval)
+ {
+@@ -2978,6 +3423,9 @@ speaker_resurrect(void *arg, int *retval)
        // Playback was suspended by device_streaming_cb() because the speaker was
        // the only one playing. In that case we need to first resume the source,
        // then wait for the speaker to reactivate, and then run bottom half.
@@ -1976,7 +2691,35 @@ index f9ce616..3c4c9b3 100644
        *retval = pb_resume();
        if (*retval < 0)
  	goto out;
-@@ -3900,6 +4300,35 @@ player_raop_verification_kickoff(char **arglist)
+@@ -3661,6 +4109,27 @@ player_speaker_format_set(uint64_t id, enum media_format format)
+   return commands_exec_sync(cmdbase, speaker_format_set, speaker_generic_bh, &param);
+ }
+ 
++int
++player_rear_direct_set(bool direct)
++{
++  struct speaker_attr_param param;
++
++  param.rear_direct = direct;
++
++  return commands_exec_sync(cmdbase, rear_direct_set, NULL, &param);
++}
++
++int
++player_speaker_channel_mix_set(uint64_t id, int channel_mix)
++{
++  struct speaker_attr_param param;
++
++  param.spk_id = id;
++  param.channel_mix = channel_mix;
++
++  return commands_exec_sync(cmdbase, speaker_channel_mix_set, speaker_generic_bh, &param);
++}
++
+ int
+ player_speaker_offset_ms_set(uint64_t id, int offset_ms)
+ {
+@@ -3900,6 +4369,35 @@ player_raop_verification_kickoff(char **arglist)
  
  /* ---------------------------- Thread: player ------------------------------ */
  
@@ -2012,7 +2755,7 @@ index f9ce616..3c4c9b3 100644
  static void *
  player(void *arg)
  {
-@@ -3907,6 +4336,9 @@ player(void *arg)
+@@ -3907,6 +4405,9 @@ player(void *arg)
    int ret;
  
    thread_setname("player");
@@ -2022,7 +2765,7 @@ index f9ce616..3c4c9b3 100644
  
    ret = db_perthread_init();
    if (ret < 0)
-@@ -3998,7 +4430,7 @@ player_init(void)
+@@ -3998,7 +4499,7 @@ player_init(void)
  #ifdef HAVE_TIMERFD
    CHECK_NULL(L_PLAYER, pb_timer_ev = event_new(evbase_player, pb_timer_fd, EV_READ | EV_PERSIST, playback_cb, NULL));
  #else
@@ -2032,10 +2775,17 @@ index f9ce616..3c4c9b3 100644
    CHECK_NULL(L_PLAYER, cmdbase = commands_base_new(evbase_player, NULL));
  
 diff --git a/src/player.h b/src/player.h
-index 258d8e1..bf34b6d 100644
+index 258d8e1..fa1c46e 100644
 --- a/src/player.h
 +++ b/src/player.h
-@@ -42,6 +42,10 @@ struct player_speaker_info {
+@@ -37,11 +37,17 @@ struct player_speaker_info {
+   int relvol;
+   int absvol;
+   int offset_ms;
++  int channel_mix;
++  bool rear_direct;
+ 
+   enum media_format format;
    uint32_t supported_formats;
  
    bool selected;
@@ -2046,6 +2796,19 @@ index 258d8e1..bf34b6d 100644
    bool has_password;
    bool requires_auth;
    bool needs_auth_key;
+@@ -135,6 +141,12 @@ player_speaker_format_set(uint64_t id, enum media_format format);
+ int
+ player_speaker_offset_ms_set(uint64_t id, int offset_ms);
+ 
++int
++player_speaker_channel_mix_set(uint64_t id, int channel_mix);
++
++int
++player_rear_direct_set(bool direct);
++
+ int
+ player_streaming_register(int *audio_fd, int *metadata_fd, enum media_format format, struct media_quality quality);
+ 
 diff --git a/src/ptpd.c b/src/ptpd.c
 index 0fa7736..55a16b0 100644
 --- a/src/ptpd.c
