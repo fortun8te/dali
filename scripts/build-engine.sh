@@ -11,8 +11,13 @@ export ACLOCAL_PATH="$BREW_PREFIX/share/gettext/m4${ACLOCAL_PATH:+:$ACLOCAL_PATH
 export CFLAGS="-I$BREW_PREFIX/include -I$BREW_PREFIX/opt/sqlite/include -I$ENGINE_DEPS/include"
 export LDFLAGS="-L$BREW_PREFIX/lib -L$BREW_PREFIX/opt/sqlite/lib -L$ENGINE_DEPS/lib"
 export PKG_CONFIG_PATH="$ENGINE_DEPS/lib/pkgconfig:$BREW_PREFIX/lib/pkgconfig:$BREW_PREFIX/opt/openssl@3/lib/pkgconfig:$BREW_PREFIX/opt/sqlite/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
-export YACC="$BREW_PREFIX/opt/bison/bin/bison -y"
-export LEX="$BREW_PREFIX/opt/flex/bin/flex"
+# Prefer Homebrew tools if installed; macOS also ships working flex/bison.
+ENGINE_BISON="$BREW_PREFIX/opt/bison/bin/bison"
+ENGINE_FLEX="$BREW_PREFIX/opt/flex/bin/flex"
+[ -x "$ENGINE_BISON" ] || ENGINE_BISON="$(command -v bison)"
+[ -x "$ENGINE_FLEX" ] || ENGINE_FLEX="$(command -v flex)"
+export YACC="$ENGINE_BISON -y"
+export LEX="$ENGINE_FLEX"
 [ -f third_party/owntone/configure.ac ] || { echo 'Included engine source missing. Use the public source checkout.'; exit 1; }
 mkdir -p build/engine-src
 # Configure generates files: isolate them from the published source snapshot.
@@ -31,5 +36,8 @@ rsync -a third_party/owntone/ build/engine-src/owntone/
   ./configure --prefix="$ENGINE_PREFIX" --sysconfdir="$ENGINE_PREFIX/etc" --localstatedir="$ENGINE_PREFIX/var"
   make -j4
 )
-./scripts/vendor-owntone.sh "$ROOT/build/engine-src/owntone/src/owntone"
+./scripts/vendor-owntone.sh "$ROOT/build/engine-src/owntone/src/owntone" \
+  "$ROOT/build/engine-src/owntone/sqlext/.libs/owntone-sqlext.so" \
+  "$ROOT/build/engine-src/owntone/htdocs"
+python3 scripts/tests/engine-packaging.py
 echo 'Engine built and vendored. Nothing was installed or launched.'

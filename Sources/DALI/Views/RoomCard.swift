@@ -5,6 +5,10 @@ import SwiftUI
 
 struct RoomCard: View {
     @Environment(DALIStore.self) private var store
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+    @Environment(\.colorSchemeContrast) private var contrast
+    /// Where the pointer is over the card, so the glow's lines can lean toward it.
+    @State private var pointer: CGPoint?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -17,13 +21,30 @@ struct RoomCard: View {
                     if let front = store.front { PairRow(speaker: front, title: "Front") }
                     if let back = store.back { PairRow(speaker: back, title: "Back") }
                 }
-                .frame(height: PanelMetrics.rowHeight * 2, alignment: .top)
+                .frame(height: PanelMetrics.rowHeight * 2
+                    + SpeakerLoudnessAdjustment.height(for: store.front, in: store)
+                    + SpeakerLoudnessAdjustment.height(for: store.back, in: store), alignment: .top)
                 .padding(.horizontal, Space.m + 2)
                 .padding(.bottom, Space.s)
             } else {
                 SpeakerList()
                     .padding(Space.m)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+            }
+        }
+        .background {
+            // Reduce Transparency / Increase Contrast: no light effect, flat card.
+            if !reduceTransparency && contrast != .increased {
+                ZStack {
+                    RoomBloom(lit: store.phase == .streaming).equatable()
+                    LivingBloom(pointer: pointer)
+                }
+            }
+        }
+        .onContinuousHover { phase in
+            switch phase {
+            case .active(let point): pointer = point
+            case .ended: pointer = nil
             }
         }
         .clipShape(RoundedRectangle(cornerRadius: Radius.card, style: .continuous))
@@ -51,6 +72,102 @@ struct RoomCard: View {
     }
 }
 
+/// The blue bloom pooling along the bottom of the room card: the app icon's light,
+/// the same ramp as Z1's card. Three static layers, no state, no animation, no
+/// timers, so it costs nothing while the room is idle, and the view is Equatable
+/// so store updates never redraw it:
+///  - a tall rim band, deep at the top of the glow to periwinkle at the edge,
+///  - a wide soft swell under it, so it reads as light pooling and not a stripe,
+///  - a bright thin core on the very edge, where the glow is strongest.
+/// A faint grain over the glow stops the long dark gradient from banding.
+struct RoomBloom: View, Equatable {
+    /// The glow warms a little while the room is live. One state change, one fade:
+    /// still no timers.
+    var lit = false
+    private static let rise: CGFloat = 0.44
+    private static let rim = Gradient(stops: [
+        Gradient.Stop(color: Color.bloomDeep.opacity(0), location: 0),
+        Gradient.Stop(color: Color.bloomDeep.opacity(0.10), location: 0.30),
+        Gradient.Stop(color: Color.bloomDeep.opacity(0.26), location: 0.55),
+        Gradient.Stop(color: Color.bloomMid.opacity(0.46), location: 0.78),
+        Gradient.Stop(color: Color.bloomPeriwinkle.opacity(0.66), location: 1),
+    ])
+    private static let swell = Gradient(stops: [
+        Gradient.Stop(color: Color.bloomSwell.opacity(0.42), location: 0),
+        Gradient.Stop(color: Color.bloomSwell.opacity(0.17), location: 0.5),
+        Gradient.Stop(color: Color.bloomSwell.opacity(0), location: 1),
+    ])
+    private static let core = Gradient(stops: [
+        Gradient.Stop(color: Color.bloomHighlight.opacity(0), location: 0),
+        Gradient.Stop(color: Color.bloomHighlight.opacity(0.30), location: 0.5),
+        Gradient.Stop(color: Color.bloomHighlight.opacity(0), location: 1),
+    ])
+
+    var body: some View {
+        GeometryReader { proxy in
+            bloom(width: proxy.size.width, height: proxy.size.height * Self.rise)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+                .opacity(lit ? 1 : 0.88)
+                .animation(Motion.fade, value: lit)
+        }
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
+    }
+
+    private func bloom(width: CGFloat, height: CGFloat) -> some View {
+        let band = LinearGradient(gradient: Self.rim, startPoint: .top, endPoint: .bottom)
+        // Centred on the bottom edge and finished before its frame ends, so the pool
+        // dissolves into the card instead of ending in a visible curve.
+        let pool = RadialGradient(gradient: Self.swell, center: .bottom, startRadius: 0, endRadius: width * 0.62)
+        let edge = LinearGradient(gradient: Self.core, startPoint: .leading, endPoint: .trailing)
+        return ZStack(alignment: .bottom) {
+            Rectangle().fill(band).frame(height: height)
+            Rectangle().fill(pool).frame(width: width * 1.4, height: width * 0.7)
+            // Two off-axis tints, a violet-leaning blue low left and an azure low right,
+            // so the glow has colour depth like the icon's, not one flat blue. Soft blurred
+            // discs, not gradient rectangles, so no edge can show anywhere.
+            Circle().fill(Color.bloomViolet.opacity(0.26))
+                .frame(width: width * 0.8, height: width * 0.8)
+                .blur(radius: width * 0.16)
+                .offset(x: -width * 0.36, y: width * 0.30)
+            Circle().fill(Color.bloomAzure.opacity(0.30))
+                .frame(width: width * 0.7, height: width * 0.7)
+                .blur(radius: width * 0.15)
+                .offset(x: width * 0.40, y: width * 0.30)
+            Rectangle().fill(edge).frame(height: 1.5)
+            // Grain only inside the glow, faded in from nothing so it has no top edge.
+            GrainOverlay().frame(height: height)
+                .mask(LinearGradient(colors: [.clear, .black], startPoint: .top, endPoint: .init(x: 0.5, y: 0.7)))
+        }
+    }
+}
+
+/// A fixed tile of fine monochrome noise, repeated, to dither dark gradients.
+private struct GrainOverlay: View {
+    private static let tile: Image = {
+        let side = 96
+        var bytes = [UInt8](repeating: 0, count: side * side * 4)
+        var seed: UInt64 = 0x9E3779B97F4A7C15
+        for i in 0..<(side * side) {
+            seed = seed &* 6364136223846793005 &+ 1442695040888963407
+            let v = UInt8((seed >> 33) & 0xFF)
+            bytes[i * 4] = v; bytes[i * 4 + 1] = v; bytes[i * 4 + 2] = v
+            bytes[i * 4 + 3] = UInt8(v / 22)    // alpha up to ~5%: a whisper that only breaks up banding
+        }
+        let provider = CGDataProvider(data: Data(bytes) as CFData)!
+        let image = CGImage(width: side, height: side, bitsPerComponent: 8, bitsPerPixel: 32,
+                            bytesPerRow: side * 4, space: CGColorSpaceCreateDeviceRGB(),
+                            bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue),
+                            provider: provider, decode: nil, shouldInterpolate: false,
+                            intent: .defaultIntent)!
+        return Image(decorative: image, scale: 2)
+    }()
+
+    var body: some View {
+        Self.tile.resizable(resizingMode: .tile).allowsHitTesting(false).blendMode(.plusLighter)
+    }
+}
+
 /// One pair: status, name (click to switch it on/off), its own volume.
 struct PairRow: View {
     @Environment(DALIStore.self) private var store
@@ -58,37 +175,123 @@ struct PairRow: View {
     let title: String
 
     var body: some View {
-        HStack(spacing: Space.m) {
-            Button { store.toggle(speaker) } label: {
-                HStack(spacing: Space.s) {
-                    StatusDot(tone: store.tone(for: speaker),
-                              pulsing: speaker.enabled && speaker.health == .connecting)
-                    Text(title)
-                        .font(.body13Medium)
-                        .foregroundStyle(speaker.enabled ? Color.paper : Color.paper38)
+        VStack(spacing: 0) {
+            HStack(spacing: Space.m) {
+                Button { store.toggle(speaker) } label: {
+                    HStack(spacing: Space.s) {
+                        StatusDot(tone: store.tone(for: speaker),
+                                  pulsing: speaker.enabled && speaker.health == .connecting)
+                        Text(title)
+                            .font(.body13Medium)
+                            .foregroundStyle(speaker.enabled ? Color.paper : Color.paper38)
+                    }
+                    .frame(width: 64, alignment: .leading)
+                    .contentShape(Rectangle())
                 }
-                .frame(width: 64, alignment: .leading)
-                .contentShape(Rectangle())
+                .buttonStyle(.plain)
+                .help(speaker.available ? "\(speaker.name) — click to switch \(speaker.enabled ? "off" : "on")"
+                                        : "\(speaker.name) is unavailable")
+                .accessibilityLabel("\(title) speakers")
+                .accessibilityValue(speaker.enabled ? "On" : "Off")
+
+                DALISlider(value: Binding(get: { speaker.relVolume },
+                                          set: { store.setRelVolume($0, for: speaker) }),
+                           live: store.isLit(speaker), enabled: speaker.enabled)
+                    .accessibilityLabel("\(title) volume")
+
+                Text("\(safeInt(speaker.relVolume))")
+                    .font(.readout)
+                    .foregroundStyle(speaker.enabled ? Color.paper62 : Color.paper38)
+                    .contentTransition(.numericText(value: speaker.relVolume))
+                    .animation(Motion.fade, value: safeInt(speaker.relVolume))
+                    .frame(width: 28, alignment: .trailing)
             }
-            .buttonStyle(.plain)
-            .help(speaker.available ? "\(speaker.name) — click to switch \(speaker.enabled ? "off" : "on")"
-                                    : "\(speaker.name) is unavailable")
-            .accessibilityLabel("\(title) speakers")
-            .accessibilityValue(speaker.enabled ? "On" : "Off")
-
-            DALISlider(value: Binding(get: { speaker.relVolume },
-                                      set: { store.setRelVolume($0, for: speaker) }),
-                       live: store.isLit(speaker), enabled: speaker.enabled)
-                .accessibilityLabel("\(title) volume")
-
-            Text("\(safeInt(speaker.relVolume))")
-                .font(.readout)
-                .foregroundStyle(speaker.enabled ? Color.paper62 : Color.paper38)
-                .contentTransition(.numericText(value: speaker.relVolume))
-                .animation(Motion.fade, value: safeInt(speaker.relVolume))
-                .frame(width: 28, alignment: .trailing)
+            .frame(height: PanelMetrics.rowHeight)
+            SpeakerLoudnessAdjustment(speaker: speaker)
+                .padding(.leading, 64 + Space.m)
         }
-        .frame(height: PanelMetrics.rowHeight)
+    }
+}
+
+/// Where the user trims a speaker's loudness, right under its volume slider.
+/// A speaker with a leveling curve (MICHAEL D) has exactly one control, Balance,
+/// which shifts the whole curve by -30...+30 %. Other speakers show their saved
+/// fixed adjustment with Reset, as before.
+struct SpeakerLoudnessAdjustment: View {
+    @Environment(DALIStore.self) private var store
+    let speaker: RoomSpeaker
+
+    @MainActor static func height(for speaker: RoomSpeaker?, in store: DALIStore) -> CGFloat {
+        speaker.map { $0.levelCurve == nil && $0.gain != 1 ? 20 : 0 } ?? 0
+    }
+
+    var body: some View {
+        // A speaker with a leveling curve keeps its trim in Settings > Room > Fine
+        // tuning, not under every volume slider. The saved value still applies.
+        if speaker.levelCurve != nil {
+            EmptyView()
+        } else if speaker.gain != 1 {
+            HStack(spacing: Space.s) {
+                Text("Adjustment: \(safeInt((speaker.gain * 100).rounded()))%")
+                    .font(.caption).foregroundStyle(Color.paper62)
+                Spacer(minLength: 0)
+                Button("Reset") { store.setGain(1, for: speaker) }
+                    .buttonStyle(.plain).font(.captionMedium)
+                    .foregroundStyle(Color.paper)
+                    .accessibilityLabel("Reset \(speaker.name) loudness adjustment")
+                    .help("Set this speaker's adjustment to 100%")
+            }
+            .frame(height: 20)
+        }
+    }
+}
+
+/// "Balance +0%", with small minus/plus steps and a Reset that only appears when
+/// the trim is not zero. Reset touches nothing but the trim.
+struct BalanceTrimControl: View {
+    @Environment(DALIStore.self) private var store
+    let speaker: RoomSpeaker
+    static let step = 2.0
+
+    static func label(_ trim: Double) -> String {
+        let value = Int(trim.rounded())
+        return "Loudness match \(value > 0 ? "+" : "")\(value)%"
+    }
+
+    var body: some View {
+        let low = speaker.balanceTrim <= RoomVolumePolicy.trimRange.lowerBound
+        let high = speaker.balanceTrim >= RoomVolumePolicy.trimRange.upperBound
+        HStack(spacing: Space.s) {
+            Text(Self.label(speaker.balanceTrim))
+                .font(.caption).foregroundStyle(Color.paper62)
+                .help("Shifts \(speaker.name)'s whole leveling curve up or down, from -30% to +30%")
+            Spacer(minLength: 0)
+            if speaker.balanceTrim != 0 {
+                Button("Reset") { store.setBalanceTrim(0, for: speaker) }
+                    .buttonStyle(.plain).font(.captionMedium)
+                    .foregroundStyle(Color.paper)
+                    .padding(.horizontal, 8).frame(height: 18)
+                    .background(Capsule().fill(Color.white.opacity(0.08)))
+                    .accessibilityLabel("Reset \(speaker.name) balance")
+            }
+            HStack(spacing: 0) {
+                Button("\u{2212}") { store.setBalanceTrim(speaker.balanceTrim - Self.step, for: speaker) }
+                    .buttonStyle(.plain).font(.captionMedium)
+                    .foregroundStyle(low ? Color.paper38 : Color.paper)
+                    .disabled(low)
+                    .accessibilityLabel("Lower \(speaker.name) balance")
+                    .frame(width: 24, height: 18).contentShape(Rectangle())
+                Rectangle().fill(Color.white.opacity(0.12)).frame(width: 0.5, height: 10)
+                Button("+") { store.setBalanceTrim(speaker.balanceTrim + Self.step, for: speaker) }
+                    .buttonStyle(.plain).font(.captionMedium)
+                    .foregroundStyle(high ? Color.paper38 : Color.paper)
+                    .disabled(high)
+                    .accessibilityLabel("Raise \(speaker.name) balance")
+                    .frame(width: 24, height: 18).contentShape(Rectangle())
+            }
+            .background(Capsule().fill(Color.white.opacity(0.08)))
+        }
+        .frame(height: 20)
     }
 }
 
@@ -258,7 +461,7 @@ struct SpeakerControlRow: View {
         switch speaker.health {
         case .off: return "Selected"
         case .connecting: return "Connecting"
-        case .live: return "Playing"
+        case .live: return store.effectiveVolume(speaker) == 0 || store.captureMasterGain == 0 ? "Muted" : "Connected"
         case .trouble: return "Needs attention"
         }
     }
@@ -291,6 +494,7 @@ struct SpeakerControlRow: View {
                     Text("Vol").font(.caption).foregroundStyle(Color.paper38)
                 }
                 .accessibilityLabel("\(speaker.name) volume")
+                SpeakerLoudnessAdjustment(speaker: speaker)
             }
         }
     }

@@ -48,11 +48,10 @@ struct RoomCanvas: View {
                 }
             }
             .frame(width: geo.size.width, height: geo.size.height)
-            .contentShape(Rectangle())
-            .onTapGesture { location in
-                let target = location.y < geo.size.height / 2 ? store.front : store.back
-                if let target { store.toggle(target) }
-            }
+            // No tap-to-toggle here: half the drawing was an invisible off
+            // switch, so clicking the window to focus it silently turned a
+            // speaker off and that choice was saved (2026-10-19). Speakers are
+            // switched only from their labelled rows below.
             .onChange(of: geo.size, initial: true) { _, size in
                 layers = RoomLayers.render(size: size, scale: displayScale)
             }

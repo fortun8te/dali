@@ -3,8 +3,8 @@ import XCTest
 
 final class RoomDelayPolicyTests: XCTestCase {
     func testAutomaticModeUsesTheStableRoomBuffer() {
-        // The shipped room buffer is 500 ms (RoomDelayPolicy.automaticStartBufferMs,
-        // also the policy's floor); this test used to pin the older 700 ms value.
+        // The shipped room buffer is 500 ms (RoomDelayPolicy.automaticStartBufferMs, also the
+        // policy's floor); an 800 ms trial on 26 Oct 2026 was reverted.
         XCTAssertEqual(RoomDelayPolicy.automaticStartBufferMs, 500)
         XCTAssertEqual(
             RoomDelayPolicy.seconds(startBufferMs: RoomDelayPolicy.automaticStartBufferMs, trimMs: 0),

@@ -225,7 +225,9 @@ async function settleAt(target, tol, ms) {
 function tick() {
   const v = $v(), c = $c();
   const s = sample();
-  const b = window.__beacon;
+  // The real-MV3 runner has no shim in the page. Its beacon lives in the
+  // extension worker's isolated world; the optional HUD must tolerate that.
+  const b = window.__beacon || {};
   document.getElementById('hud').textContent =
     'beacon streaming=' + b.streaming + ' delayMs=' + b.delayMs + ' running=' + b.running +
     (window.__useRealBeacon ? ' (REAL 3697)' : '') + (window.__workerDead ? ' (WORKER DEAD)' : '') +

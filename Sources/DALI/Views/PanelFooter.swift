@@ -11,9 +11,12 @@ struct PanelFooter: View {
         HStack(spacing: Space.xs) {
             if store.mode == .mirror { SourcePicker() }
             Spacer(minLength: 0)
-            if store.hasRoomPlan, !store.enabledExtras.isEmpty { ExtrasButton() }
+            if store.hasRoomPlan { ExtrasButton() }
             DelayLabel()
-            Button { openSettings() } label: { Image(systemName: "gearshape") }
+            Button { openSettings() } label: {
+                Image(systemName: "gearshape").symbolRenderingMode(.hierarchical)
+                    .font(.system(size: 13, weight: .regular))
+            }
                 .buttonStyle(IconButtonStyle(glass: false))
                 .help("Settings")
                 .accessibilityLabel("Settings")
@@ -88,16 +91,20 @@ struct DelayLabel: View {
     @State private var hovering = false
 
     var body: some View {
-        let synced = store.videoInSync
+        let apple = AppleSender.shared.isSelected
+        let synced = store.videoInSync && !apple
         Button { showing.toggle() } label: {
             HStack(spacing: 3) {
-                Text(store.roomDelayLabel)
+                Text(apple ? "≈2 s" : store.roomDelayLabel)
                     .contentTransition(.numericText())
                 Text(synced ? "· in sync" : "delay")
                     .foregroundStyle(synced ? Color.accentBlue.opacity(hovering ? 0.9 : 0.65)
                                             : (hovering || showing ? Color.paper62 : Color.paper38))
             }
             .font(.caption.monospacedDigit())
+            .lineLimit(1)
+            .fixedSize(horizontal: true, vertical: false)
+            .layoutPriority(1)
             .foregroundStyle(hovering || showing ? Color.paper62 : Color.paper38)
             .padding(.horizontal, 6)
             .frame(height: 28)
@@ -109,7 +116,9 @@ struct DelayLabel: View {
         .animation(Motion.fade, value: synced)
         .help("Why the room plays a moment behind the Mac")
         .popover(isPresented: $showing, arrowEdge: .bottom) {
-            Text(synced
+            Text(apple
+                 ? "Apple's AirPlay plays about two seconds behind the Mac. That suits music, not video."
+                 : synced
                  ? "Every speaker waits \(store.roomDelayLabel) before playing, and the browser companion\(store.browserExtensionVersion.map { " (\($0))" } ?? "") holds the picture back by the same amount — so what you see and hear line up."
                  : "Every speaker waits \(store.roomDelayLabel) before playing, so they all start on the same beat. For browser video, the DALI companion matches the picture automatically.")
                 .font(.body13)
@@ -127,26 +136,39 @@ struct ExtrasButton: View {
     @State private var showing = false
 
     var body: some View {
-        let extras = store.enabledExtras
+        let extras = store.extras
+        let enabledCount = extras.filter(\.enabled).count
         Button { showing.toggle() } label: {
             HStack(spacing: 4) {
-                Image(systemName: "hifispeaker.2")
-                Text("+\(extras.count)").font(.caption.monospacedDigit())
+                Image(systemName: "plus.circle").symbolRenderingMode(.hierarchical)
+                    .font(.system(size: 12, weight: .regular))
+                Text(enabledCount > 0 ? "+\(enabledCount)" : "Add").font(.caption.monospacedDigit())
             }
         }
         .buttonStyle(IconButtonStyle(glass: false))
-        .help("\(extras.count) more speaker\(extras.count == 1 ? "" : "s") in the room")
-        .accessibilityLabel("\(extras.count) more speakers")
+        .help("Add or manage more speakers")
+        .accessibilityLabel("Add or manage more speakers")
         .popover(isPresented: $showing, arrowEdge: .bottom) {
             ScrollView {
                 VStack(spacing: Space.l) {
+                    if extras.isEmpty {
+                        Text("No other speakers found. Check their power and Wi-Fi.")
+                            .font(.caption).foregroundStyle(Color.paper62)
+                    }
                     ForEach(extras) { SpeakerControlRow(speaker: $0) }
+                    if let message = store.discoveryMessage {
+                        Text(message).font(.caption).foregroundStyle(Color.paper62)
+                    }
+                    Button("Look again") { Task { await store.refreshSpeakers() } }
+                        .buttonStyle(SecondaryButtonStyle(accent: true))
+                        .disabled(store.isDiscovering)
                 }
                 .padding(Space.l)
             }
             .scrollIndicators(.never)
             .frame(width: 300)
             .frame(maxHeight: 280)
+            .task { await store.refreshSpeakers() }
         }
     }
 }

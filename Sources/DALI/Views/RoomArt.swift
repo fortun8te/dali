@@ -31,12 +31,14 @@ extension CGPoint {
 enum Cabinet: CaseIterable {
     case opticon2, era100
 
-    var depth: CGFloat { self == .opticon2 ? 34.0 : 24.8 }
+    /// Drawn a little larger than true scale so each speaker reads at a glance.
+    static let scale: CGFloat = 1.2
+    var depth: CGFloat { (self == .opticon2 ? 34.0 : 24.8) * Cabinet.scale }
     var width: CGFloat { self == .opticon2 ? depth * 195.0 / 297.0 : depth * 120.0 / 130.5 }
     /// Radius of the pool of light the cabinet sits in.
-    var pool: CGFloat { self == .opticon2 ? 36.0 : 28.0 }
+    var pool: CGFloat { (self == .opticon2 ? 36.0 : 28.0) * Cabinet.scale }
     /// Roughly the silhouette's outer radius: pulses leave from here.
-    var reach: CGFloat { self == .opticon2 ? 17.0 : 11.0 }
+    var reach: CGFloat { (self == .opticon2 ? 17.0 : 11.0) * Cabinet.scale }
     /// Heading with no toe-in: fronts fire down the room, rears up it.
     var restAim: Double { self == .opticon2 ? .pi / 2 : -.pi / 2 }
     /// How much of the way toward the listener the box is turned (~15° front,
@@ -177,6 +179,16 @@ enum RoomArt {
             .init(color: .warmWhite.opacity(0), location: 1),
         ]), startPoint: CGPoint(x: 0, y: fy), endPoint: CGPoint(x: 0, y: by)))
 
+        // The lacquered top catches the room: one soft diagonal sheen, brighter when live.
+        var sheen = top
+        sheen.rotate(by: .degrees(-24))
+        sheen.fill(Path(CGRect(x: -hw * 1.1, y: -d * 0.10, width: hw * 2.2, height: d * 0.22)),
+                   with: .linearGradient(Gradient(stops: [
+                    .init(color: .warmWhite.opacity(0), location: 0),
+                    .init(color: .warmWhite.opacity(0.05 + 0.05 * lit), location: 0.5),
+                    .init(color: .warmWhite.opacity(0), location: 1),
+                   ]), startPoint: CGPoint(x: 0, y: -d * 0.10), endPoint: CGPoint(x: 0, y: d * 0.12)))
+
         if lit > 0.01 {
             ctx.stroke(body, with: .linearGradient(Gradient(stops: [
                 .init(color: .warmWhite.opacity(0.10 * lit), location: 0),
@@ -239,6 +251,22 @@ enum RoomArt {
             ]), startPoint: CGPoint(x: 0, y: fy), endPoint: CGPoint(x: 0, y: by)), lineWidth: 3.6)
         }
         strokeRim(ctx, body, front: fy, back: by, alpha: rimAlpha(lit), width: 1.2)
+
+        // The wrap-around fabric grille on the room-facing half: a lighter weave that
+        // fades toward the matte top.
+        var grille = top
+        grille.fill(Path(CGRect(x: -w / 2, y: fy * 0.30, width: w, height: fy * 0.70 + 1)),
+                    with: .linearGradient(Gradient(stops: [
+                        .init(color: .paper.opacity(0), location: 0),
+                        .init(color: .paper.opacity(0.06 + 0.03 * lit), location: 1),
+                    ]), startPoint: CGPoint(x: 0, y: fy * 0.30), endPoint: CGPoint(x: 0, y: fy)))
+        var weave = Path()
+        for i in -5...5 {
+            let x = CGFloat(i) * w * 0.085
+            weave.move(to: CGPoint(x: x, y: fy * 0.40))
+            weave.addLine(to: CGPoint(x: x * 1.18, y: fy))
+        }
+        grille.stroke(weave, with: .color(.paper.opacity(0.04 + 0.025 * lit)), lineWidth: 0.3)
 
         let trough = CGRect(x: -w * 0.30, y: -d * 0.21, width: w * 0.60, height: 2.0)
         ctx.fill(Path(roundedRect: trough, cornerRadius: 1), with: .color(shadow.opacity(0.92)))

@@ -100,6 +100,29 @@ final class BeamCaptureTests: XCTestCase {
         XCTAssertEqual(writer.pendingBytes, 0, "A drained pipe must not report a stalled backlog while the source is paused")
     }
 
+    func testFIFORejectsLateWritesAfterPermanentClose() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let path = dir.appendingPathComponent("audio.pipe").path
+        XCTAssertEqual(mkfifo(path, 0o600), 0)
+        let writer = FIFOWriter(path: path)
+        writer.closePipe()
+        writer.write(Data(repeating: 7, count: 1024))
+        Thread.sleep(forTimeInterval: 0.05)
+        XCTAssertEqual(writer.writtenBytes, 0, "A stopped writer must never reopen")
+        XCTAssertEqual(writer.pendingBytes, 0)
+    }
+
+    func testFIFOProducerAppliesBackpressureBeforeReturning() {
+        let writer = FIFOWriter(path: "/missing/dali-\(UUID().uuidString).pipe")
+        defer { writer.closePipe() }
+        writer.write(Data(repeating: 7, count: 1_764_000))
+        XCTAssertLessThanOrEqual(writer.pendingBytes, 441_000)
+        XCTAssertGreaterThan(writer.droppedBytes, 0,
+                             "Admission must bound retained audio synchronously, before dispatch")
+    }
+
     private func ramp(frames: Int) -> Data {
         var a = [Int16](); a.reserveCapacity(frames * 2)
         for i in 0..<frames { let v = Int16(truncatingIfNeeded: i); a.append(v); a.append(v) }

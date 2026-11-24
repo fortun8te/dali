@@ -3,6 +3,7 @@
 #define __WORKER_H__
 
 #include <event2/event.h>
+#include <stdbool.h>
 
 /* The worker thread is made for running asyncronous tasks from a real time
  * thread.
@@ -20,6 +21,12 @@
  */
 void
 worker_execute(void (*cb)(void *), void *cb_arg, size_t arg_size, int delay);
+
+/* Returns false if the task could not be queued; the callback will not run.
+ * Argument ownership remains with the caller, as with worker_execute().
+ */
+bool
+worker_try_execute(void (*cb)(void *), void *cb_arg, size_t arg_size, int delay);
 
 /* Can be called within a callback to get the worker thread's event base
  */

@@ -8,15 +8,19 @@ public struct RoomLevelSample {
     public let level: Double
     public let bass: Double
     public let treble: Double
+    public let mid: Double
+    public let spectrum: [Float]
     public let beats: Int
     public let beatAt: Date?
 
-    public init(at: Date, level: Double, bass: Double, treble: Double,
-                beats: Int, beatAt: Date?) {
+    public init(at: Date, level: Double, bass: Double, treble: Double, mid: Double = 0,
+                spectrum: [Float] = [], beats: Int, beatAt: Date?) {
         self.at = at
         self.level = level
         self.bass = bass
         self.treble = treble
+        self.mid = mid
+        self.spectrum = spectrum
         self.beats = beats
         self.beatAt = beatAt
     }
@@ -29,8 +33,8 @@ public struct RoomLevelTimeline {
 
     /// Absolute ceiling, independent of any poll: a producer that keeps appending
     /// while nothing drains the line (UI paused, view hidden) must not grow
-    /// without bound. Well above the ~125 samples RoomDelayPolicy's longest delay
-    /// needs at 30 Hz, and it only drops the oldest.
+    /// without bound. Well above the ~250 samples RoomDelayPolicy's longest delay
+    /// needs at 60 Hz, and it only drops the oldest.
     private static let hardCapacity = 1_024
 
     public mutating func append(_ sample: RoomLevelSample) {
@@ -49,9 +53,9 @@ public struct RoomLevelTimeline {
         while dueCount < samples.count, samples[dueCount].at <= due { dueCount += 1 }
         let newest = dueCount > 0 ? samples[dueCount - 1] : nil
         if dueCount > 0 { samples.removeFirst(dueCount) }
-        // RoomDelayPolicy permits up to 3.6 seconds. At 30 Hz, a fixed 60
+        // RoomDelayPolicy permits up to 3.6 seconds. At 60 Hz, a fixed 120
         // samples would erase the start of a delayed beat before it was due.
-        let capacity = min(Self.hardCapacity, max(60, Int(ceil((delay + 0.5) * 30))))
+        let capacity = min(Self.hardCapacity, max(120, Int(ceil((delay + 0.5) * 60))))
         if samples.count > capacity { samples.removeFirst(samples.count - capacity) }
         return newest
     }
