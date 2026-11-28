@@ -2,12 +2,36 @@
 """Package runtime files only, keeping the Chrome extension ID stable."""
 import json
 import pathlib
+import re
 import shutil
 import sys
 import zipfile
 
 root = pathlib.Path(__file__).resolve().parents[1] / 'chrome-extension'
 manifest = json.loads((root / 'manifest.json').read_text())
+
+
+def stamp(path, name):
+    # Fail fast when the shipped scripts disagree with the manifest, so a
+    # packaged build can never advertise one version and run another.
+    match = re.search(rf"const {name} = '([^']+)'", (root / path).read_text())
+    if not match:
+        sys.exit(f'version check: {path} has no `const {name} = ...`')
+    return match.group(1)
+
+
+# background.js carries no version literal (it reads the manifest), so its
+# BUILD stamp is the check that can drift from content.js.
+versions = {
+    'manifest.json version': manifest['version'],
+    'content.js VERSION': stamp('content.js', 'VERSION'),
+    'content.js BUILD': stamp('content.js', 'BUILD'),
+    'background.js BUILD': stamp('background.js', 'BUILD'),
+}
+if versions['content.js VERSION'] != manifest['version']:
+    sys.exit('version drift: ' + ', '.join(f'{k}={v}' for k, v in versions.items()))
+if versions['content.js BUILD'] != versions['background.js BUILD']:
+    sys.exit('build drift: ' + ', '.join(f'{k}={v}' for k, v in versions.items()))
 files = {'manifest.json', 'beacon.js', manifest['background']['service_worker']}
 for script in manifest.get('content_scripts', []):
     files.update(script.get('js', [])); files.update(script.get('css', []))

@@ -767,7 +767,7 @@ test('while DALI is idle the page is untouched and the beacon is asked rarely', 
 });
 
 
-test('a transient beacon transport failure preserves validated sync for at most ten seconds', async () => {
+test('a transient beacon transport failure preserves validated sync for at most 2.5 seconds', async () => {
   const w = worker();
   assert.equal((await w.status()).delayMs, 900);
   w.failBeacon(true);
@@ -775,10 +775,10 @@ test('a transient beacon transport failure preserves validated sync for at most 
   const brief = await w.status();
   assert.equal(brief.streaming, true, 'one timeout must not detach the video delay');
   assert.equal(brief.delayMs, 900);
-  await w.clock.advance(8800);
+  await w.clock.advance(1200);
   assert.equal((await w.status()).streaming, true);
-  await w.clock.advance(200);
-  assert.equal((await w.status()).running, false, 'cached fallback must expire at ten seconds');
+  await w.clock.advance(400);
+  assert.equal((await w.status()).running, false, 'cached fallback must expire at 2.5 seconds');
   w.failBeacon(false);
   await w.clock.advance(800);
   assert.equal((await w.status()).streaming, true, 'a recovered app can engage sync again');
@@ -815,7 +815,8 @@ for (const host of ['instagram.com', 'www.instagram.com', 'reels.instagram.com']
     assert.equal(c.video.hasAttribute('data-dali-sync-hidden'), false);
     const playing = c.messages.filter(m => m.type === 'playstate').at(-1);
     assert.equal(playing.playing, true);
-    assert.equal(playing.cutEligible, false);
+    // Unarmed Instagram audio is cut-eligible, so its own pause still cuts the room.
+    assert.equal(playing.cutEligible, true);
     assert.equal(playing.held, false);
     const w = worker();
     await w.status();
@@ -1212,4 +1213,71 @@ test('high playback speed does not turn a manual rewind into a natural loop', as
   c.media('seeking');
   assert.equal(p.armed, false);
   assert.equal(p.buffer.length, 0);
+});
+
+test('a large delay reduction retains the frames needed throughout the glide', async () => {
+  const c = content();
+  await settle();
+  let delayMs = 2000;
+  c.runtime.sendMessage = async () => ({ running: true, streaming: true, delayMs });
+  c.api.applyStatus({ running: true, streaming: true, delayMs });
+  c.media('play');
+  const p = c.api.S.pipeline;
+  await runFrames(c, 3000);
+  delayMs = 300;
+  c.api.applyStatus({ running: true, streaming: true, delayMs });
+  for (let i = 0; i < 100; i++) {
+    await runFrames(c, 34);
+    assert.ok(Math.abs(c.clock.now - p.current.t - p.eff) <= 40,
+      `glide needs ${p.eff}ms history, presented ${c.clock.now - p.current.t}ms`);
+  }
+});
+
+test('a play event with slow first decode still starts with the full picture delay', async () => {
+  const c = content();
+  await settle();
+  c.media('play');
+  await c.clock.advance(2000);
+  await c.capture();
+  assert.equal(c.api.S.pipeline.eff, 900);
+  assert.equal(c.api.S.pipeline.ramped, false);
+});
+
+test('a muted autoplay video in another tab never cancels a pause-tail cut', async () => {
+  const w = worker();
+  await w.status();
+  await w.message({ type: 'playstate', playing: true, audible: true, cutEligible: true }, 1);
+  await w.message({ type: 'playstate', playing: true, audible: false, cutEligible: false }, 2);
+  await w.message({ type: 'playstate', playing: false, audible: false, cutEligible: false }, 1);
+  await w.clock.advance(200);
+  assert.equal(w.calls.some((call) => call.path === '/cut'), true);
+});
+
+test('an unarmed audible video that pauses still requests the room cut', async () => {
+  const c = content();
+  const w = worker();
+  await w.status();
+  c.document.title = 'Video';
+  c.media('playing');   // no capture(): the pipeline never armed
+  const playing = c.messages.filter((m) => m.type === 'playstate').at(-1);
+  assert.equal(playing.cutEligible, true);
+  c.video.paused = true;
+  c.media('pause');
+  const paused = c.messages.filter((m) => m.type === 'playstate').at(-1);
+  assert.equal(paused.cutEligible, false);
+  await w.message(playing);
+  await w.message(paused);
+  await w.clock.advance(200);
+  assert.equal(w.calls.some((call) => call.path === '/cut'), true);
+});
+
+test('a stopped app stops holding video after the shortened 2.5 s disconnect grace', async () => {
+  const w = worker();
+  w.appReply({ running: true });
+  await w.status();
+  w.failBeacon(true);
+  await w.clock.advance(1000);
+  assert.equal((await w.status()).running, true, 'still held inside the grace window');
+  await w.clock.advance(2000);
+  assert.equal((await w.status()).running, false, 'released 3 s after the last good reading');
 });

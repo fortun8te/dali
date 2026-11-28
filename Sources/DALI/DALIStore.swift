@@ -33,6 +33,7 @@ struct RoomSpeaker: Identifiable, Equatable {
                             // amp+passive front against a self-amped Sonos
     var levelCurve: SpeakerLevelCurve? = nil  // measured gain by Mac volume step; when set it replaces `gain`
     var balanceTrim: Double = 0               // -30...30 %, shifts the whole curve
+    var masterCurve: SpeakerLevelCurve? = nil
     var offsetMs: Int = 0   // sync trim (±ms, positive = plays later); engine-persisted
     var health: Health
     var available: Bool = true
@@ -64,7 +65,10 @@ final class DALIStore {
                 if backendEnabled { enqueueSessionTeardown() }
             }
             // What-is-playing only matters while the room can hear it.
-            if backendEnabled { NowPlayingMonitor.shared.setActive(phase == .streaming) }
+            if backendEnabled {
+                NowPlayingMonitor.shared.setActive(phase == .streaming)
+                if phase != .streaming { audioFirstUntil = .now }
+            }
             // While the room is live or connecting, ask macOS for precise timers and no App Nap
             // so a busy Mac does not coalesce or stretch the capture, level and recovery timing.
             if backendEnabled { setLatencyCritical(phase.isOn) }
@@ -372,6 +376,7 @@ final class DALIStore {
     private var backlogMonitor = LatencyBacklogMonitor()
     private var refill: RefillController { timingController.refill }
     private var driftFreeze: String { timingController.hold }
+    @ObservationIgnored private var audioFirstUntil = ContinuousClock.now
     private var flightApiBackoffUntil = Date.distantPast
 
     private nonisolated static let flightLogURL = FileManager.default
@@ -458,8 +463,8 @@ final class DALIStore {
         let f = capture.readMetrics()
         let previous = lastFlight
         lastFlight = f
-        let busy = resumeInFlight || !speakerRecoveryInFlight.isEmpty
-            || pushInFlight || Date() < flightApiBackoffUntil
+        let controlBusy = resumeInFlight || !speakerRecoveryInFlight.isEmpty || pushInFlight
+        let busy = controlBusy || Date() < flightApiBackoffUntil
         let began = ContinuousClock.now
         let ps = busy ? nil : try? await api.playerState()
         let elapsed = began.duration(to: .now).components
@@ -474,9 +479,19 @@ final class DALIStore {
             discontinuity: f.tapRebuilds > 0 || f.recoveries > 0 || f.tapOverruns > 0,
             converterChanged: f.convRebuilds > 0, maximumGapMs: f.maxGapMs,
             player: ps?.state, progressMs: ps?.item_progress_ms, queryMs: queryMs,
-            controlBusy: busy || Date().timeIntervalSince(lastVolumeWriteAt) < 15)
-        let result = timingController.update(sample, target: Double(config.startBufferMs) / 1_000)
+            controlBusy: controlBusy || Date().timeIntervalSince(lastVolumeWriteAt) < 15)
+        let target = Double(config.startBufferMs) / 1_000
+        let result = timingController.update(sample, target: target)
         capture.setTargetRatio(result.ratio)
+        let lowBuffer = result.fill.map { $0 < min(0.5, target * 0.6) } ?? false
+        if lowBuffer || (!busy && (ps == nil || queryMs > 250)) {
+            audioFirstUntil = .now.advanced(by: .seconds(6))
+        }
+        let deferBackgroundWork = ContinuousClock.now < audioFirstUntil
+        let nowPlaying = NowPlayingMonitor.shared
+        if nowPlaying.defersBackgroundWork != deferBackgroundWork {
+            nowPlaying.defersBackgroundWork = deferBackgroundWork
+        }
         if !playerMode, !resumeInFlight,
            backlogMonitor.update(dt: f.intervalSec, pendingBytes: f.pending,
                                  playing: busy ? nil : ps.map { $0.state == "play" }) {
@@ -513,12 +528,21 @@ final class DALIStore {
     /// One value drives both video and visualization. Telemetry remains useful
     /// to the engine's rate loop, but never moves the visual delay.
     private func applyRoomDelay() {
-        roomDelaySec = RoomDelayPolicy.seconds(startBufferMs: config.startBufferMs,
-                                              trimMs: delayTrimMs)
+        // The surround decoder's own 512-frame look at the sound (11.6 ms) on the front pair,
+        // which the picture follows. Only while it is really in the path.
+        let decoderSec = engineRearDirect == true ? 0 : 512.0 / 44100.0
+        let next = RoomDelayPolicy.seconds(startBufferMs: config.startBufferMs,
+                                           trimMs: delayTrimMs) + decoderSec
+        guard next != roomDelaySec else { return }
+        roomDelaySec = next
+        // A delay change (buffer, trim, decoder path) reaches Chrome now, not on the next flight tick.
+        if phase == .streaming { syncBeacon.publish(streaming: true, delaySeconds: next) }
     }
 
     /// How far ahead of the heard sound the light is sampled, to cancel drawing latency.
-    private static let visualLeadSec = 0.07
+    /// Time from a sample to its light on screen, so the bars land with the sound: half
+    /// the 23 ms analysis window, a 60 Hz frame and scan-out, and the bar's own rise.
+    private static let visualLeadSec = 0.05
 
     private func startLevelLoop() {
         levelTask?.cancel()
@@ -539,7 +563,7 @@ final class DALIStore {
                 // `visualLeadSec` to land with the sound, not just after it.
                 let newest = levelDelayLine.latestDue(at: now, delay: max(0, roomDelaySec - Self.visualLeadSec))
                 let visible = roomCanvasVisible
-                if let s = newest, visible {
+                if let s = newest, visible, ContinuousClock.now >= audioFirstUntil || tick.isMultiple(of: 6) {
                     // @Observable fires on every assignment, equal value or not,
                     // so an idle room (all zeros) re-rendered the canvas 30x/s.
                     if audioLevel != s.level { audioLevel = s.level }
@@ -697,6 +721,7 @@ final class DALIStore {
     func setPlacement(_ kind: RoomSpeaker.Kind, for speaker: RoomSpeaker?) {
         guard kind != .extra else { return }
         let name = speaker?.name ?? ""
+        let (oldFront, oldBack) = (frontName, backName)
         // Layout changes do not change the playback selection. Persist implicit
         // legacy front/back selections before changing what counts as primary.
         for current in speakers {
@@ -714,6 +739,13 @@ final class DALIStore {
         for i in speakers.indices {
             speakers[i].kind = speakers[i].name == frontName ? .front
                 : speakers[i].name == backName ? .back : .extra
+        }
+        // The mix follows placement. A speaker moved to or from the back keeps
+        // playing its old mix until its stream is set up again.
+        if backendEnabled, phase.isOn,
+           Self.placementChangesMix(names: speakers.map(\.name),
+                                    before: (oldFront, oldBack), after: (frontName, backName)) {
+            restartForPlacement()
         }
     }
 
@@ -940,6 +972,7 @@ final class DALIStore {
         }
         let preferences = SpeakerPreferences(defaults: defaults)
         volumeLimit = preferences.volumeLimit
+        surround = defaults.object(forKey: "dali.surround") as? Bool ?? true
         frontName = preferences.frontName
         backName = preferences.backName
 
@@ -1324,6 +1357,7 @@ final class DALIStore {
                 gain: preferences.gain(name: o.name),
                 levelCurve: preferences.levelCurve(name: o.name),
                 balanceTrim: preferences.balanceTrim(name: o.name),
+                masterCurve: preferences.masterCurve(name: o.name),
                 offsetMs: o.offset_ms ?? 0,   // engine persists this in its own DB
                 health: existing?.health ?? .off))
         }
@@ -1343,6 +1377,7 @@ final class DALIStore {
                 gain: preferences.gain(name: name),
                 levelCurve: preferences.levelCurve(name: name),
                 balanceTrim: preferences.balanceTrim(name: name),
+                masterCurve: preferences.masterCurve(name: name),
                 health: enabled && phase.isOn ? .trouble : .off,
                 available: engineReleased))
         }
@@ -1363,6 +1398,258 @@ final class DALIStore {
             if let ms = o.offset_ms { lastSentOffset[o.id] = ms }
         }
         enforceZeroOffsets()
+        for o in outputs { engineChannelMix[o.id] = o.channel_mix ?? 0 }
+        if let reported = outputs.first?.rear_direct { engineRearDirect = reported }
+        if backendEnabled { Task { await ensureChannelMix() } }
+    }
+
+    /// Front and back always have their own streams (mix 2 and 1), so Surround can switch
+    /// live: the engine crossfades each running stream between its surround mix and the
+    /// plain song, and nothing reconnects. Extra speakers play the plain song (0).
+    /// Surround splits the song between the pairs, so it only runs while both pairs are
+    /// really playing: a pair on its own must get the whole song, or part of it is lost.
+    /// A pair in trouble is still playing. The circle always goes through the decoder.
+    static func surroundPlaysPlainSong(speakers: [RoomSpeaker], surround: Bool, streaming: Bool,
+                                       circleRunning: Bool, testingPair: Bool) -> Bool {
+        if circleRunning { return false }
+        if !surround || testingPair { return true }
+        guard streaming else { return false }
+        func playing(_ kind: RoomSpeaker.Kind) -> Bool {
+            speakers.contains { $0.kind == kind && $0.enabled && ($0.health == .live || $0.health == .trouble) }
+        }
+        return !(playing(.front) && playing(.back))
+    }
+
+    private func wantedChannelMix(_ speaker: RoomSpeaker) -> Int {
+        switch speaker.kind {
+        case .back: 1
+        case .front: 2
+        case .extra: 0
+        }
+    }
+
+    /// Writes the wanted mix to every speaker the engine reports with another one.
+    /// The engine reads the mix when a speaker's stream is set up, so the start path
+    /// awaits this before the streams open. A write that fails is retried on the next
+    /// poll. Calls join one another, so a poll and a start never write twice at once.
+    func ensureChannelMix() async {
+        // Released: the engine is stopped and the listed speakers are remembered
+        // placeholders (`unavailable:` ids that report available), not outputs.
+        guard backendEnabled, !engineReleased else { return }
+        // A loop, not an `if`: every waiter wakes together, and with a single check
+        // two of them each started a write pass and a stale reply could overwrite
+        // the newer mix in `engineChannelMix`. The task clears itself, so a waiter
+        // never spins on a finished task.
+        while let running = channelMixTask { await running.value }
+        let task = Task { @MainActor in
+            defer { channelMixTask = nil }
+            for speaker in speakers where speaker.available {
+                let wanted = wantedChannelMix(speaker)
+                guard (engineChannelMix[speaker.id] ?? 0) != wanted else { continue }
+                do {
+                    try await api.setChannelMix(outputID: speaker.id, mix: wanted)
+                    engineChannelMix[speaker.id] = wanted
+                } catch {
+                    dlog("could not set surround mix for \(speaker.name): \(error)")
+                }
+            }
+            let direct = Self.surroundPlaysPlainSong(speakers: speakers, surround: surround,
+                                                     streaming: phase == .streaming,
+                                                     circleRunning: circleStartedAt != nil,
+                                                     testingPair: speakerTestPair != nil)
+            if engineRearDirect != direct, let id = speakers.first(where: \.available)?.id {
+                do {
+                    try await api.setRearDirect(direct, outputID: id)
+                    engineRearDirect = direct
+                } catch {
+                    dlog("could not switch surround: \(error)")
+                }
+            }
+        }
+        channelMixTask = task
+        await task.value
+    }
+
+    // MARK: speaker test
+
+    /// One corner of the room.
+    enum SpeakerCorner: CaseIterable, Equatable {
+        case frontLeft, frontRight, backLeft, backRight
+        var kind: RoomSpeaker.Kind { self == .frontLeft || self == .frontRight ? .front : .back }
+        var output: SpeakerTestSignal.Output { self == .frontLeft || self == .backLeft ? .left : .right }
+        var title: String {
+            switch self {
+            case .frontLeft: "Front left"
+            case .frontRight: "Front right"
+            case .backLeft: "Back left"
+            case .backRight: "Back right"
+            }
+        }
+    }
+
+    /// How long each corner plays, and the quiet between corners.
+    private static let speakerTestToneSec = 1.6
+    private static let speakerTestGapSec = 0.5
+
+    var isSpeakerTesting: Bool { speakerTestTask != nil }
+    var canTestSpeakers: Bool { phase == .streaming && !playerMode && source != .spotify && !AppleSender.shared.isSelected }
+
+    func toggleSpeakerTest() {
+        if isSpeakerTesting { cancelSpeakerTest() } else { startSpeakerTest() }
+    }
+
+    /// Plays soft noise from one corner at a time: front left, front right, back left,
+    /// back right. Only the pair under test keeps its volume, and rear streams go
+    /// direct, so what you hear is that one speaker and nothing else. If two corners
+    /// sound the same, the difference is being lost after DALI, in the receiver.
+    private func startSpeakerTest() {
+        guard canTestSpeakers, speakerTestTask == nil else { return }
+        let generation = streamGeneration
+        let corners = SpeakerCorner.allCases.filter { corner in
+            speakers.contains { $0.kind == corner.kind && $0.enabled && $0.available }
+        }
+        guard !corners.isEmpty else { return }
+        dlog("speaker test started")
+        capture.setSpeakerTest(.silence)
+        speakerTestPair = corners[0].kind
+        forceVolumeResync()
+        speakerTestTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            @MainActor func pause(_ seconds: Double) async -> Bool {
+                do { try await Task.sleep(for: .seconds(max(0, seconds))) } catch { return false }
+                guard !Task.isCancelled else { return false }
+                return self.streamGeneration == generation && self.phase == .streaming
+            }
+            // When the noise was last written. Cancelling mid-tone leaves up to a room
+            // delay of it in flight, so volumes come back only after it has played.
+            var lastWriteAt = Date()
+            var lastWasNoise = false
+            @MainActor func put(_ output: SpeakerTestSignal.Output) {
+                self.capture.setSpeakerTest(output)
+                lastWriteAt = Date(); lastWasNoise = output != .silence
+            }
+            @MainActor func run() async {
+            await self.ensureChannelMix()
+            // Let the music already in flight run out behind the silence.
+            guard await pause(self.roomDelaySec + 0.2) else { return }
+            for corner in corners {
+                if self.speakerTestPair != corner.kind {
+                    self.speakerTestPair = corner.kind
+                    self.forceVolumeResync()
+                    guard await pause(Self.speakerTestGapSec) else { return }
+                }
+                // The noise reaches the room one room delay after it is written, so
+                // the label is timed to the sound and not to the write.
+                let delay = self.roomDelaySec, tone = Self.speakerTestToneSec
+                put(corner.output)
+                if delay < tone {
+                    guard await pause(delay) else { return }
+                    self.speakerTestCorner = corner
+                    guard await pause(tone - delay) else { return }
+                    put(.silence)
+                    guard await pause(delay) else { return }
+                } else {
+                    guard await pause(tone) else { return }
+                    put(.silence)
+                    guard await pause(delay - tone) else { return }
+                    self.speakerTestCorner = corner
+                    guard await pause(tone) else { return }
+                }
+                self.speakerTestCorner = nil
+                guard await pause(Self.speakerTestGapSec) else { return }
+            }
+            }
+            await run()
+            if self.streamGeneration == generation, self.phase == .streaming {
+                if lastWasNoise { put(.silence) }
+                let remaining = self.roomDelaySec - Date().timeIntervalSince(lastWriteAt)
+                // A child Task is not cancelled with this one, so the wait survives Stop.
+                if remaining > 0 { await Task { try? await Task.sleep(for: .seconds(remaining)) }.value }
+            }
+            self.finishSpeakerTest()
+        }
+    }
+
+    /// Sends a sound once round the room, twice, through the real surround decoder:
+    /// the proof that a sound can travel all the way around.
+    func toggleCircleTest() {
+        if isSpeakerTesting { cancelSpeakerTest(); return }
+        guard canTestSpeakers else { return }
+        let generation = streamGeneration
+        dlog("circle test started")
+        capture.setSpeakerTest(.silence)
+        speakerTestTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            @MainActor func pause(_ seconds: Double) async -> Bool {
+                do { try await Task.sleep(for: .seconds(max(0, seconds))) } catch { return false }
+                guard !Task.isCancelled else { return false }
+                return self.streamGeneration == generation && self.phase == .streaming
+            }
+            defer {
+                self.circleStartedAt = nil
+                self.finishSpeakerTest()
+            }
+            // A marker in the future until the first sound lands, so the switch goes first.
+            self.circleStartedAt = .distantFuture
+            await self.ensureChannelMix()
+            guard await pause(self.roomDelaySec + 0.2) else { return }
+            self.capture.setSpeakerTest(.circle)
+            self.circleStartedAt = Date().addingTimeInterval(self.roomDelaySec)
+            guard await pause(2 * SpeakerTestSignal.circleSeconds) else { return }
+            self.capture.setSpeakerTest(.silence)
+            guard await pause(self.roomDelaySec) else { return }
+        }
+    }
+
+    private func cancelSpeakerTest() {
+        speakerTestTask?.cancel()
+    }
+
+    private func finishSpeakerTest() {
+        dlog("speaker test ended")
+        speakerTestTask = nil
+        speakerTestCorner = nil
+        speakerTestPair = nil
+        capture.setSpeakerTest(nil)
+        Task { await ensureChannelMix() }
+        if phase == .streaming { forceVolumeResync() }
+    }
+
+    /// Which speaker is the back changed while playing: the engine applies a
+    /// speaker's mix when its stream is set up, so the whole stream
+    /// restarts (about a second) instead of cycling one member, which can take
+    /// its partner down with it. Player mode resumes its existing queue and
+    /// preserves whether it was paused.
+    private func restartForPlacement() {
+        let reason = "placement changed"
+        dlog("\(reason) -> restarting the stream")
+        let player = playerMode
+        let wasPlaying = isPlaying
+        if player { stopPlayback() } else { stopStream() }
+        let generation = streamGeneration
+        Task { @MainActor in
+            await teardownTask?.value
+            await ensureChannelMix()
+            // A Play, Stop, mode change or engine release during the write owns
+            // the room now; restarting anyway would start a stream nobody asked for.
+            guard streamGeneration == generation, phase == .idle, !engineReleased,
+                  playerMode == player else { return }
+            if player {
+                playToRoom { api in
+                    try await api.play()
+                    if !wasPlaying { try await api.pause() }
+                }
+            } else { startStream(reason: reason) }
+        }
+    }
+
+    /// Whether moving the front/back placement changes any speaker's mix.
+    nonisolated static func placementChangesMix(names: [String],
+                                                before: (front: String, back: String),
+                                                after: (front: String, back: String)) -> Bool {
+        names.contains { name in
+            (name == before.back) != (name == after.back)
+        }
     }
 
     private func rank(_ k: RoomSpeaker.Kind) -> Int { k == .front ? 0 : k == .back ? 1 : 2 }
@@ -1526,6 +1813,12 @@ final class DALIStore {
                         try context.check()
                     }
                 }
+                // The engine reads each speaker's mix as its stream is set up, and
+                // discovery only fires the write without waiting: a fresh engine
+                // reports every mix as stereo, so the back pair could open as a
+                // copy of the front with Surround on.
+                await self.ensureChannelMix()
+                try context.check()
                 let chosen = self.sessionSpeakers()
                 guard chosen.contains(where: \.enabled) else {
                     throw BeamAPIError(what: self.speakers.contains(where: \.enabled)
@@ -1657,6 +1950,7 @@ final class DALIStore {
 
     func stopStream() {
         cancelPendingWake()
+        cancelSpeakerTest()
         guard backendEnabled else { phase = .idle; return }
         lastTeardownAt = Date()
         streamGeneration += 1
@@ -1778,6 +2072,8 @@ final class DALIStore {
         }
         guard current() else { return false }
         await refreshSpeakers()
+        guard current() else { return false }
+        await ensureChannelMix()
         guard current() else { return false }
         let chosen = sessionSpeakers()
         guard chosen.contains(where: \.enabled) else {
@@ -2024,6 +2320,9 @@ final class DALIStore {
         } else {
             // Every joined member stays in the group. "Off" is volume zero,
             // preserving the shared clock for both primary and extra speakers.
+            // Switching off a speaker that is on the stream keeps it in the session,
+            // so it still receives its explicit zero instead of holding its last volume.
+            if !enabling { sessionMembership.retain(sp.name) }
             let ready = readyOutputIDs.contains(sp.id)
             speakers[idx].health = enabling ? (ready ? .live : .connecting) : .off
             if enabling {
@@ -2089,6 +2388,41 @@ final class DALIStore {
         scheduleVolumePush()
     }
 
+    /// A separate Mac-volume curve leaves the speaker's other source settings intact.
+    func masterCurveValues(for speaker: RoomSpeaker) -> [Double] {
+        (1...16).map { step in
+            let model = RoomVolumeSpeaker(id: speaker.id, slider: speaker.relVolume, gain: speaker.gain,
+                                          curve: speaker.levelCurve, trim: speaker.balanceTrim,
+                                          masterCurve: speaker.masterCurve)
+            return RoomVolumePolicy.effectiveGain(for: model, systemMaster: Double(step) / 16) * 100
+        }
+    }
+
+    @discardableResult
+    func setMasterCurve(_ values: [Double], for speaker: RoomSpeaker) -> Bool {
+        guard values.count == 16, let curve = SpeakerLevelCurve(percentPerStep: values),
+              let idx = speakers.firstIndex(where: { $0.id == speaker.id }) else { return false }
+        // A rising Mac volume must never reduce the unbounded speaker command.
+        var previous = 0.0
+        for tick in 1...1024 {
+            let master = Double(tick) / 1024
+            let output = master * curve.gain(atMaster: master)
+            guard output + 1e-9 >= previous else { return false }
+            previous = output
+        }
+        speakers[idx].masterCurve = curve
+        preferences.set(values, forKey: "dali.masterCurve.\(speaker.name)")
+        scheduleVolumePush()
+        return true
+    }
+
+    func resetMasterCurve(for speaker: RoomSpeaker) {
+        guard let idx = speakers.firstIndex(where: { $0.id == speaker.id }) else { return }
+        speakers[idx].masterCurve = nil
+        preferences.removeObject(forKey: "dali.masterCurve.\(speaker.name)")
+        scheduleVolumePush()
+    }
+
     /// The one balance trim (percent, whole numbers, -30...30) that shifts a curve
     /// speaker's whole leveling curve up or down. 0 is the measured curve.
     func setBalanceTrim(_ percent: Double, for speaker: RoomSpeaker) {
@@ -2097,6 +2431,19 @@ final class DALIStore {
         speakers[idx].balanceTrim = clamped
         preferences.set(clamped, forKey: "dali.balance.\(speaker.name)")
         scheduleVolumePush()
+    }
+
+    /// Surround: the back pair plays the song's surround mix instead of a copy of
+    /// the front. Not Dolby Atmos: it is derived from the stereo song.
+    var surround: Bool {
+        didSet {
+            guard surround != oldValue else { return }
+            cancelSpeakerTest()
+            preferences.set(surround, forKey: "dali.surround")
+            guard backendEnabled else { return }
+            // Live on the running stream: a short crossfade, nothing reconnects.
+            Task { await ensureChannelMix() }
+        }
     }
 
     /// Hard ceiling for what any speaker is ever sent (big speakers, small room).
@@ -2117,6 +2464,17 @@ final class DALIStore {
     /// What we have CONFIRMED the engine holds. Only written after a PUT
     /// actually succeeded — see scheduleOffsetPush().
     private var lastSentOffset: [String: Int] = [:]
+    /// When the circle test's sound starts being heard in the room.
+    private(set) var circleStartedAt: Date?
+    /// The corner the speaker test is playing right now, as heard in the room.
+    private(set) var speakerTestCorner: SpeakerCorner?
+    private var speakerTestPair: RoomSpeaker.Kind?
+    private var speakerTestTask: Task<Void, Never>?
+    /// What the engine last reported for its rear stream; nil until it has been heard.
+    @ObservationIgnored private var engineRearDirect: Bool?
+    /// The channel mix the engine last reported (or accepted) for each output.
+    private var engineChannelMix: [String: Int] = [:]
+    private var channelMixTask: Task<Void, Never>?
     private var offsetPushTask: Task<Void, Never>?
     private var offsetPushAgain = false
     private var offsetPushEpoch = 0
@@ -2366,6 +2724,12 @@ final class DALIStore {
         let muted = audioCut && !cutOverridden
         guard muted != roomMutedByCut else { return }
         roomMutedByCut = muted
+        // The Apple route is not the engine, so the engine push below would skip it silently.
+        // Push the cut to the Apple route now, from the same plan.
+        if AppleSender.shared.phase == .playing {
+            AppleSender.shared.applyRoomVolumesNow()
+            return
+        }
         guard phase == .streaming else { return }
         // Pause/seek/play can flip this repeatedly while a volume request is
         // still waiting on AirPlay. One task per flip queued stale mute commands
@@ -2419,8 +2783,8 @@ final class DALIStore {
                 || sessionMembership.contains(name: $0.name, enabled: false, primary: false)
         }.map {
             RoomVolumeSpeaker(id: $0.id, slider: $0.relVolume, gain: $0.gain, enabled: $0.enabled,
-                              curve: $0.levelCurve, trim: $0.balanceTrim)
-        }, ceiling: volumeLimit, systemMaster: roomMaster, muted: roomMutedByCut)
+                              curve: $0.levelCurve, trim: $0.balanceTrim, masterCurve: $0.masterCurve)
+        }, ceiling: volumeLimit, systemMaster: roomMaster, muted: roomMutedByCut && speakerTestPair == nil)
     }
 
     /// The Mac master volume when it is what drives the room (system-audio mode).
@@ -2432,7 +2796,7 @@ final class DALIStore {
         RoomVolumePolicy.effectiveGain(
             for: RoomVolumeSpeaker(id: speaker.id, slider: speaker.relVolume, gain: speaker.gain,
                                    enabled: speaker.enabled,
-                                   curve: speaker.levelCurve, trim: speaker.balanceTrim),
+                                   curve: speaker.levelCurve, trim: speaker.balanceTrim, masterCurve: speaker.masterCurve),
             systemMaster: roomMaster)
     }
 
@@ -2531,6 +2895,10 @@ final class DALIStore {
             phase == .streaming && (!$0.enabled || $0.health == .live)
                 && !speakerRecoveryInFlight.contains($0.id)
         }.map(\.id))
+        // Speaker test: only the pair under test plays.
+        if let pair = speakerTestPair {
+            for speaker in members where speaker.kind != pair { targets[speaker.id] = 0 }
+        }
         if phase == .streaming { lastSentTargets = targets }
         volumeController.update(session: streamGeneration, active: phase.isOn,
                                 targets: targets, eligible: eligible,
@@ -2666,6 +3034,8 @@ final class DALIStore {
         // Silence first so a mid-rejoin device never blasts at its own default.
         try? await silenceOutput(sp.id)
         guard stillWanted() else { return }
+        await ensureChannelMix()
+        guard stillWanted() else { return }
         // GENTLE FIRST. Re-asserting the whole output list keeps the shared
         // AirPlay 2 session (a per-member deselect can take the PARTNER down
         // with it: the "it plays one or the other" failure). Only after two
@@ -2736,8 +3106,30 @@ final class DALIStore {
         updateVolumeIntent(force: Set(ids ?? sessionSpeakers().map(\.id)))
     }
 
-    private func cancelVolumePush() { volumeController.stop(session: streamGeneration) }
-    private func scheduleVolumePush() { updateVolumeIntent() }
+    private func cancelVolumePush() {
+        volumePushTask?.cancel(); volumePushTask = nil
+        volumeController.stop(session: streamGeneration)
+    }
+    private var volumePushTask: Task<Void, Never>?
+    private var lastVolumePush = ContinuousClock.now - .seconds(1)
+    /// At most one volume write per 200 ms: the first change goes at once, a ramp ends in one trailing write
+    /// (25 Nov: up to 80 writes a minute crowded the engine while the Mac was busy and audio cut out).
+    private func scheduleVolumePush() {
+        guard volumePushTask == nil else { return }
+        let wait = Duration.milliseconds(200) - lastVolumePush.duration(to: .now)
+        if wait <= .zero {
+            lastVolumePush = .now
+            updateVolumeIntent()
+            return
+        }
+        volumePushTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: wait)
+            guard !Task.isCancelled, let self else { return }
+            self.volumePushTask = nil
+            self.lastVolumePush = .now
+            self.updateVolumeIntent()
+        }
+    }
 
     private var fading = false
 
@@ -2806,6 +3198,10 @@ final class DALIStore {
         // we need trustworthy when diagnosing whatever caused this resume.
         resetDriftAnchors()
         markHealth(of: Array(requiredIDs()), .connecting)
+        // A respawned engine forgot every speaker's mix (it is not persisted) and
+        // the sessions this opens read it as they are set up.
+        await ensureChannelMix()
+        guard streamIsCurrent(generation) else { return }
         try? await api.setOutputs(ids: ids)
         guard streamIsCurrent(generation) else { return }
         if playerMode {

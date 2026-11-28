@@ -2,7 +2,7 @@
 //
 // 1. chrome.* stub so content.js runs on a plain page. The only two things the
 //    production content script asks the browser for are chrome.storage.local
-//    (the optional per-site trim) and a {type:'beacon'} message, so those are
+//    (the debug flag) and a {type:'beacon'} message, so those are
 //    the only two things stubbed.
 // 2. A worker-driven requestAnimationFrame replacement. The automation browser
 //    keeps this tab document.hidden, which kills real rAF and
@@ -11,7 +11,7 @@
 // 3. A controllable document.visibilityState, so the tab-switch tests are the
 //    same whether the driver's tab is really on screen or not.
 (() => {
-  const local = { trims: {}, debug: false };
+  const local = { debug: false };
   const listeners = [];
 
   // --- controllable page visibility ----------------------------------------
@@ -173,11 +173,6 @@
     }
   };
   window.__local = local;
-  window.__setTrim = (host, ms) => {
-    const t = Object.assign({}, local.trims);
-    if (ms === null) delete t[host]; else t[host] = ms;
-    return window.chrome.storage.local.set({ trims: t });
-  };
 
   // --- ImageBitmap accounting (memory bound + leak check) -------------------
   let created = 0, closed = 0, bytes = 0, peakLive = 0, peakBytes = 0;

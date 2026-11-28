@@ -432,15 +432,6 @@ async function runSuite() {
   await wait(900);
   ok(!$c(), 'H4 does not engage when the app reports a 0ms delay');
 
-  // ---- I. per-site trim rides on top of the automatic value --------------
-  await beacon({ running: true, streaming: true, delayMs: 1500 });
-  await waitFor(presenting, 4000);
-  await settleAt(1500, 200, 6000);
-  await window.__setTrim(location.hostname, -400);
-  ok(await settleAt(1100, 200, 6000), 'I1 trim applied on top of the beacon value');
-  await window.__setTrim(location.hostname, null);
-  ok(await settleAt(1500, 200, 6000), 'I2 back to the pure automatic value');
-
   // ---- J. <video> element swap (SPA) -------------------------------------
   const t = v.currentTime;
   const n = document.createElement('video');

@@ -54,8 +54,8 @@
   // Bump BUILD on every edit. The service worker prints version + build on
   // startup (chrome://extensions -> "service worker"); that line is the only
   // way to confirm which code Chrome actually has loaded.
-  const VERSION = '1.2.5';
-  const BUILD = '2026-10-17.d';
+  const VERSION = '1.2.6';
+  const BUILD = '2026-11-08.a';
 
   if (typeof chrome === 'undefined' || !chrome.runtime) return;
 
@@ -82,8 +82,6 @@
   // Below this, a delay is not worth a canvas: the round trip costs more than
   // it fixes.
   const MIN_ENGAGE_DELAY = 60;
-  // Optional per-site trim, applied on top of the app's number. Never required.
-  const MAX_TRIM = 2000;
 
   // Decoded frames are the only real memory cost. Budget, not frame count:
   // a 1280x720 bitmap is 3.7 MB, so 256 MB is ~70 frames at that size.
@@ -150,7 +148,6 @@
   const CANVAS_CLASS = 'dali-sync-overlay';
   const HIDDEN_ATTR = 'data-dali-sync-hidden';
   const ORIGINAL_VISIBILITY_ATTR = 'data-dali-sync-original-visibility';
-  const TRIM_KEY = 'trims';
 
   const S = {
     dead: false,           // torn down for good (extension reloaded / replaced)
@@ -160,8 +157,6 @@
     // Audio-cut state used to live here, per frame — see the "Audio cut —
     // reporting only" section below for why that was wrong and where the
     // decision lives now (the background worker, which sees every frame).
-    trims: {},
-    trim: 0,
     debug: false,
     pipeline: null,
     scanning: false,
@@ -197,25 +192,14 @@
   }
 
   // -------------------------------------------------------------------------
-  // The delay number.
-  //
-  // autoDelayMs comes from the app and is the whole answer; the trim is a
-  // per-site nudge for someone whose speaker is unusual, and is zero unless
-  // they went looking for it.
-
-  function clampTrim(ms) {
-    ms = Math.round(Number(ms));
-    if (!Number.isFinite(ms)) return 0;
-    return Math.min(MAX_TRIM, Math.max(-MAX_TRIM, ms));
-  }
-
+  // The delay number. autoDelayMs comes from the app and is the whole answer.
   function autoDelayMs() {
     return S.dali.streaming ? S.dali.delayMs : 0;
   }
 
   function activeDelayMs() {
     if (!S.dali.streaming) return 0;
-    const ms = Math.round(autoDelayMs() + S.trim);
+    const ms = Math.round(autoDelayMs());
     return Math.min(MAX_DELAY, Math.max(0, ms));
   }
 
@@ -248,23 +232,13 @@
   }
 
   // -------------------------------------------------------------------------
-  // Storage: the per-site trim and a debug flag. Nothing else is persisted —
-  // there are no settings.
-
-  function applyTrims(trims) {
-    S.trims = trims || {};
-    const next = clampTrim(S.trims[location.hostname]);
-    if (next === S.trim) return false;
-    S.trim = next;
-    return true;
-  }
+  // Storage: a debug flag only. Nothing else is persisted — there are no settings.
 
   function loadStorage() {
     try {
-      chrome.storage.local.get({ [TRIM_KEY]: {}, debug: false }).then((v) => {
+      chrome.storage.local.get({ debug: false }).then((v) => {
         S.debug = !!v.debug;
         if (S.debug) log('v' + VERSION + ' build ' + BUILD, 'in', location.href);
-        applyTrims(v[TRIM_KEY]);
         scheduleEvaluate();
       }).catch(() => {});
     } catch (e) { /* ignore */ }
@@ -274,11 +248,6 @@
     chrome.storage.onChanged.addListener((changes, area) => {
       if (area !== 'local') return;
       if (changes.debug) S.debug = !!changes.debug.newValue;
-      if (changes[TRIM_KEY] && applyTrims(changes[TRIM_KEY].newValue)) {
-        log('trim ->', S.trim, 'ms');
-        if (S.pipeline && !S.pipeline.detached) S.pipeline.planCapture();
-        scheduleEvaluate();
-      }
     });
   } catch (e) { /* ignore */ }
 
@@ -637,7 +606,13 @@
       this.listen(v, 'seeking', () => this.onSeek());
 
       this.listen(v, 'seeked', () => { markFresh(v); this.lastTimeSeen = v.currentTime; });
-      this.listen(v, 'play', () => { markFresh(v); this.resumeDraw(); });
+      this.listen(v, 'play', () => {
+        markFresh(v);
+        // Decoder startup can outlast FRESH_MS. Keep this restart pending
+        // until its first captured frame, just as for a source replacement.
+        if (!this.armed) this.freshPending = true;
+        this.resumeDraw();
+      });
       // NOT 'playing': that also fires when a stall ends, and a stall is not a
       // fresh audio start — the speakers are still working through the audio
       // that was already in the pipe, so the delay must be eased back in, not
@@ -944,9 +919,9 @@
       let w = Math.min(vw, MAX_CAPTURE_WIDTH, Math.max(160, wantW));
       w = Math.max(2, Math.round(w / 2) * 2);
       let h = Math.max(2, Math.round((w * vh) / vw / 2) * 2);
-      // Size for the TARGET delay, not the ramped one: the ring has to be able
-      // to hold the full delay by the time the ramp reaches it.
-      const delaySec = Math.max(0.05, activeDelayMs() / 1000);
+      // Retain enough history for both the destination and the current delay.
+      // A downward glide still needs old frames until the picture catches up.
+      const delaySec = Math.max(0.05, activeDelayMs() / 1000, this.eff / 1000);
 
       // Portrait frames can cost much more than landscape at the same width.
       // If even MIN_FPS cannot fit the requested history, reduce resolution
@@ -1383,7 +1358,7 @@
     S.daliKnown = true;
     S.dali = next;
     if (!changed) return;
-    log('beacon', JSON.stringify(next), 'trim', S.trim);
+    log('beacon', JSON.stringify(next));
     if (S.pipeline && !S.pipeline.detached) S.pipeline.planCapture();
     scheduleEvaluate();
   }
@@ -1540,9 +1515,11 @@
     lastReportedAudible = audible;
     lastReportAt = now;
     const p = S.pipeline;
+    // cutEligible: this frame has unmuted media actually sounding. No armed
+    // pipeline, page visibility or scoring is required, so pre-arm, DRM, PiP,
+    // fullscreen and embedded players still get the pause-tail cut.
     const msg = { type: 'playstate', playing: playing, audible: audible,
-      cutEligible: !!(p && p.armed && !p.detached && pageVisible() &&
-        scoreVideo(p.video) > 0 && !p.video.muted && p.video.volume > 0) };
+      cutEligible: anyCutAudibleMedia() };
     if (audible) {
       // For the app's now-playing line. The worker unions frames per tab and
       // forwards the list to the beacon; none of this touches the delay.
@@ -1600,6 +1577,16 @@
 
   // Activity shows sound-producing media, while the separate playback-intent
   // flag above protects buffered audio through loading and seeking.
+  // Sound a room cut applies to: unmuted, audible-volume media that is not
+  // paused or ended. Buffering still counts, so a rebuffer never cuts the room.
+  function anyCutAudibleMedia() {
+    return allMedia().some(v => {
+      try {
+        return v.isConnected && !v.paused && !v.ended && !v.muted && v.volume > 0;
+      } catch (e) { return false; }
+    });
+  }
+
   function anyAudibleMedia() {
     return allMedia().some(v => {
       try {

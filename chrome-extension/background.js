@@ -36,7 +36,7 @@ importScripts('beacon.js');
 
 // Bump BUILD on every edit — it is what tells you whether Chrome is running
 // the code you just wrote. Keep it in step with the same constant in content.js.
-const BUILD = '2026-10-17.d';
+const BUILD = '2026-11-08.a';
 
 // Stamp every request with who we are, so the app can show that the extension
 // is really running (its beacon echoes this back as `extensionVersion`).
@@ -45,7 +45,9 @@ DALIBeacon.setIdentity(chrome.runtime.getManifest().version, BUILD);
 // The app refreshes delayMs once a second, so caching for less than that is
 // wasted work and caching for much more would lag a room going live.
 const CACHE_MS = 750;
-const BEACON_FAILURE_GRACE_MS = 10000;
+// Short on purpose: a stopped or crashed app must stop delaying video within
+// seconds, not hang it for ten.
+const BEACON_FAILURE_GRACE_MS = 2500;
 
 let cache = { at: 0, value: null, pending: null };
 
@@ -196,12 +198,17 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.type === 'playstate') {
     const key = frameKey(sender);
     const previous = frames.get(key);
-    const stopped = !!(previous && previous.playing && previous.cutEligible && !msg.playing &&
-      !msg.gone && Date.now() - previous.at <= FRAME_STALE_MS);
+    // A frame is "cut-eligible" only while it is playing AND has sound a room
+    // cut applies to. A muted autoplay video reports playing but not eligible,
+    // so it can never keep a real pause-tail cut from being armed or cancel one.
+    const eligible = !msg.gone && !!msg.playing && msg.cutEligible !== false;
+    // A teardown ("gone") is not a pause; only a playing -> stopped change is.
+    const stopped = !!(previous && previous.cutEligible && !eligible && !msg.gone &&
+      Date.now() - previous.at <= FRAME_STALE_MS);
     ensureSweep();
     if (msg.gone) frames.delete(key);
     else frames.set(key, { playing: !!msg.playing, audible: msg.audible === true, at: Date.now(),
-                           cutEligible: msg.cutEligible !== false,
+                           cutEligible: eligible,
                            title: msg.title || '', host: msg.host || '',
                            live: !!msg.live, held: !!msg.held, art: msg.art || '' });
     evaluateCut(stopped);
@@ -253,13 +260,15 @@ function frameKey(sender) {
   return (tabId == null ? 'x' : tabId) + ':' + frameId;
 }
 
-// Purges stale entries as a side effect, so callers never have to sweep first.
-function anyFramePlaying() {
+// Cut decisions use audible media only (see cutEligible above), never mere
+// "playing". Purges stale entries as a side effect, so callers never have to
+// sweep first.
+function anyFrameAudible() {
   const now = Date.now();
   let any = false;
   for (const [key, f] of frames) {
     if (now - f.at > FRAME_STALE_MS) { frames.delete(key); continue; }
-    if (f.playing) any = true;
+    if (f.cutEligible) any = true;
   }
   return any;
 }
@@ -311,7 +320,7 @@ function releaseCut() {
 function evaluateCut(stopped = false) {
   // Purges stale frames as a side effect, so it runs before anything reads
   // `frames.size` below.
-  const playing = anyFramePlaying();
+  const playing = anyFrameAudible();
 
   // No point silencing a room that is not there — and never HOLD a room silent
   // on a reading we no longer have. Refresh, but only while frames are actually
@@ -342,7 +351,7 @@ function evaluateCut(stopped = false) {
   cutUntil = Date.now() + Math.min(DALIBeacon.MAX_DELAY_MS, Math.max(0, dali.delayMs || 0)) + CUT_TAIL_MARGIN_MS;
   cutGraceTimer = setTimeout(() => {
     cutGraceTimer = null;
-    if (anyFramePlaying() || !frames.size || Date.now() >= cutUntil ||
+    if (anyFrameAudible() || !frames.size || Date.now() >= cutUntil ||
         !lastStatus.value || !lastStatus.value.streaming ||
         Date.now() - lastStatus.at >= STATUS_STALE_MS) {
       releaseCut();

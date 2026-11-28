@@ -33,7 +33,7 @@ To check the active version, open the extension's **service worker** console
 from `chrome://extensions`. This release prints:
 
 ```
-[DALI Video Sync] v1.2.5  build 2026-10-17.d
+[DALI Video Sync] v1.2.6  build 2026-11-08.a
 ```
 
 ## Video support
@@ -55,7 +55,7 @@ overlay. In those cases the original player remains visible and undelayed.
 YouTube's normal fullscreen player container can contain the overlay.
 
 The delay comes from DALI's stable configured buffer, engine scheduling
-allowance, and saved timing trim. Receiver-specific latency and network conditions can still
+allowance. Receiver-specific latency and network conditions can still
 need in-room calibration. A clean browser test cannot prove speaker lip-sync.
 
 ## What changed in 1.2.5
@@ -128,7 +128,7 @@ app-side timeout as a backstop.
 The extension has no external service, account, analytics, or remote code. It
 reads video frames locally and sends playback state, tab title, host, and an
 optional page thumbnail URL to the local DALI app. It does not upload the
-frames. Local storage contains optional timing trims, a debug setting, and the
+frames. Local storage contains a debug setting, and the
 latest managed-update attempt.
 
 Broad HTTP/HTTPS host access is needed to operate across video platforms and

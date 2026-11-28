@@ -447,6 +447,13 @@ final class AppleSender {
         }
     }
 
+    /// Called by DALIStore when the room mute (cut) changes, so /cut reaches the
+    /// AirPlay route at once instead of on the next 250 ms monitor tick.
+    func applyRoomVolumesNow() {
+        guard phase == .playing else { return }
+        applyVolumes()
+    }
+
     /// DALI's volume plan, applied to the Apple route: the shared quiet-floor gain
     /// on the audio and each speaker's own volume.
     private func applyVolumes() {

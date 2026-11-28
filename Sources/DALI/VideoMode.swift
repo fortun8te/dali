@@ -277,8 +277,10 @@ final class VideoModeState {
         }
     }
 
+    /// `beforeSwitch` runs before the HAL output changes, so the browser learns
+    /// the room has stopped before any picture-delay assumption goes stale.
     @discardableResult
-    func enter(stopRoom: () -> Void) -> Bool {
+    func enter(beforeSwitch: () -> Void = {}, stopRoom: () -> Void) -> Bool {
         refresh()
         guard let wired = wiredDevice else {
             fail("The POWERNODE isn't connected. Plug it into the Mac with USB-C.")
@@ -286,6 +288,7 @@ final class VideoModeState {
         }
         guard !isActive else { return true }
         let previous = hardware.defaultOutput()
+        beforeSwitch()
         let status = hardware.setDefaultOutput(wired.id)
         guard status == noErr else {
             fail("macOS refused to switch output to \(wired.name). Error \(WiredOutput.describe(status)).")
@@ -397,8 +400,17 @@ extension DALIStore {
     /// Returns false (and sets `videoMode.lastError`) if anything stopped it.
     @discardableResult
     func enterVideoMode() -> Bool {
-        let result = videoMode.enter {
+        let wasStreaming = phase == .streaming
+        let result = videoMode.enter(beforeSwitch: { [syncBeacon] in
+            // Say "not streaming" before the output moves, not after the stream
+            // has stopped: the gap is what made the picture lag ~700 ms.
+            syncBeacon.publish(streaming: false, delaySeconds: nil)
+        }, stopRoom: {
             if phase.isOn { playerMode ? stopPlayback() : stopStream() }
+        })
+        // A failed switch leaves the AirPlay room playing, so the beacon must say so again.
+        if !result, wasStreaming, phase == .streaming {
+            syncBeacon.publish(streaming: true, delaySeconds: roomDelaySec)
         }
         if let error = videoMode.lastError { dlog("video mode: \(error)") }
         return result
