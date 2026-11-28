@@ -251,13 +251,25 @@ struct RoomSettings: View {
     }
 }
 
-/// Lip sync, settled by ear. The measured delay rests on an assumption about
-/// how much output latency the receivers compensate themselves; this is the
-/// correction, dragged while a face is talking. Zero is the measurement.
+/// Lip sync. Check measures it: four chirps through the room, timed by the Mac's
+/// microphone, set the correction for the receivers' own latency. The slider is
+/// still there to settle it by eye while a face is talking.
 struct LipSyncTrim: View {
     @Environment(DALIStore.self) private var store
 
     private var trim: Int { safeInt(store.delayTrimMs.rounded()) }
+
+    private var checkNote: String? {
+        switch store.syncCheck {
+        case .idle: nil
+        case .listening: "Listening to the room…"
+        case let .done(pictureMs, trimMs, clamped):
+            clamped
+                ? "Measured \(pictureMs) ms, more than Lip sync can reach. Set to \(trimMs > 0 ? "+" : "")\(trimMs) ms."
+                : "Measured \(pictureMs) ms. Lip sync set to \(trimMs > 0 ? "+" : "")\(trimMs) ms."
+        case let .failed(message): message
+        }
+    }
 
     var body: some View {
         @Bindable var store = store
@@ -265,6 +277,11 @@ struct LipSyncTrim: View {
             HStack {
                 Text("Lip sync").font(.body13).foregroundStyle(Color.paper)
                 Spacer()
+                Button(store.syncCheck == .listening ? "Checking…" : "Check") { store.checkSync() }
+                    .buttonStyle(SecondaryButtonStyle(accent: false))
+                    .font(.caption)
+                    .disabled(!store.canCheckSync)
+                    .help("Plays four short chirps and times them with the Mac's microphone, then sets Lip sync. The room is quiet for about five seconds.")
                 if trim != 0 {
                     Button("Reset") { store.delayTrimMs = 0 }
                         .buttonStyle(SecondaryButtonStyle(accent: true))
@@ -280,7 +297,15 @@ struct LipSyncTrim: View {
                                       set: { store.delayTrimMs = ($0 / 100 * 800 - 400).rounded() }))
                 .accessibilityLabel("Lip sync trim")
                 .help("Drag while a face is talking until the mouth matches the sound. Left shows the picture sooner.")
+            if let checkNote {
+                Text(checkNote)
+                    .font(.caption)
+                    .foregroundStyle(Color.paper62)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .transition(.opacity)
+            }
         }
+        .animation(Motion.fade, value: store.syncCheck)
     }
 }
 

@@ -20,13 +20,13 @@ final class LatencyBacklogMonitorTests: XCTestCase {
 
     func testSustainedBacklogWhilePlayingReplaysOnce() {
         var m = LatencyBacklogMonitor()
-        XCTAssertEqual(feed(&m, seconds: 30, pending: stuck), [4])
+        XCTAssertEqual(feed(&m, seconds: 30, pending: stuck), [2])
     }
 
     func testShortBurstsAndPausedPlayerDoNotReplay() {
         var m = LatencyBacklogMonitor()
         for _ in 0..<20 {
-            XCTAssertEqual(feed(&m, seconds: 3, pending: stuck), [])
+            XCTAssertEqual(feed(&m, seconds: 2, pending: stuck), [])
             XCTAssertEqual(feed(&m, seconds: 1, pending: idle), [])
         }
         // OwnTone deliberately stops reading while its player is not playing.
@@ -35,15 +35,15 @@ final class LatencyBacklogMonitorTests: XCTestCase {
 
     func testUnknownPlayerStateHoldsProgressInsteadOfClearingIt() {
         var m = LatencyBacklogMonitor()
-        XCTAssertEqual(feed(&m, seconds: 3, pending: stuck), [])
+        XCTAssertEqual(feed(&m, seconds: 2, pending: stuck), [])
         XCTAssertEqual(feed(&m, seconds: 10, pending: stuck, playing: nil), [])
-        XCTAssertEqual(feed(&m, seconds: 2, pending: stuck), [1])
+        XCTAssertEqual(feed(&m, seconds: 2, pending: stuck), [0])
     }
 
     func testRepeatedBacklogBacksOffInsteadOfDippingEveryMinute() {
         var m = LatencyBacklogMonitor()
         let replays = feed(&m, seconds: 3_600, pending: stuck)
-        XCTAssertEqual(replays.first, 4)
+        XCTAssertEqual(replays.first, 2)
         let gaps = zip(replays.dropFirst(), replays).map { $0 - $1 }
         XCTAssertEqual(gaps, [60, 120, 240, 480, 960, 1_800].prefix(gaps.count).map { $0 })
         XCTAssertLessThanOrEqual(replays.count, 6)
@@ -51,9 +51,9 @@ final class LatencyBacklogMonitorTests: XCTestCase {
 
     func testANewIncidentLongAfterRecoveryUsesTheShortCooldownAgain() {
         var m = LatencyBacklogMonitor()
-        XCTAssertEqual(feed(&m, seconds: 10, pending: stuck), [4])
+        XCTAssertEqual(feed(&m, seconds: 10, pending: stuck), [2])
         XCTAssertEqual(feed(&m, seconds: 1_000, pending: idle), [])
-        XCTAssertEqual(feed(&m, seconds: 10, pending: stuck), [4])
+        XCTAssertEqual(feed(&m, seconds: 10, pending: stuck), [2])
         XCTAssertEqual(m.requiredCooldownSec, 60)
     }
 

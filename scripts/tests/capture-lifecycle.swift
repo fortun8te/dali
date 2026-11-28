@@ -110,6 +110,7 @@ private struct CaptureLifecycleTests {
         try await recoveryEvidenceRequiresFreshPublishedBuffers()
         try await gapDiscardsVarispeedHistory(returnToUnity: false)
         try await gapDiscardsVarispeedHistory(returnToUnity: true)
+        try await syncProbeReplacesRoomAudioAndStampsItsStart()
         var recoveryFailures = [String]()
         do { try await keepaliveUpdatesSilenceWithoutInventingCallbacks() }
         catch { recoveryFailures.append(String(describing: error)) }
@@ -248,6 +249,43 @@ private struct CaptureLifecycleTests {
         }
         try expect(factory.count == 1 && capture.publicationProgress.publishedBuffers == 10,
                    "Healthy silent callbacks were rebuilt after idle source activation")
+    }
+
+    /// The lip-sync check: from the first buffer after it starts, the pipe carries
+    /// exactly the probe (music replaced), its start is stamped, and the room's own
+    /// audio comes straight back when it stops.
+    static func syncProbeReplacesRoomAudioAndStampsItsStart() async throws {
+        let fixture = try PipeFixture(), factory = TapFactory()
+        let capture = isolatedCapture(makeTap: { factory.make() }, observeWake: false, sourceActivity: { _ in true })
+        try await capture.startAsync(fifoPath: fixture.path)
+        defer { capture.stop() }
+        factory.latest.emit(value: 0.5, rate: 44100)
+        try await Task.sleep(for: .milliseconds(30))
+        _ = fixture.readAvailable()
+        let id = capture.startSyncProbe()
+        try expect(capture.syncProbeEmission(id) == nil, "Probe stamped before any audio carried it")
+        var carried = [UInt8]()
+        let wanted = Int((SyncProbe.leadSec + 0.1) * 44_100) * 4
+        let before = AudioGetCurrentHostTime()
+        while carried.count < wanted {
+            factory.latest.emit(value: 0.5, rate: 44100)
+            try await Task.sleep(for: .milliseconds(5))
+            carried += fixture.readAvailable()
+        }
+        try expect(capture.syncProbeEmission(id).map { $0 >= before } == true, "Probe start was not stamped")
+        try expect(capture.syncProbeEmission(id + 1) == nil, "Another probe's id read this probe's start")
+        var writer = SyncProbe.Writer()
+        var reference = Data(count: carried.count)
+        writer.write(into: &reference)
+        try expect(Array(reference) == carried, "Pipe did not carry exactly the probe in place of the music")
+        capture.stopSyncProbe()
+        try await Task.sleep(for: .milliseconds(10))
+        _ = fixture.readAvailable()
+        factory.latest.emit(value: 0.5, rate: 44100)
+        try await Task.sleep(for: .milliseconds(30))
+        let after = fixture.readAvailable()
+        try expect(after.contains { $0 != 0 }, "Room audio did not return after the probe")
+        try expect(capture.syncProbeEmission(id) == nil, "A stopped probe still reported a start")
     }
 
     static func keepaliveUpdatesSilenceWithoutInventingCallbacks() async throws {

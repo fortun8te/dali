@@ -4,6 +4,7 @@
 // speaker is audibly healthy. UI chrome must read speaker `health` for that.
 
 import Foundation
+import AVFoundation
 import SwiftUI
 import CoreWLAN
 import Observation
@@ -1492,7 +1493,129 @@ final class DALIStore {
     private static let speakerTestGapSec = 0.5
 
     var isSpeakerTesting: Bool { speakerTestTask != nil }
-    var canTestSpeakers: Bool { phase == .streaming && !playerMode && source != .spotify && !AppleSender.shared.isSelected }
+    var canTestSpeakers: Bool {
+        phase == .streaming && !playerMode && source != .spotify && !AppleSender.shared.isSelected
+            && syncCheck != .listening
+    }
+
+    // MARK: lip-sync check
+
+    enum SyncCheckState: Equatable {
+        case idle, listening
+        /// `pictureMs` is the measured picture delay; `trimMs` what Lip sync was set to.
+        case done(pictureMs: Int, trimMs: Int, clamped: Bool)
+        case failed(String)
+    }
+    private(set) var syncCheck: SyncCheckState = .idle
+    var canCheckSync: Bool { canTestSpeakers && !isSpeakerTesting }
+
+    /// Plays four short chirps through the room in place of the Mac's audio, times
+    /// them with the Mac's microphone, and sets Lip sync so the browser picture waits
+    /// exactly as long as the sound really takes. About five seconds.
+    func checkSync() {
+        guard canCheckSync else { return }
+        syncCheck = .listening
+        let generation = streamGeneration
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            let outcome = await self.runSyncCheck(generation: generation)
+            self.syncCheck = outcome
+        }
+    }
+
+    private final class ProbeID: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value: Int?
+        func set(_ id: Int) { lock.withLock { value = id } }
+        var id: Int? { lock.withLock { value } }
+    }
+
+    private func runSyncCheck(generation: Int) async -> SyncCheckState {
+        func live() -> Bool { streamGeneration == generation && phase == .streaming }
+        switch AVCaptureDevice.authorizationStatus(for: .audio) {
+        case .authorized: break
+        case .notDetermined:
+            guard await AVCaptureDevice.requestAccess(for: .audio) else {
+                return .failed("DALI needs the microphone to hear the room.")
+            }
+        default:
+            return .failed("Allow DALI in System Settings › Privacy & Security › Microphone.")
+        }
+        guard live() else { return .failed("Start the room first.") }
+        // Audio queued behind the engine is lag the room sheds again later; timing
+        // it would set the picture late for good.
+        if let pending = lastFlight?.pending, Double(pending) / 176_400 > 0.05 {
+            return .failed("The room is catching up. Try again in a moment.")
+        }
+
+        // Only the front pair, where the screen is: two pairs at two distances would
+        // blur the answer. The back pair is quiet for the few seconds of the check.
+        let kinds = Set(speakers.filter { $0.enabled && $0.available }.map(\.kind))
+        let soloFront = kinds.contains(.front) && kinds.contains(.back)
+        if soloFront {
+            speakerTestPair = .front
+            forceVolumeResync()
+            await ensureChannelMix()
+            try? await Task.sleep(for: .milliseconds(600))
+        }
+        defer {
+            if soloFront {
+                speakerTestPair = nil
+                Task { await self.ensureChannelMix() }
+                if phase == .streaming { forceVolumeResync() }
+            }
+        }
+        guard live() else { return .failed("Playback stopped during the check.") }
+
+        dlog("sync check started")
+        let expected = roomDelaySec
+        let probe = ProbeID()
+        let capture = self.capture
+        let recording: MicRecorder.Recording
+        do {
+            recording = try await MicRecorder().record(seconds: SyncProbe.patternSec + expected + 0.9) {
+                probe.set(capture.startSyncProbe())
+            }
+        } catch {
+            capture.stopSyncProbe()
+            dlog("sync check: microphone failed: \(error)")
+            return .failed("Couldn't use the microphone.")
+        }
+        let emission = probe.id.flatMap { capture.syncProbeEmission($0) }
+        capture.stopSyncProbe()
+        guard live() else { return .failed("Playback stopped during the check.") }
+        guard let emission else { return .failed("No audio reached DALI. Try again.") }
+
+        let emittedAt = MicRecorder.hostSeconds(emission)
+        let upper = expected + 0.6
+        let result = await Task.detached(priority: .userInitiated) {
+            SyncProbe.measure(recording: recording.samples, sampleRate: recording.sampleRate,
+                              recordingStart: recording.startSec, emittedAt: emittedAt,
+                              search: 0.15...upper)
+        }.value
+        guard let result else {
+            dlog("sync check: chirps not heard clearly")
+            return .failed("Couldn't hear the speakers. Turn the room up a little and try again.")
+        }
+        // Chrome shows a frame when its sound would leave the Mac's own output,
+        // a little after DALI captured it.
+        let output = DeviceLatency.defaultDevice(input: false).map(DeviceLatency.outputSeconds) ?? 0
+        let pictureSec = result.delaySec - output
+        let decoderSec = engineRearDirect == true ? 0 : 512.0 / 44100.0
+        let modelSec = RoomDelayPolicy.seconds(startBufferMs: config.startBufferMs, trimMs: 0) + decoderSec
+        let wanted = ((pictureSec - modelSec) * 1_000).rounded()
+        let trim = min(max(wanted, -400), 400)
+        let previous = delayTrimMs
+        delayTrimMs = trim
+        dlog(String(format: "sync check: sound lands %.0f ms after capture, Mac output %.0f ms, picture delay %.0f ms (model %.0f ms) -> lip sync %+.0f ms (was %+.0f), %d chirps, spread %.1f ms",
+                    result.delaySec * 1_000, output * 1_000, pictureSec * 1_000, modelSec * 1_000,
+                    trim, previous, result.heard, result.spreadMs))
+        aiEvent("sync_check", fields: [
+            "arrival_ms": Int((result.delaySec * 1_000).rounded()), "output_ms": Int((output * 1_000).rounded()),
+            "model_ms": Int((modelSec * 1_000).rounded()), "trim_ms": Int(trim), "previous_trim_ms": Int(previous),
+            "chirps": result.heard, "spread_ms": result.spreadMs, "buffer_ms": config.startBufferMs])
+        return .done(pictureMs: Int((pictureSec * 1_000).rounded()), trimMs: Int(trim), clamped: trim != wanted)
+    }
 
     func toggleSpeakerTest() {
         if isSpeakerTesting { cancelSpeakerTest() } else { startSpeakerTest() }

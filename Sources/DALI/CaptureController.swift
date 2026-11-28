@@ -60,6 +60,52 @@ final class CaptureController: @unchecked Sendable {
     private var callTimer: DispatchSourceTimer?
     var isCallDucked: Bool { lock.withLock { callDuck.isDucked } }
     private var desiredMasterGain = 1.0
+    /// Speaker test: while set, this replaces the captured audio on its way to the
+    /// pipe. nil returns to the real audio. Pacing and drift control are unaffected.
+    func setSpeakerTest(_ output: SpeakerTestSignal.Output?) {
+        lock.lock(); speakerTest = output; lock.unlock()
+    }
+    private var speakerTest: SpeakerTestSignal.Output?
+
+    /// The lip-sync check (see SyncProbe): while set, the probe replaces the room's
+    /// audio, and the host time its first frame went into the pipe is kept so the
+    /// microphone's recording can be timed against it.
+    private struct ActiveSyncProbe {
+        let id: Int
+        var writer = SyncProbe.Writer()
+        var emittedHost: UInt64?
+    }
+    private var syncProbe: ActiveSyncProbe?
+    private var nextSyncProbeID = 0
+
+    /// Starts the probe on the next audio written to the pipe. Returns its id.
+    func startSyncProbe() -> Int {
+        lock.lock(); defer { lock.unlock() }
+        nextSyncProbeID += 1
+        syncProbe = ActiveSyncProbe(id: nextSyncProbeID)
+        return nextSyncProbeID
+    }
+
+    /// Host time (mach units) at which probe `id` began, once it has.
+    func syncProbeEmission(_ id: Int) -> UInt64? {
+        lock.lock(); defer { lock.unlock() }
+        guard let probe = syncProbe, probe.id == id else { return nil }
+        return probe.emittedHost
+    }
+
+    /// The room's own audio again.
+    func stopSyncProbe() {
+        lock.lock(); syncProbe = nil; lock.unlock()
+    }
+
+    /// Caller holds the lock. Replaces outgoing PCM with the probe.
+    private func writeSyncProbeLocked(into data: inout Data) {
+        guard var probe = syncProbe else { return }
+        if probe.emittedHost == nil { probe.emittedHost = AudioGetCurrentHostTime() }
+        probe.writer.write(into: &data)
+        syncProbe = probe
+    }
+
     func setMasterGain(_ value: Double) {
         guard value.isFinite else { return }
         lock.lock(); desiredMasterGain = min(max(value, 0), 1); lock.unlock()
@@ -757,6 +803,7 @@ final class CaptureController: @unchecked Sendable {
         // Consumer-thread state (one thread per tap, so no locking needed).
         var conv: FormatConverter?
         var varispeed = Varispeed()          // smooth drift control
+        var testSignal = SpeakerTestSignal()
         tap.onBuffer = { [weak self] buffer in
             guard let self else { return }
             let conversionBegan = Self.monoNow()
@@ -786,8 +833,8 @@ final class CaptureController: @unchecked Sendable {
                 varispeed.reset()
                 conv?.fadeInNextBuffer()
             }
-            guard let converted = conv?.convert(buffer, masterGain: gain) else { return }
-            let sourceHasAudio = !(conv?.outputWasSilent ?? true)
+            guard var converted = conv?.convert(buffer, masterGain: gain) else { return }
+            var sourceHasAudio = !(conv?.outputWasSilent ?? true)
             // SMOOTH DRIFT CONTROL: resample by a hair to match the AirPlay speaker
             // clock. The ratio is set once/sec by the flight loop from OwnTone's
             // REAL drain + playback clock (setTargetRatio), so it tracks the actual
@@ -802,13 +849,19 @@ final class CaptureController: @unchecked Sendable {
                 self.appliedRatio = max(self.appliedRatio - maxStep, self.targetRatio)
             }
             let rawRatio = self.appliedRatio
+            let speakerTest = self.speakerTest
+            if self.syncProbe != nil { sourceHasAudio = true }   // the probe is not the source going quiet
             self.lock.unlock()
+            if let speakerTest {
+                testSignal.write(speakerTest, into: &converted)
+                sourceHasAudio = true        // the test is not the source going quiet
+            }
             // Bit-transparency deadzone (see driftDeadzone): sub-200 ppm
             // corrections snap to exactly 1.0 so the varispeed takes its
             // bit-perfect passthrough branch and never resamples audio it
             // cannot audibly improve.
             let ratio = abs(rawRatio - 1.0) < Self.driftDeadzone ? 1.0 : rawRatio
-            let data = varispeed.process(converted, ratio: ratio)
+            var data = varispeed.process(converted, ratio: ratio)
             guard !data.isEmpty else { return }
 
             self.beforePublish?()
@@ -845,6 +898,9 @@ final class CaptureController: @unchecked Sendable {
                 self.outputSquaresAcc += conv.outputMeanSquare * Double(count)
             }
             if rebuilt { self.convRebuilds += 1; self.converterInputRate = buffer.format.sampleRate }
+            // Written here, after the varispeed and under the publication lock, so
+            // the probe's start time is the moment its first frame entered the pipe.
+            if self.syncProbe != nil { self.writeSyncProbeLocked(into: &data) }
             // Publish under the token lock so rebuild/stop cannot occur between
             // validation and writing into a pipe shared by the replacement tap.
             pipe.write(data, generation: token)
@@ -1071,7 +1127,9 @@ final class CaptureController: @unchecked Sendable {
             // real-audio callback. This guarantees resumed PCM cannot overtake
             // an already-decided silence write.
             if fill > 0 {
-                let zeros = Data(count: fill)
+                var zeros = Data(count: fill)
+                // The probe also plays while nothing on the Mac is making sound.
+                if syncProbe != nil { writeSyncProbeLocked(into: &zeros) }
                 f.write(zeros)
                 let token = activeToken
                 if let flipped = recordSourceSilenceLocked(hasAudio: false,
@@ -1142,6 +1200,8 @@ final class CaptureController: @unchecked Sendable {
         lpSlow = 0; lpMid = 0; levelPrimed = false
         _level = 0; _bass = 0; _treble = 0; _mid = 0
         peakSinceRead = (0, 0, 0, 0)
+        speakerTest = nil
+        syncProbe = nil
         for i in _spectrum.indices { _spectrum[i] = 0; peakSpectrum[i] = 0 }
         spectrumAnalyzer.reset()
         lastLevelAt = nil; lastBeatWallAt = nil

@@ -19,8 +19,11 @@ public struct LatencyBacklogMonitor {
 
     /// Same line the timing controller uses for `backpressure`.
     public var thresholdSec = 0.25
-    /// A queue must stay above the line this long while the player plays.
-    public var sustainSec = 5.0
+    /// A queue must stay above the line this long while the player plays. A stuck
+    /// queue never drains by itself, so waiting longer only leaves the picture out
+    /// of step for longer. 3 s, down from 5 s on 28 Nov 2026: four weeks of flight
+    /// logs showed blips of 1 to 2 s that cleared on their own, and none of 3 s.
+    public var sustainSec = 3.0
     /// Minimum spacing between replays. Doubles each time a replay is followed
     /// by another backlog within `repeatWindowSec` of the cooldown ending, so a
     /// cause a replay cannot fix costs one dip, then progressively rarer ones.

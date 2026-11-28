@@ -13,6 +13,9 @@ import AudioToolbox
     func stopPlayback() { phase = .idle }
     func stopStream() { phase = .idle }
     func dlog(_ value: String) {}
+    final class Beacon { func publish(streaming: Bool, delaySeconds: Double?) {} }
+    let syncBeacon = Beacon()
+    var roomDelaySec = 0.9
 }
 extension Color {
     static let hairline = Color.gray
@@ -74,6 +77,14 @@ extension Font {
             try expect(s.exit(), "exit succeeds")
             try expect(h.current == h.previous, "exit restores original output")
             try expect(!s.isActive && d.string(forKey: previousKey) == nil, "successful restore clears state")
+        }
+        do {
+            // The browser must hear "not streaming" before the output moves, or the
+            // picture keeps the room delay for a moment after the sound went local.
+            let (h, d, s, name) = fixture(); defer { d.removePersistentDomain(forName: name) }
+            try expect(s.enter(beforeSwitch: { h.events.append("beacon") }) { h.events.append("stop") },
+                       "entry with a beacon succeeds")
+            try expect(h.events == ["beacon", "switch", "stop"], "beacon goes out before the output switch")
         }
         do {
             let (h, d, s, name) = fixture(); defer { d.removePersistentDomain(forName: name) }
