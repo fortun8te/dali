@@ -54,8 +54,8 @@
   // Bump BUILD on every edit. The service worker prints version + build on
   // startup (chrome://extensions -> "service worker"); that line is the only
   // way to confirm which code Chrome actually has loaded.
-  const VERSION = '1.2.6';
-  const BUILD = '2026-11-08.a';
+  const VERSION = '1.2.7';
+  const BUILD = '2026-11-28.a';
 
   if (typeof chrome === 'undefined' || !chrome.runtime) return;
 

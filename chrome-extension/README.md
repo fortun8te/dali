@@ -33,7 +33,7 @@ To check the active version, open the extension's **service worker** console
 from `chrome://extensions`. This release prints:
 
 ```
-[DALI Video Sync] v1.2.6  build 2026-11-08.a
+[DALI Video Sync] v1.2.7  build 2026-11-28.a
 ```
 
 ## Video support
@@ -57,6 +57,11 @@ YouTube's normal fullscreen player container can contain the overlay.
 The delay comes from DALI's stable configured buffer, engine scheduling
 allowance. Receiver-specific latency and network conditions can still
 need in-room calibration. A clean browser test cannot prove speaker lip-sync.
+
+## What changed in 1.2.7
+
+- The extension icon is now the DALI app icon, taken from the macOS app's
+  icon set, replacing the earlier generated tile.
 
 ## What changed in 1.2.5
 
